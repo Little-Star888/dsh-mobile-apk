@@ -220,6 +220,15 @@ BUILD SUCCESSFUL in 30s / 29s   （arm64 与 x86_64）
 
 即发布资产的**四个核心件（双 APK + 双快照 xz/sha256）已由这条已验证的命令实际产出**；插件 tgz 与 `MANIFEST.txt` 由 `build-release.ps1` 在发布时组装。
 
+## 实验特性说明（重要）
+
+本版包含两个**实验特性**，**默认不接入任何产品路径**，界面会如实显示其当前状态：
+
+- **侧边栏「AI 浏览器」**：引擎侧（面板、档位链路、状态端点）已就绪；但**壳侧原生宿主 `BrowserHost` 与 `browserCaps` 桥 op 尚未落地**，因此面板为只读事实视图，视口 / 身份下拉不可交互（界面自述「壳侧 BrowserHost 未接入」）。另受本机 WebView 110（< 116）限制，**UA-CH 不可用**、触摸能力无法完全伪装。
+- **「虚拟屏」**：仅完成 P0 能力探针。设备实测建屏矩阵通过（`PUBLIC|OWN_CONTENT_ONLY|SUPPORTS_TOUCH` 与私有屏对照可建；`TRUSTED` / `AUTO_MIRROR` / `ALWAYS_UNLOCKED` 显式 `SecurityException` 并回报被拒 flag 名）；但方案要求的**「六环节至少 5 绿」门槛未达成（当前 1/6：仅建屏绿）**，故**刻意不接入默认路径**，状态端点返回 HTTP 404（fail-closed），面板显示「虚拟屏不可用」。
+
+两者均为**实验特性，不保证可用性与兼容性**，后续版本按 `docs/IMPLEMENTATION-ACCEPTANCE-PLAN-2026-09-12.md` 的分阶段方案推进（浏览器 P1 需先落壳侧宿主与六条桥 op；虚拟屏需先补测其余五个环节并达「至少 5 绿」）。
+
 ## 真机待验（arm64，发布前补充门禁）
 
 - 返回手势全面屏路径、A1 存量升级路径、通知锁屏批准与脱敏、OEM 折叠态动作可见性。
