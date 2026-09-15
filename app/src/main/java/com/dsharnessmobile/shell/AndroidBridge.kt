@@ -42,27 +42,43 @@ class AndroidBridge(
   /** 0.13.7：系统「打开方式」选择器（MT 管理器 / 系统文件管理…）。返回 JSON {ok, reason?}。 */
   private val onOpenPathChooser: (path: String, mode: String?) -> String =
     { _, _ -> """{"ok":false,"reason":"bridge not wired"}""" },
-  /** 0.13.0 F1.7：ADB shell 执行原语（授权时执行；未授权失败关闭返回引导 JSON）。 */
-  private val onAdbShell: (cmd: String) -> String = { _ -> "" },
-  /** 0.13.0 F1.7：授权状态 JSON（三道人门状态视图，供设置页/授权状态探活）。 */
-  private val onGetAdbState: () -> String = { "{}" },
-  /** 0.13.0 F1.7：应用内「允许访问」开关（第二道人门；默认关闭；回收即失效）。 */
-  private val onSetAdbAllow: (enable: Boolean) -> Unit = {},
-  /** 0.13.0 F1.7：门3 配对码（6 位）；仅原生侧可写授权（被提权方自改授权被禁止——Shizuku 对照）。
-   *  0.14：真实握手——pairPort/connectPort 取自系统「无线调试」弹窗（码值只进 adb argv，绝不出壳）。
-   *  F3（2026-08-27）：返回结构化 JSON 文本 {ok, reason, message}，替代 Boolean。 */
-  private val onSetAdbPair: (code: String, pairPort: Int, connectPort: Int) -> String = { _, _, _ -> """{"ok":false,"reason":"unknown","message":null}""" },
-  /** 0.13.0 F1.7：回收配对（R6：显式回收 + 审计）。 */
-  private val onRevokeAdbPair: () -> Unit = {},
-  /** 0.13.0（issue #80；NSD 替换盲扫）：自动发现无线调试端口——返回结构
-   *  {\"pair\": <配对端口|null>, \"connect\": <连接端口|null>, \"candidates\": [...] }，
-   *  与壳 AdbState.discoverPorts 同形状（桥默认值同为完整结构，不再返回 "[]" 造成两端不一致）。
-   *  0.14：Shizuku 探活重设计与豁免升级。 */
-  private val onDiscoverAdbPorts: () -> String = { """{"pair":null,"connect":null,"candidates":[]}""" },
   /** 0.13.2 W7：悬浮球开关态（持久化，OverlayController）。 */
   private val onGetOverlayEnabled: () -> Boolean = { false },
   /** 0.13.2 W7：悬浮球开关（未授 overlay 权限时由控制器发起系统授权引导）。返回是否已启动。 */
   private val onSetOverlayEnabled: (Boolean) -> Boolean = { _ -> false },
+  /** User-owned scope for model access to real/virtual Android screens. */
+  private val onGetScreenScope: () -> String = { "virtual-only" },
+  private val onSetScreenScope: (String) -> String = { "virtual-only" },
+  /** Trusted UI-only session cwd for an external attachment draft; never returns a source file path. */
+  private val onIncomingWorkspacePath: () -> String = { "" },
+  /** BrowserHost workbench state and commands; callable only by trusted DSH UI. */
+  private val onBrowserHostStatus: () -> String = { """{"ok":false,"reason":"browser-host-not-wired"}""" },
+  private val onBrowserHostShow: (String?) -> String = { _ -> """{"ok":false,"reason":"browser-host-not-wired"}""" },
+  private val onBrowserHostHide: () -> String = { """{"ok":false,"reason":"browser-host-not-wired"}""" },
+  private val onBrowserHostReload: () -> String = { """{"ok":false,"reason":"browser-host-not-wired"}""" },
+  private val onBrowserHostBounds: (String) -> String = { _ -> """{"ok":false,"reason":"browser-host-not-wired"}""" },
+  private val onBrowserHostViewport: (String) -> String = { _ -> """{"ok":false,"reason":"browser-host-not-wired"}""" },
+  /** 0.14.0：关闭即销毁当前页（工作台对象保留，可再次打开）。 */
+  private val onBrowserHostClose: () -> String = { """{"ok":false,"reason":"browser-host-not-wired"}""" },
+  /** 0.14.0：身份（PC / 手机）切换，载荷为 {profile, ua}。 */
+  private val onBrowserHostIdentity: (String) -> String = { _ -> """{"ok":false,"reason":"browser-host-not-wired"}""" },
+  /** VirtualDisplay lifecycle is owned by the trusted Files-sidebar panel; no generic shell is exposed. */
+  private val onVdisplayStatus: () -> String = { """{"ok":false,"code":"vdisplay-not-wired"}""" },
+  private val onVdisplayCreate: () -> String = { """{"ok":false,"code":"vdisplay-not-wired"}""" },
+  private val onVdisplayDestroy: () -> String = { """{"ok":false,"code":"vdisplay-not-wired"}""" },
+  private val onVdisplayLaunchSettingsProbe: () -> String = { """{"ok":false,"code":"vdisplay-not-wired"}""" },
+  private val onVdisplayBackProbe: () -> String = { """{"ok":false,"code":"vdisplay-not-wired"}""" },
+  private val onVdisplayBounds: (String) -> String = { _ -> """{"ok":false,"code":"vdisplay-not-wired"}""" },
+  /** Controller-owned presentation target selection for the realtime screen registry. */
+  private val onVdisplaySelect: (String) -> String = { _ -> """{"ok":false,"code":"vdisplay-not-wired"}""" },
+  /** 0.14.0 设置页「手机控制」：虚拟屏分辨率档位（0.5 / 0.75 / 1.0）。 */
+  private val onGetVdisplayScale: () -> Double = { 0.75 },
+  private val onSetVdisplayScale: (Double) -> Double = { value -> value },
+  /** 0.14.0 设置页「手机控制」：app 退后台自动浮窗开关。 */
+  private val onGetVdisplayFloat: () -> Boolean = { true },
+  private val onSetVdisplayFloat: (Boolean) -> Boolean = { enable -> enable },
+  /** 0.14.0 设置页「手机控制」：强制销毁全部虚拟屏（用户三连点确认；无视会话归属）。 */
+  private val onForceDestroyVdisplay: () -> String = { """{"ok":false,"code":"vdisplay-not-wired"}""" },
   /** 0.13.5 W4：无障碍控制通道状态 JSON {enabled, label, restrictedHint}。 */
   private val onA11yStatus: () -> String = { """{"enabled":false}""" },
   /** 0.13.5 W4：跳系统无障碍设置页（用户手动开启「DSH 设备控制」）。 */
@@ -211,42 +227,6 @@ class AndroidBridge(
   @JavascriptInterface
   fun openNativePath(path: String): Boolean = onOpenNativePath(path)
 
-  /** ADB shell 执行原语（F1.7）：返回 JSON {ok, stdout?, stderr?, guidance?}。
-   *  未授权/门控不满足 → fail-closed（绝不静默执行）。 */
-  @JavascriptInterface
-  fun adbShell(cmd: String): String = onAdbShell(cmd)
-
-  /** 授权状态视图（F1.7/F2.9 授权探活）：JSON {fullAccess, allowSwitch, paired, wirelessDebugOn, message}。 */
-  @JavascriptInterface
-  fun getAdbState(): String = onGetAdbState()
-
-  /** 应用内「允许访问」开关（第二道人门；默认关闭；关闭即通道失败关闭）。 */
-  @JavascriptInterface
-  fun setAdbAllow(enable: Boolean) {
-    onSetAdbAllow(enable)
-  }
-
-  /**
-   * 门3 配对码：六位数字 + 无线调试弹窗的「配对端口/连接端口」；
-   * AdbState 运行真实 adb pair 握手（码值不入审计，只记长度）。
-   * F3 结构化返回（JSON 文本 {ok, reason, message}）：前端按机器可读 reason 分流文案
-   * （window-closed/protocol-fault/server-not-ready/handshake-timeout…），不再笼统布尔。
-   */
-  @JavascriptInterface
-  fun setAdbPair(code: String, pairPort: Int, connectPort: Int): String =
-    onSetAdbPair(code, pairPort, connectPort)
-
-  /** 回收配对（R6 显式回收；配套审计）。 */
-  @JavascriptInterface
-  fun revokeAdbPair() {
-    onRevokeAdbPair()
-  }
-
-  /** 自动发现无线调试端口（issue #80）：返回配对端口候选 JSONArray（顺序端序）。
-   *  耗时为原生 TCP 盲扫（毫秒/端口）；无线调试未开时返回 []。 */
-  @JavascriptInterface
-  fun discoverAdbPorts(): String = onDiscoverAdbPorts()
-
   /** 悬浮球开关态（持久化；开发者选项 → 悬浮球）。 */
   @JavascriptInterface
   fun getOverlayEnabled(): Boolean = onGetOverlayEnabled()
@@ -254,6 +234,102 @@ class AndroidBridge(
   /** 悬浮球开关（控制器负责权限引导）；返回当前是否已启动。 */
   @JavascriptInterface
   fun setOverlayEnabled(enable: Boolean): Boolean = onSetOverlayEnabled(enable)
+
+  /** User-owned screen-access scope. Model tools never call this setter. */
+  @JavascriptInterface
+  fun getScreenScope(): String = onGetScreenScope()
+
+  /** Persist one normalized screen scope selected from the DSH settings surface. */
+  @JavascriptInterface
+  fun setScreenScope(scope: String): String = onSetScreenScope(scope)
+
+  /** CWD for the external-open blank session; source file names and paths remain queue-private. */
+  @JavascriptInterface
+  fun incomingWorkspacePath(): String = onIncomingWorkspacePath()
+
+  /** BrowserHost current lifecycle/navigation state for the Files-sidebar workbench. */
+  @JavascriptInterface
+  fun browserHostStatus(): String = onBrowserHostStatus()
+
+  /** Lazily create/show BrowserHost and optionally navigate to one http(s) URL. */
+  @JavascriptInterface
+  fun browserHostShow(url: String?): String = onBrowserHostShow(url)
+
+  /**
+   * review C12/C24（2026-09-14 设备实测）：TS 类型面把 url 声明为可选（`browserHostShow?: (url?)`），
+   * 而 WebView 的 JS 桥按**实参个数**匹配 Java 方法——只有单参重载时零参调用抛 `Error: Method not found`
+   * （真机/模拟器实测复现）。这里补零参重载，与显式 `null` 完全同义（再次显示已创建的工作台）。
+   */
+  @JavascriptInterface
+  fun browserHostShow(): String = onBrowserHostShow(null)
+
+  /** Hide BrowserHost while retaining the current page in its one-tab workbench. */
+  @JavascriptInterface
+  fun browserHostHide(): String = onBrowserHostHide()
+
+  /** Reload the BrowserHost page. */
+  @JavascriptInterface
+  fun browserHostReload(): String = onBrowserHostReload()
+
+  /** Update BrowserHost overlay bounds from the trusted DSH sidebar stage. */
+  @JavascriptInterface
+  fun browserHostBounds(bounds: String): String = onBrowserHostBounds(bounds)
+
+  /** Select a letterboxed BrowserHost viewport without transforming touch coordinates. */
+  @JavascriptInterface
+  fun browserHostViewport(viewport: String): String = onBrowserHostViewport(viewport)
+
+  /** Close (destroy) the BrowserHost page; the workbench can be opened fresh afterwards. */
+  @JavascriptInterface
+  fun browserHostClose(): String = onBrowserHostClose()
+
+  /** Switch the BrowserHost identity profile (PC / mobile); payload is {profile, ua}. */
+  @JavascriptInterface
+  fun browserHostIdentity(payload: String): String = onBrowserHostIdentity(payload)
+
+  /** Virtual-display state/actions for the trusted Files-sidebar panel. */
+  @JavascriptInterface
+  fun vdisplayStatus(): String = onVdisplayStatus()
+
+  @JavascriptInterface
+  fun vdisplayCreate(): String = onVdisplayCreate()
+
+  @JavascriptInterface
+  fun vdisplayDestroy(): String = onVdisplayDestroy()
+
+  /** Fixed Android Settings launch used only to prove a shell-routed third-party launch. */
+  @JavascriptInterface
+  fun vdisplayLaunchSettingsProbe(): String = onVdisplayLaunchSettingsProbe()
+
+  /** Fixed display-scoped back key used only to prove Shizuku input routing. */
+  @JavascriptInterface
+  fun vdisplayBackProbe(): String = onVdisplayBackProbe()
+
+  /** Trusted virtual-screen viewer geometry from the Files-sidebar stage. */
+  @JavascriptInterface
+  fun vdisplayBounds(bounds: String): String = onVdisplayBounds(bounds)
+
+  /** Select the controller-owned presentation target; real screen rejects with a structured code. */
+  @JavascriptInterface
+  fun vdisplaySelect(alias: String): String = onVdisplaySelect(alias)
+
+  /** 0.14.0：虚拟屏分辨率档位读写（设置页「手机控制」）。 */
+  @JavascriptInterface
+  fun getVdisplayScale(): Double = onGetVdisplayScale()
+
+  @JavascriptInterface
+  fun setVdisplayScale(value: Double): Double = onSetVdisplayScale(value)
+
+  /** 0.14.0：退后台自动浮窗开关（设置页「手机控制」）。 */
+  @JavascriptInterface
+  fun getVdisplayFloatEnabled(): Boolean = onGetVdisplayFloat()
+
+  @JavascriptInterface
+  fun setVdisplayFloatEnabled(enable: Boolean): Boolean = onSetVdisplayFloat(enable)
+
+  /** 0.14.0：强制销毁全部虚拟屏（设置页「手机控制」三连点确认后调用）。 */
+  @JavascriptInterface
+  fun forceDestroyVdisplay(): String = onForceDestroyVdisplay()
 
   /** 0.13.5 W4：无障碍控制通道状态（设置页展示 + 引导）。 */
   @JavascriptInterface

@@ -9,7 +9,7 @@
 -Fast dev 循环传 1 —— 743MB tar 上 preset9≈380s / preset1≈75s / xz -T0 -6≈48s 实测，2026-09-05）。
 
 用法：
-  python inject-all.py <snapshot.tar.xz> <out.tar.xz> <authoritative.patch.yml> --dsh-android <dir>... --external <dir>... [--all-profiles]
+  python inject-all.py <snapshot.tar.xz> <out.tar.xz> <authoritative.patch.yml> --dsh-android <dir>... --external <dir>... [--all-profiles] [--combo-cache-delta <dir>]
 字节级 tar 流替换，保留 symlink 元数据（Windows bsdtar 解包 symlink 需特权——tar 流处理不物化）。
 
 装配 profile 覆盖（0.13.8-b ST-05 / F-ENV-02）：权威 patch 与注入包默认覆盖**全部**真实装配
@@ -39,7 +39,7 @@ def parse_args(argv):
         print(__doc__)
         sys.exit(2)
     src, dst, patch_src = argv[1], argv[2], argv[3]
-    dsh_dirs, ext_dirs, all_profiles = [], [], False
+    dsh_dirs, ext_dirs, all_profiles, combo_cache_delta = [], [], False, None
     i = 4
     while i < len(argv):
         if argv[i] == "--dsh-android":
@@ -52,9 +52,28 @@ def parse_args(argv):
                 ext_dirs.append(argv[i]); i += 1
         elif argv[i] == "--all-profiles":
             all_profiles = True; i += 1
+        elif argv[i] == "--combo-cache-delta":
+            i += 1
+            if i >= len(argv):
+                print("--combo-cache-delta 缺目录参数"); sys.exit(2)
+            combo_cache_delta = argv[i]; i += 1
         else:
             print("未知参数: " + argv[i]); sys.exit(2)
-    return src, dst, patch_src, dsh_dirs, ext_dirs, all_profiles
+    return src, dst, patch_src, dsh_dirs, ext_dirs, all_profiles, combo_cache_delta
+
+
+def build_combo_cache_delta(delta_dir):
+    """注入段 combo 缓存增量（A3）：{相对文件名 -> bytes}；目录缺席/为空返回 {}。"""
+    out = {}
+    if not delta_dir or not os.path.isdir(delta_dir):
+        return out
+    for root, _dirs, fnames in os.walk(delta_dir):
+        for fn in fnames:
+            full = os.path.join(root, fn)
+            rel = os.path.relpath(full, delta_dir).replace("\\", "/")
+            with open(full, "rb") as f:
+                out[rel] = f.read()
+    return out
 
 
 def build_dsh_replacements(pkg_dirs):
@@ -148,12 +167,13 @@ def match_ext(name, ext_names):
 
 
 def main():
-    src, dst, patch_src, dsh_dirs, ext_dirs, all_profiles = parse_args(sys.argv)
+    src, dst, patch_src, dsh_dirs, ext_dirs, all_profiles, combo_cache_delta = parse_args(sys.argv)
     preset = int(os.environ.get("DSH_INJECT_PRESET", "9"))
     with open(patch_src, "rb") as f:
         patch_bytes = f.read()
     dsh_repl = build_dsh_replacements(dsh_dirs)
     ext_repl = build_ext_replacements(ext_dirs)
+    combo_delta = build_combo_cache_delta(combo_cache_delta)
     dsh_names = set(dsh_repl.keys())
     ext_names = set(ext_repl.keys())
     # ST-05：权威 patch 与注入包的覆盖面 = 全部真实装配 profile（默认行为，不再只写 web）。
@@ -333,6 +353,16 @@ def main():
                     push(data, base + "/" + rel, now)
                     added_files += 1
                 print(f"  [add] {prof}: {pkg} ({len(ext_repl[pkg])} files)")
+
+        # combo 缓存注入段（A3）：注入的 client.js 由构建链预计算为 client-combos.inject.json +
+        # <sha256>.map，这里作为新 tar 条目合入出厂 web profile 缓存目录（运行时按 sha256 查表，
+        # 两份清单按序合并）。固定 mtime（now）保持可复现构建。
+        if combo_delta:
+            base = "home/.dsh/profiles/web/.combo-cache"
+            for rel in sorted(combo_delta):
+                ensure_parent_dirs(base + "/" + rel, now)
+                push(combo_delta[rel], base + "/" + rel, now)
+            print(f"  [combo-cache] injected: {len(combo_delta)} file(s) -> {base}/")
 
     with lzma.open(dst, "wb", preset=preset) as f:
         f.write(outbuf.getvalue())

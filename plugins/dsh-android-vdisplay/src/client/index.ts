@@ -2,28 +2,21 @@
  * 浏览器半：把「虚拟屏」注册为**右侧栏的同级 tab 类型**（与「工作区文件」同级），并把状态面板
  * 接到宿主只读端点 `GET /api/android/vdisplay/status` 的**真实返回**（fail-closed 四态）。
  *
+ * 0.14.0 面板极简（用户 2026-09-15）：只保留「选择虚拟屏编号」列表 + 原生画面工位；
+ * 模型未建屏时显示「暂无虚拟屏」；被其他会话占用时显示「由会话 X 使用中」。
+ * 建屏只由模型驱动（android_vdisplay_create/destroy），面板不提供创建/销毁按钮。
+ *
  * 依据（用户约束 U-1，见 docs/0.14.0-preview-USER-CONSTRAINTS.md）：
- * 入口必须落在该面板上，不得另起与面板无关的入口。上游「工作区文件」= 右侧栏 tab 类型
- * （dsh/packages/client/ui-sidebar-files/src/client/locales.ts:24 的 guide.title），
- * 注册面 = 两阶段（dsh/packages/client/ui-sidebar-files/src/client/index.ts:37-56）：
- *   ① ctx.sidebarRightTabs.register({ id, kind, priority, title, guide? })
- *   ② ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({ name, key }, Body))
- *      以及可选的 sidebar.right.pane.tab.title（chip 标题）。
+ * 入口必须落在该面板上，不得另起与面板无关的入口。上游「工作区文件」= 右侧栏 tab 类型，
+ * 注册面 = 两阶段：① ctx.sidebarRightTabs.register({...})；② slots.inject + register。
  *
- * 类型来源说明（临时，需在引擎暴露上游客户端类型后删除）：
- * 本插件当前没有 @deepseek-ai/dsh-client-ui-sidebar-right 的编译期类型（该包不在 devDependencies 内），
- * 因此这里用结构化本地类型 + SlotMap 本地 augmentation 表达同一契约；kind/scope 取自上游声明
- * （ui-sidebar-right/src/client/index.ts:158-159：{ kind: 'keyed', scope: 'session' }）。
- * 待引擎 overlay 提供该包类型后，必须改为
- * `import type { SidebarRightTabDefinition } from '@deepseek-ai/dsh-client-ui-sidebar-right/client'`
- * 并删除本地 augmentation（否则与上游声明冲突）。
- *
- * 数据面纪律：状态经只读 GET（与 ADB 授权块同风格）；本 Tab **不经 window.androidBridge 写面**、
- * 不合成像素（源文档 §9.2）。状态源不可达 = blocked（fail-closed，不假装可用）。
+ * 数据面纪律：状态经只读 GET（与 ADB 授权块同风格）；本 Tab **不经 window.androidBridge 写面**
+ * 之外的控制面、不合成像素（源文档 §9.2）。状态源不可达 = blocked（fail-closed，不假装可用）。
  */
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
-import { createElement, useEffect, useState, type ReactElement } from 'react'
+import { createElement, useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
 import {
+  mapStatusPayload,
   readPanelState,
   VD_OPS,
   VD_STATUS_UNAVAILABLE,
@@ -58,57 +51,158 @@ interface TabDefinition {
 interface TabRegistry {
   register(definition: TabDefinition): () => void
 }
-
-/** 必需服务：slots（tab body/title 两个 seat）。sidebarRightTabs 经 ctx.get 可选读取。 */
-export const inject = ['slots'] as const
-
-/**
- * 读一次状态端点并映射为四态。任何失败（网络、非 2xx、非法 JSON）都是 blocked，
- * 且带稳定错误码 `vdisplay-status-unavailable`（面板据此显示"为什么不可用"）。
- * @param fetchImpl - 可注入的 fetch（测试用；缺省用全局 fetch）。
- * @returns 面板状态。
- */
-/** 浏览器 fetch 适配（状态读取逻辑在共享模块 status.ts，可离线验证）。 */
-const browserFetch: FetchLike = (path, init) => fetch(path, init)
-
-const STATE_LABEL: Record<VdPanelState['state'], string> = {
-  disabled: '已关闭',
-  blocked: '不可用',
-  ready: '就绪',
-  active: '已激活',
+interface SidebarRightController {
+  openTab(kind: string, options?: { revealIfOpened?: boolean }): void
 }
 
-/** 面板主体：四态状态位 + 错误码 + 引导文案 + op 表 + 手动刷新。 */
-function VdPanel(): ReactElement {
+/** Required services: slots and the sidebar controller used to reveal an active viewer. */
+export const inject = ['slots', 'sidebarRight'] as const
+
+/** Browser fallback for desktop/older shells. The native bridge is authoritative on Android so a
+ * missing optional host route cannot turn a working local capability into a false HTTP-404 error. */
+const browserFetch: FetchLike = (path, init) => fetch(path, init)
+
+const VD_STYLE = `
+.dsh-vdisplay-panel{display:flex;flex-direction:column;gap:8px;height:100%;min-height:0;padding:8px;box-sizing:border-box;color:var(--dsw-alias-label-primary)}
+.dsh-vdisplay-empty{margin:0;padding:10px;font:var(--dsw-font-markdown-small);color:var(--dsw-alias-label-secondary)}
+.dsh-vdisplay-list{display:flex;flex-wrap:wrap;gap:6px}
+.dsh-vdisplay-item{min-width:36px;min-height:32px;padding:0 10px;border:1px solid var(--dsw-alias-border-l4);border-radius:8px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);font:var(--dsw-font-markdown-small)}
+.dsh-vdisplay-item-selected{border-color:var(--dsw-specific-primary);color:var(--dsw-specific-primary)}
+.dsh-vdisplay-item:disabled{opacity:.45}
+.dsh-vdisplay-stage{position:relative;flex:1 1 180px;min-height:180px;overflow:hidden;border-radius:12px;background:var(--dsw-alias-bg-layer-2)}
+`
+
+type NativeVdisplayBridge = {
+  vdisplayStatus?: () => string
+  vdisplayCreate?: () => string
+  vdisplayDestroy?: () => string
+  vdisplayLaunchSettingsProbe?: () => string
+  vdisplayBackProbe?: () => string
+  vdisplayBounds?: (bounds: string) => string
+  vdisplaySelect?: (alias: string) => string
+}
+
+/** Stable viewer identity for the Files-sidebar stage (independent bounds record + arbitration). */
+const VIEWER_ID = 'files-sidebar'
+
+function nativeBridge(): NativeVdisplayBridge | undefined {
+  return (window as Window & { androidBridge?: NativeVdisplayBridge }).androidBridge
+}
+
+function decodeNative(method: keyof NativeVdisplayBridge): VdPanelState | undefined {
+  try {
+    const bridge = nativeBridge()
+    if (bridge === undefined) return undefined
+    const candidate = bridge[method]
+    if (typeof candidate !== 'function') return undefined
+    // Java 桥方法必须以桥对象为接收者调用：抽出函数再裸调会抛
+    // 「Java bridge method can't be invoked on a non-injected object」。
+    const raw = (candidate as () => string).call(bridge)
+    return typeof raw === 'string' ? mapStatusPayload(JSON.parse(raw)) : undefined
+  } catch {
+    return undefined
+  }
+}
+
+async function pullPanelState(): Promise<VdPanelState> {
+  // `vdisplayStatus` is a local, trusted-shell state read. It is the source of truth for the
+  // lifecycle controls; HTTP remains a desktop/legacy fallback only.
+  return decodeNative('vdisplayStatus') ?? readPanelState(browserFetch)
+}
+
+/**
+ * Panel: 编号列表（选择查看哪块虚拟屏）+ 原生画面工位。
+ * 空态「暂无虚拟屏」；占用态「由会话 X 使用中」（不渲染任何操作面）。
+ */
+function VdPanel(props: { sessionId?: unknown }): ReactElement {
+  const sessionKey = typeof props.sessionId === 'string' ? props.sessionId : ''
+  const stageRef = useRef<HTMLDivElement>(null)
   const [snap, setSnap] = useState<VdPanelState>({
-    state: 'blocked', code: VD_STATUS_UNAVAILABLE, detail: '正在读取状态…', ops: [...VD_OPS],
+    state: 'blocked', code: VD_STATUS_UNAVAILABLE, detail: '正在读取状态…', ops: [...VD_OPS], screens: [], viewers: [],
   })
   const [tick, setTick] = useState(0)
+  const occupied = snap.ownerSessionId !== undefined && sessionKey !== '' && snap.ownerSessionId !== sessionKey
+  const occupiedRef = useRef(false)
+
+  const publishBounds = useCallback(() => {
+    const stage = stageRef.current
+    if (stage === null) return
+    const rect = stage.getBoundingClientRect()
+    try {
+      nativeBridge()?.vdisplayBounds?.(JSON.stringify({
+        left: rect.left, top: rect.top, width: rect.width, height: rect.height,
+        viewportWidth: window.innerWidth, viewportHeight: window.innerHeight,
+        visible: !occupiedRef.current && snap.state === 'active' && rect.width > 1 && rect.height > 1 &&
+          getComputedStyle(stage).display !== 'none',
+        viewerId: VIEWER_ID,
+        target: snap.selected,
+      }))
+    } catch {
+      /* old/desktop shells have no native viewer */
+    }
+  }, [snap.selected, snap.state])
+
+  useEffect(() => {
+    publishBounds()
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(publishBounds)
+    if (stageRef.current !== null) observer?.observe(stageRef.current)
+    window.addEventListener('resize', publishBounds)
+    return () => {
+      observer?.disconnect()
+      window.removeEventListener('resize', publishBounds)
+      try { nativeBridge()?.vdisplayBounds?.(JSON.stringify({ visible: false, viewerId: VIEWER_ID })) } catch { /* host gone */ }
+    }
+  }, [publishBounds])
+
+  useEffect(() => { publishBounds() }, [publishBounds, snap.state])
+
+  // 占用态变化立即重发 bounds（原生层让位）。
+  useEffect(() => {
+    occupiedRef.current = occupied
+    publishBounds()
+  }, [occupied, publishBounds])
 
   useEffect(() => {
     let alive = true
-    const pull = () => { void readPanelState(browserFetch).then((s) => { if (alive) setSnap(s) }) }
+    const pull = () => { void pullPanelState().then((s) => { if (alive) setSnap(s) }) }
     pull()
-    const timer = setInterval(pull, VD_POLL_MS)
+    const timer = setInterval(pull, 1000)
     return () => { alive = false; clearInterval(timer) }
   }, [tick])
 
+  const selectTarget = (alias: string) => {
+    try {
+      const raw = nativeBridge()?.vdisplaySelect?.(alias)
+      const next = typeof raw === 'string' ? mapStatusPayload(JSON.parse(raw)) : undefined
+      if (next !== undefined) setSnap(next)
+      else setTick((n) => n + 1)
+    } catch {
+      setTick((n) => n + 1)
+    }
+  }
+
+  const screens = snap.screens.filter((screen) => screen.kind === 'virtual')
+
+  if (occupied) {
+    return createElement('div', { className: 'dsh-vdisplay-panel', 'data-state': snap.state },
+      createElement('p', { className: 'dsh-vdisplay-empty' },
+        '由会话 ' + String(snap.ownerSessionId ?? '').slice(-6) + ' 使用中'))
+  }
+
   return createElement('div', { className: 'dsh-vdisplay-panel', 'data-state': snap.state },
-    createElement('div', { className: 'dsh-vdisplay-row' },
-      createElement('strong', null, '虚拟屏'),
-      createElement('span', { className: 'dsh-vdisplay-state' }, STATE_LABEL[snap.state])),
-    createElement('div', { className: 'dsh-vdisplay-code' }, snap.code),
-    createElement('div', { className: 'dsh-vdisplay-detail' }, snap.detail),
-    snap.displayId === undefined
-      ? null
-      : createElement('div', { className: 'dsh-vdisplay-display' }, '虚拟屏 displayId = ' + snap.displayId),
-    createElement('div', { className: 'dsh-vdisplay-ops' },
-      'op 面（未登记，仅声明）：' + (snap.ops.length > 0 ? snap.ops.join(' / ') : VD_OPS.join(' / '))),
-    createElement('button', {
-      type: 'button',
-      className: 'dsh-vdisplay-refresh',
-      onClick: () => setTick((n) => n + 1),
-    }, '刷新状态'))
+    screens.length === 0
+      ? createElement('p', { className: 'dsh-vdisplay-empty' }, '暂无虚拟屏')
+      : createElement('div', { className: 'dsh-vdisplay-list' },
+        screens.map((screen) => createElement('button', {
+          key: screen.alias,
+          type: 'button',
+          className: 'dsh-vdisplay-item' + (screen.alias === snap.selected ? ' dsh-vdisplay-item-selected' : ''),
+          'data-alias': screen.alias,
+          disabled: !screen.selectable || screen.alias === snap.selected,
+          onClick: () => selectTarget(screen.alias),
+        }, String(screen.alias.replace('virtual-', ''))))),
+    createElement('div', { ref: stageRef, className: 'dsh-vdisplay-stage', 'data-testid': 'vdisplay-stage' }),
+  )
 }
 
 /** chip 标题：与「工作区文件」同类。 */
@@ -122,6 +216,43 @@ function VdTitle(): ReactElement {
  * @param ctx - 客户端根上下文。
  */
 export function apply(ctx: ClientContext): void {
+  ctx.effect(() => {
+    const style = document.createElement('style')
+    style.setAttribute('data-plugin', 'dsh-android-vdisplay')
+    style.textContent = VD_STYLE
+    document.head.appendChild(style)
+    return () => { style.remove() }
+  }, 'dsh-android-vdisplay: styles')
+
+  ctx.effect(() => {
+    const sidebar = ctx.get('sidebarRight') as SidebarRightController | undefined
+    if (sidebar === undefined) return () => {}
+    // 只在一次「激活」周期内揭示一次：openTab 抛错（会话尚未挂载）时不得吞掉重试机会——
+    // 只有舞台真的挂上（[data-testid=vdisplay-stage] 在场）才置 revealed；显示被销毁后复位。
+    //
+    // 0.14.0 设备实锤（MuMu，verify-vdisplay-viewer 步骤 C）：`openTab(..., {revealIfOpened:true})`
+    // 的 revealIfOpened 语义是「右侧栏**已展开**时才切换过去」——侧栏关着时该调用是静默 no-op，
+    // 于是建屏后舞台永不挂载（前一轮「自动露出失效」的真因）。修法 = 先确保右侧栏展开：
+    // 页内原生开关（会话头部 corner 按钮）在闭态下点一次，下一拍 openTab 再切到本 Tab。
+    const reveal = () => {
+      const active = decodeNative('vdisplayStatus')?.state === 'active'
+      if (!active) return
+      if (document.querySelector('[data-testid=vdisplay-stage]') !== null) return
+      try {
+        if (document.querySelector('[data-sidebar-right-open]') === null) {
+          const toggle = document.querySelector('[data-conversation-header-corner] button') as HTMLElement | null
+          toggle?.click()
+        }
+        sidebar.openTab(VD_TAB_KIND, { revealIfOpened: true })
+      } catch {
+        /* 侧栏未挂载：下一拍重试 */
+      }
+    }
+    reveal()
+    const timer = window.setInterval(reveal, 800)
+    return () => { window.clearInterval(timer) }
+  }, 'dsh-android-vdisplay: automatically reveal active viewer')
+
   ctx.effect(() => {
     const tabs = ctx.get('sidebarRightTabs') as TabRegistry | undefined
     if (!tabs) {

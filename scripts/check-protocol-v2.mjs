@@ -75,5 +75,8 @@ if (run.status !== 0) {
   console.error(out.slice(-4000))
   fail(`协议 V2 测试未通过（${summary || 'no summary'}）`)
 }
+// review §2.3：node --test 全 .skip 时 exit 0——必须要求有效通过数 > 0（全 skip = 假绿）。
+const passN = Number(/^ℹ pass (\d+)/m.exec(out)?.[1] ?? '0')
+if (passN <= 0) fail(`协议 V2 测试未产生有效通过数（全 skip = 假绿，pass=${passN}）`)
 console.log('PASS  协议 V2 往返 + 体积门禁' + (summary ? `（${summary}）` : ''))
 console.log('CHECK-PROTOCOL-V2 PASSED')

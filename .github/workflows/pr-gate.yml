@@ -29,16 +29,21 @@ jobs:
           echo "无敏感信息 ✓"
       # 镜像对端（协调仓 = 补丁权威源）：FX-208.2 去掉自包含比对开关——它跳过跨仓比对，
       # 单边演进的补丁 PR 会照绿。改为显式检出协调仓并做逐字节跨仓比对。
+      # review C7：协调仓是私有库，必须用 PAT（repo 读权限）——默认 GITHUB_TOKEN 无跨仓读权限，
+      # 该步骤会 404 且整个 job 在检出即失败（14 道门禁从未真正执行）。secret 名 = COORD_REPO_TOKEN。
+      # 检出步骤禁止 continue-on-error（软化 = 防线静默消失）；--require-peer 让对端缺席直接判红。
       - uses: actions/checkout@v4
         with:
           repository: kelai141/dsh-mobile
           path: peer-coord
+          token: ${{ secrets.COORD_REPO_TOKEN }}
       # 补丁镜像面跨仓一致性 + 引擎树补丁行为回归
       - name: 补丁一致性门禁与回归
         run: |
-          node scripts/check-patch-mirror.mjs --peer peer-coord
+          node scripts/check-patch-mirror.mjs --peer peer-coord --require-peer
           node scripts/patches/tests/spj-migration-link-f5.test.mjs
           node scripts/patches/tests/atomic-stale-lock.test.mjs
+          node scripts/patches/tests/publish-exclusive-reclaim.test.mjs
       # 控制协议 V2（0.13.8 批 F）：引擎侧编解码的往返等价与体积基线（壳侧 Kotlin 一侧由
       # 本仓单测 + 跨语言往返门禁另守）。
       - name: 协议 V2 往返与体积门禁
@@ -57,6 +62,7 @@ jobs:
         run: |
           node scripts/check-manifest-hardening.mjs
           node scripts/check-bounded-io.mjs
+          node scripts/check-api-route-auth.mjs
       # 快照指纹对账（ST-04）：净检出下 tar 被 .gitignore 忽略 → SKIP 计数（构建链以 --require 严格跑）
       - name: 快照指纹对账门禁
         run: node scripts/check-snapshot-fingerprint.mjs

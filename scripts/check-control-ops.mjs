@@ -156,16 +156,25 @@ show('manage 工具面', manageOps)
 
 // 族归属（D 项按族校验工具面 owner；Lead 裁决 2026-09-12）：browser*/vd* 的工具由各自插件注册，
 // manage 不承载它们——但主体仍必须与 handle/SUPPORTED_OPS 一致（A/B/C 项不变）。
-// 台账读取对并发窗口降级：本文件与门禁常在同批提交，秒级窗口内可能读到半写状态（dev-notify 实测同一源码
-// 两次跑出相反结果）。缺 families / 缺 pending / 整体不可解析一律 WARN 并按空处理，不判红。
+// review §2.3（2026-09-14）：旧实现把「台账缺失」降级 WARN 不判红——一次并批提交的秒级并发窗口
+// 就足以让 D 项整段失效，属假绿。现改为：短重试（3 × 150ms）消化并发窗口；仍缺段/不可解析即 FAIL。
 const PENDING_PATH = join(ROOT, 'scripts', 'control-ops-pending.json')
-let ledger = {}
-if (existsSync(PENDING_PATH)) {
-  try { ledger = JSON.parse(readFileSync(PENDING_PATH, 'utf8')) } catch { ledger = {} }
+let ledger = null
+let ledgerError = null
+for (let attempt = 0; attempt < 3 && ledger === null; attempt += 1) {
+  try {
+    const parsed = JSON.parse(readFileSync(PENDING_PATH, 'utf8'))
+    if (parsed.families !== undefined && parsed.pending !== undefined) ledger = parsed
+    else ledgerError = '缺段（families=' + (parsed.families === undefined ? '缺' : '在场')
+      + ' / pending=' + (parsed.pending === undefined ? '缺' : '在场') + '）'
+  } catch (e) {
+    ledgerError = String(e).slice(0, 160)
+  }
+  if (ledger === null && attempt < 2) await new Promise((resolve) => setTimeout(resolve, 150))
 }
-if (ledger.families === undefined || ledger.pending === undefined) {
-  console.log('WARN  控制 op 台账缺段（families=' + (ledger.families === undefined ? '缺' : '在场')
-    + ' / pending=' + (ledger.pending === undefined ? '缺' : '在场') + '）：按空处理，族级校验降级（并发窗口，恢复后复核）')
+if (ledger === null) {
+  check('控制 op 台账可解析且含 families/pending 段（' + rel(PENDING_PATH) + '）', false, ledgerError ?? '不可解析')
+  ledger = {}
 }
 const pendingFamilies = ledger.families ?? []
 const familyOps = new Set(pendingFamilies.flatMap((fam) => fam.ops ?? []))
@@ -184,16 +193,9 @@ setEq('ControlOp == SUPPORTED_OPS', engineOps, shellSupported, 'ControlOp', 'SUP
 setEq('A11Y_OPS == ControlOp', a11yOps, engineOps, 'A11Y_OPS', 'ControlOp', 'A11Y_OPS')
 const manageOnly = diff(withoutFamily(manageOps), withoutFamily(shellSupported)).filter((op) => !exempt(op, 'manage'))
 const supportedOnly = diff(withoutFamily(shellSupported), withoutFamily(manageOps)).filter((op) => !exempt(op, 'manage'))
-if (manageOnly.length === 0 && supportedOnly.length === 0) {
-  check('manage 工具面 == SUPPORTED_OPS（族外 op）', true)
-} else if (pendingFamilies.length === 0) {
-  warnings.push('D 项降级：台账缺 families 段（并发窗口），差集未判红')
-  console.log('WARN  D 项降级：台账缺 families 段（并发窗口）→ manage 独有=[' + manageOnly.join(', ')
-    + ']；SUPPORTED_OPS 独有=[' + supportedOnly.join(', ') + ']，不判红（台账恢复后复核）')
-} else {
-  check('manage 工具面 == SUPPORTED_OPS（族外 op）', false,
-    'manage 独有=[' + manageOnly.join(', ') + ']；SUPPORTED_OPS 独有=[' + supportedOnly.join(', ') + ']')
-}
+// review §2.3：台账在场（哪怕 families=[]）差集非空一律判红；不再有「缺段降级 WARN」分支。
+check('manage 工具面 == SUPPORTED_OPS（族外 op）', manageOnly.length === 0 && supportedOnly.length === 0,
+  'manage 独有=[' + manageOnly.join(', ') + ']；SUPPORTED_OPS 独有=[' + supportedOnly.join(', ') + ']')
 
 // E. ROUTE_OPS 声明为子集（诊断面只列常用 op）
 const routeOut = diff(routeOps, engineOps).filter((op) => !exempt(op, 'ROUTE_OPS'))

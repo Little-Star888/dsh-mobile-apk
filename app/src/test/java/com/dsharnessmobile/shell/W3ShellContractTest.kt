@@ -232,7 +232,9 @@ class W3ShellContractTest {
   fun bootReceiverNoLongerReadsTheDeadPreferenceKey() {
     val code = codeOnly(source("BootReceiver.kt"))
     assertFalse("ST-21：无写点的开机自启偏好键读取分支必须消失", code.contains("bootAllowsStart"))
-    assertTrue("行为必须显式（无条件自启的注释 + 日志）", code.contains("auto-start is unconditional"))
+    // review C9：开机自启不再是「无条件」——必须尊重用户手动关停（持久化的 userShutdown）。
+    assertTrue("开机自启必须读持久化的用户停机状态", code.contains("isUserShutdownPersisted(context)"))
+    assertTrue("用户关停过则不自启（日志留痕）", code.contains("NOT started"))
   }
 
   @Test
@@ -261,10 +263,17 @@ class W3ShellContractTest {
       cleanup.contains("workspaceWipeAllowed(activeCopies.get(), activeDeliveries.get())"),
     )
     assertTrue(
-      "仍有 pending 的来件与元数据条目不得随全清删除",
-      cleanup.contains("cleanupDeletions(entries, pendingPaths(context))"),
+      "仍有 pending 或未 claim 草稿队列引用的来件与元数据条目不得随全清删除",
+      cleanup.contains("cleanupDeletions(entries, pendingPaths(context), queuedSessionPaths(context))"),
     )
     assertTrue(".sessions 的既有豁免必须保留", code.contains("if (f.name == SESSIONS_ENTRY) continue"))
+  }
+
+  @Test
+  fun incomingContentUriKeepsEncodedDocumentId() {
+    val code = codeOnly(source("FileIncoming.kt"))
+    assertTrue("content URI 必须原样 Uri.parse，保留 DocumentsProvider 的 %2F document id", code.contains("Uri.parse(uriString)"))
+    assertFalse("不得对整个 content URI 做 URLDecoder（会把 document id 的 %2F 变路径分隔符）", code.contains("Uri.parse(URLDecoder.decode(uriString"))
   }
 
   @Test

@@ -87,7 +87,7 @@ internal object FactoryProfilePatch {
       // 2) 退役行：工厂已不再提及该 id，清掉残留的 disabled: true（仅 true，不动用户显式 false）。
       val retiredHits = ids.filter { it in retired && it !in factoryIds }
       if (retiredHits.isNotEmpty()) {
-        val cleaned = removeDisabledTrue(block)
+        val cleaned = removeDisabledTrueFor(block, retiredHits.toSet())
         if (cleaned != block) {
           changes += "移除退役行的 disabled 残留: " + retiredHits.joinToString(",")
           val stripped = dropIfActionless(cleaned)
@@ -140,7 +140,7 @@ internal object FactoryProfilePatch {
         out.append(block)
         continue
       }
-      val cleaned = removeDisabledTrue(block)
+      val cleaned = removeDisabledTrueFor(block, hits.toSet())
       if (cleaned == block) {
         out.append(block)
         continue
@@ -202,19 +202,23 @@ internal object FactoryProfilePatch {
     return block.substring(0, lineEnd + 1) + indent + "disabled: " + want + "\n" + block.substring(lineEnd + 1)
   }
 
-  /** 删除块内所有 `disabled: true` 行（保留行尾注释以外的原始换行结构）。 */
-  private fun removeDisabledTrue(block: String): String {
+  /**
+   * 删除块内**属于 [ids] 的** `disabled: true` 行（review C8：按 id 粒度）。
+   *
+   * 旧实现清块内所有 `disabled: true`——`- insert:` 组里多条目共存时（#214 的混合块形态），
+   * 清 `ui-layout` 会连带清掉 `permission` 等未取证条目的 disable，属越权行为变更。
+   * 归属判定：disabled 行归属于其上方最近的 `id:` 行；id 未知（块首无 id）时一律不动。
+   */
+  private fun removeDisabledTrueFor(block: String, ids: Set<String>): String {
     val out = StringBuilder(block.length)
+    var currentId: String? = null
     var start = 0
     while (start <= block.length) {
       val nl = block.indexOf('\n', start)
-      if (nl < 0) {
-        val line = block.substring(start)
-        if (!isDisabledTrue(line)) out.append(line)
-        break
-      }
-      val line = block.substring(start, nl + 1)
-      if (!isDisabledTrue(line)) out.append(line)
+      val line = if (nl < 0) block.substring(start) else block.substring(start, nl + 1)
+      ID_LINE.find(line)?.let { currentId = it.groupValues[1] }
+      if (!(isDisabledTrue(line) && currentId in ids)) out.append(line)
+      if (nl < 0) break
       start = nl + 1
     }
     return out.toString()

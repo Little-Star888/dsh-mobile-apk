@@ -7,7 +7,11 @@
 // 两条路必须同源。实测踩到：F7（发布独占语义）进了快照，但 `assets/patched/` 那份是 9-11 的旧文件，
 // 启动时把 F7 静默**改了回去**——构建期 marker 检查全绿，设备上却没有该修复。
 //
-// 断言：对每个运行时资产，用 registry 里同源补丁的 marker 逐个核对——**快照里有、资产里就必须有**。
+// 判据（review C1 升级，2026-09-14）：**资产 ↔ 快照同路径文件逐字节一致**。
+// 旧判据只比 registry marker——0.14.0-preview 的双占位坏资产（F7 v1：内联 open("wx") 后又调
+// helper 占位 → 恒 EEXIST 恒 false，旧会话迁移永久失败）同时含两个 marker，被整条门禁放行；
+// 逐字节比对没有这种回旋空间（marker 趋同但字节分叉 = 必红）。
+// 另对在册资产跑行为回归（F7 → publish-exclusive-reclaim.test.mjs --asset），锁「改完还能跑」。
 //
 // FX-208.1（0.13.8-b 批 B2）：旧实现「快照缺席即 SKIP exit 0」把构建机状态变成了门禁结果。
 // 现支持 `--require`：构建链/发布链调用时，快照/资产/registry 任一缺席即**失败**（不得 SKIP）。
@@ -17,11 +21,12 @@
 //   abi         arm64 | x86_64（缺省 x86_64，仅兼容手工调用）
 //   --snapshot  显式快照 tar（发布链用 dsh-mobile-apk/snapshot/snapshot-<abi>.tar.xz）
 //   --require   严格模式：任何 SKIP 分支转失败（构建链/发布链必须用）
-// 退出码：0 = 通过（或非严格模式下明确计数并打印的 SKIP）；1 = 资产过期 / 严格模式下缺件。
+// 退出码：0 = 通过（或非严格模式下明确计数并打印的 SKIP）；1 = 资产与快照不同源 / 严格模式下缺件。
 import { readFileSync, existsSync, readdirSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { join, dirname, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = dirname(HERE)
@@ -73,18 +78,23 @@ const sourcesFor = (asset) => {
   return patches.filter((p) => (p.target ?? '').endsWith('/' + base) && (p.target ?? '').includes('/dsh-' + pkg + '/'))
 }
 
-/** 从快照里取源文件文本（tar -xO；工作目录切到快照目录，规避 Windows/MSYS 的绝对路径改写）。 */
+/** 从快照里取源文件字节（tar -xO；工作目录切到快照目录，规避 Windows/MSYS 的绝对路径改写）。 */
 const readFromSnapshot = (path) => {
   try {
     return execFileSync('tar', ['-xO', '-f', SNAPSHOT_NAME, path], {
       cwd: dirname(SNAP),
-      encoding: 'utf8',
       maxBuffer: 64 * 1024 * 1024,
     })
   } catch {
     return null
   }
 }
+const sha256 = (buf) => createHash('sha256').update(buf).digest('hex')
+
+/** 在册资产的行为回归（review C1）：直接对资产正文本体跑，不重新施加补丁。 */
+const BEHAVIOR_TESTS = [
+  { asset: 'session-persistence-jsonl-index.js', test: 'publish-exclusive-reclaim.test.mjs' },
+]
 
 let checked = 0
 // ST-31：资产级 SKIP 必须与缺件 SKIP 一起**计数**（历史上这三处静默 SKIP 让「快照/资产不同源」
@@ -100,28 +110,50 @@ for (const asset of assets) {
     skipAsset(`资产 ${asset}：registry 里没有同源补丁条目`)
     continue
   }
-  const text = readFileSync(join(ASSETS, asset), 'utf8')
-  for (const p of src) {
-    const inSnapshot = readFromSnapshot(p.target)
-    if (inSnapshot === null) {
-      skipAsset(`资产 ${asset} ↔ ${p.id}：快照里读不到 ${p.target}`)
-      continue
-    }
-    if (!inSnapshot.includes(p.marker)) {
-      skipAsset(`资产 ${asset} ↔ ${p.id}：补丁未打进该快照（marker 缺席）`)
-      continue
-    }
-    checked++
-    if (!text.includes(p.marker)) {
-      fail(`运行时资产过期：补丁 ${p.id} 的 marker「${p.marker}」在快照里，但 ${asset} 里没有\n`
-        + '  引擎启动时会用该资产覆盖运行树 → 补丁在设备上被静默回退（这就是本门禁要防的假绿）\n'
-        + `  修复：从快照重新生成 ${join('app', 'src', 'main', 'assets', 'patched', asset)}`)
-    }
-    console.log(`PASS  资产与快照同源: ${asset}（${p.id}）`)
+  const targets = [...new Set(src.map((p) => p.target))]
+  if (targets.length !== 1) {
+    skipAsset(`资产 ${asset}：registry 同源条目指向多个 target（${targets.join(', ')}）——登记表需人工核对`)
+    continue
   }
+  const target = targets[0]
+  const snapBuf = readFromSnapshot(target)
+  if (snapBuf === null) {
+    skipAsset(`资产 ${asset} ↔ ${target}：快照里读不到该文件（快照缺该包？）`)
+    continue
+  }
+  const assetBuf = readFileSync(join(ASSETS, asset))
+  checked++
+  if (!snapBuf.equals(assetBuf)) {
+    fail(`运行时资产与快照不同源（逐字节）：${asset} ↔ ${target}\n`
+      + `  资产 sha256   = ${sha256(assetBuf)}（${assetBuf.length} B）\n`
+      + `  快照 sha256   = ${sha256(snapBuf)}（${snapBuf.length} B）\n`
+      + '  引擎启动时会用该资产覆盖运行树 → 两条路径的补丁在设备上互相回退（这就是本门禁要防的假绿）\n'
+      + `  修复：从快照重新生成 ${join('app', 'src', 'main', 'assets', 'patched', asset)}`)
+  }
+  const covered = src.map((p) => p.id).join(', ')
+  console.log(`PASS  资产与快照逐字节同源: ${asset}（覆盖 ${covered}）`)
 }
 if (checked === 0) {
   skip('没有任何「快照含补丁 + 资产同源」的组合可核对（abi=' + ABI + '）')
   process.exit(0)
 }
+
+// 行为回归：字节同源只证「两条路一致」，不证「资产在设备上能正常工作」——坏形态若在快照里也已分叉
+// （构建期补丁自己带缺陷）字节比对会绿；行为断言是第二道锁（review C1 判据）。
+for (const { asset, test } of BEHAVIOR_TESTS) {
+  if (!assets.includes(asset)) continue
+  const testPath = join(ROOT, 'scripts', 'patches', 'tests', test)
+  if (!existsSync(testPath)) {
+    skipAsset(`行为回归脚本缺席：scripts/patches/tests/${test}（镜像面不完整？）`)
+    continue
+  }
+  const r = spawnSync(process.execPath, [testPath, '--asset', join(ASSETS, asset)], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 })
+  const tail = ((r.stdout || '') + (r.stderr || '')).trim().split('\n').slice(-1)[0]
+  if (r.status !== 0) {
+    fail(`资产行为回归失败：${asset} → ${test}（exit ${r.status}）\n  ${tail}\n`
+      + '  该资产会在引擎启动时覆盖运行树——行为缺陷会直接落设备（见 0.14.0-preview 双占位资产事故）')
+  }
+  console.log(`PASS  资产行为回归: ${asset}（${test}）`)
+}
+
 console.log('CHECK-RUNTIME-ASSETS PASSED（abi=' + ABI + '，核对组合 ' + checked + '，SKIP=' + skipped + '）')

@@ -7,7 +7,6 @@
   },
   "packages": {
     "abseil-cpp": "Apache-2.0",
-    "android-tools": "Apache-2.0",
     "attr": "LGPL-2.1+",
     "brotli": "MIT",
     "busybox": "GPL-2.0",

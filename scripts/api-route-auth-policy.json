@@ -1,0 +1,290 @@
+{
+  "$comment": "0.14.0 #222 API route inventory. Every exact/prefix registration owned by the mobile product must be listed. protected routes require a local auth marker; public routes require a narrow response marker and explicit rationale.",
+  "version": 1,
+  "routeRegistrations": [
+    {
+      "source": "vendor/dsh-undo-savepoint/lib/index.js",
+      "expected": 1
+    },
+    {
+      "source": "vendor/dshmarketplace-plugin/lib/index.js",
+      "expected": 2
+    },
+    {
+      "source": "plugins/dsh-android-bridge/src/index.ts",
+      "expected": 1
+    },
+    {
+      "source": "plugins/dsh-android-bridge/src/control-queue.ts",
+      "expected": 2
+    },
+    {
+      "source": "plugins/dsh-android-file-open/src/index.ts",
+      "expected": 5
+    },
+    {
+      "source": "plugins/dsh-android-linux-env/src/index.ts",
+      "expected": 1
+    },
+    {
+      "source": "plugins/dsh-android-browser/src/index.ts",
+      "expected": 1
+    },
+    {
+      "source": "plugins/dsh-android-vdisplay/src/index.ts",
+      "expected": 1
+    },
+    {
+      "source": "dsh-host-web-compat/lib/index.js",
+      "expected": 3
+    }
+  ],
+  "dynamicPathExpressions": [
+    {
+      "source": "plugins/dsh-android-browser/src/index.ts",
+      "expression": "BROWSER_ROUTES.status",
+      "resolvesTo": [
+        "/api/android/browser/status"
+      ],
+      "literalEvidence": "/api/android/browser/status",
+      "reason": "契约常量表（contract.ts 的 BROWSER_ROUTES）集中定义路径；原样字面量在本文件/契约面在场，改动必踩门禁。"
+    },
+    {
+      "source": "plugins/dsh-android-linux-env/src/index.ts",
+      "expression": "path",
+      "resolvesTo": [
+        "/api/android/env/status",
+        "/api/android/env/recipe"
+      ],
+      "literalEvidence": "/api/android/env/status",
+      "reason": "for-of 配对表解构键（表内两条路径字面量由 dynamicRoutePathLiterals 全量发现并锁定）。"
+    },
+    {
+      "source": "plugins/dsh-android-vdisplay/src/index.ts",
+      "expression": "VD_STATUS_PATH",
+      "resolvesTo": [
+        "/api/android/vdisplay/status"
+      ],
+      "literalEvidence": "/api/android/vdisplay/status",
+      "reason": "状态面常量在 status.ts 单一来源定义（面板与工具面同源）；字面量在场即声明可核验。"
+    },
+    {
+      "source": "vendor/dshmarketplace-plugin/lib/index.js",
+      "expression": "Q",
+      "resolvesTo": [
+        "/api/dshmarketplace/search"
+      ],
+      "literalEvidence": "Q=`${q}/search`",
+      "reason": "minified 打包名：以 base 常量 q 拼接（模板串形态），literalEvidence 证明表达式解析到登记的 search 路由。"
+    },
+    {
+      "source": "vendor/dshmarketplace-plugin/lib/index.js",
+      "expression": "V",
+      "resolvesTo": [
+        "/api/dshmarketplace/install"
+      ],
+      "literalEvidence": "V=`${q}/install`",
+      "reason": "同 Q：base 常量 q 拼接的 install 路由；变更拼接形态或路径都会直接判红。"
+    }
+  ],
+  "routes": [
+    {
+      "id": "undo-api",
+      "path": "/api/undo",
+      "kind": "prefix",
+      "registrationSource": "vendor/dsh-undo-savepoint/lib/index.js",
+      "registration": "path: '/api/undo'",
+      "endpointSource": "vendor/dsh-undo-savepoint/lib/index.js",
+      "access": "protected",
+      "authMarker": "dsh-mobile undo route auth (U1)",
+      "authCallMarker": "dshMobileUndoAuthorize(req)"
+    },
+    {
+      "id": "marketplace-search",
+      "path": "/api/dshmarketplace/search",
+      "kind": "exact",
+      "registrationSource": "vendor/dshmarketplace-plugin/lib/index.js",
+      "registration": "path:Q",
+      "endpointSource": "vendor/dshmarketplace-plugin/lib/client.js",
+      "access": "protected",
+      "authMarker": "dsh-mobile marketplace route auth (U2)",
+      "authCallMarker": "dshMobileMarketplaceRouteAuthorized(n,e)"
+    },
+    {
+      "id": "marketplace-install",
+      "path": "/api/dshmarketplace/install",
+      "kind": "exact",
+      "registrationSource": "vendor/dshmarketplace-plugin/lib/index.js",
+      "registration": "path:V",
+      "endpointSource": "vendor/dshmarketplace-plugin/lib/client.js",
+      "access": "protected",
+      "authMarker": "dsh-mobile marketplace route auth (U2)",
+      "authCallMarker": "dshMobileMarketplaceRouteAuthorized(n,e)"
+    },
+    {
+      "id": "privilege-status",
+      "path": "/api/android/privilege/status",
+      "kind": "exact",
+      "registrationSource": "plugins/dsh-android-bridge/src/index.ts",
+      "registration": "path: '/api/android/privilege/status'",
+      "endpointSource": "plugins/dsh-android-bridge/src/index.ts",
+      "access": "public",
+      "publicResponseMarker": "sendJson(res, 200, buildPrivilegeStatusPayload(svc, controlToken() !== undefined))",
+      "rationale": "Only a structured capability/status view is returned. It contains no control token, request body, filesystem path, UI tree, screenshot, or mutation route."
+    },
+    {
+      "id": "control-pending",
+      "path": "/api/android/ui/pending",
+      "kind": "exact",
+      "registrationSource": "plugins/dsh-android-bridge/src/control-queue.ts",
+      "registration": "path: '/api/android/ui/pending'",
+      "endpointSource": "plugins/dsh-android-bridge/src/control-queue.ts",
+      "access": "protected",
+      "authMarker": "tokenMatches(token(), body.token)",
+      "authCallMarker": "tokenMatches(token(), body.token)"
+    },
+    {
+      "id": "control-result",
+      "path": "/api/android/ui/result",
+      "kind": "exact",
+      "registrationSource": "plugins/dsh-android-bridge/src/control-queue.ts",
+      "registration": "path: '/api/android/ui/result'",
+      "endpointSource": "plugins/dsh-android-bridge/src/control-queue.ts",
+      "access": "protected",
+      "authMarker": "tokenMatches(token(), body.token)",
+      "authCallMarker": "tokenMatches(token(), body.token)"
+    },
+    {
+      "id": "file-incoming",
+      "path": "/api/android/file-incoming",
+      "kind": "exact",
+      "registrationSource": "plugins/dsh-android-file-open/src/index.ts",
+      "registration": "path: '/api/android/file-incoming'",
+      "endpointSource": "plugins/dsh-android-file-open/src/index.ts",
+      "access": "protected",
+      "authMarker": "authorizeIncomingRoute(req, authOptions())",
+      "authCallMarker": "authorizeIncomingRoute(req, authOptions())"
+    },
+    {
+      "id": "file-incoming-claim",
+      "path": "/api/android/file-incoming/claim",
+      "kind": "exact",
+      "registrationSource": "plugins/dsh-android-file-open/src/index.ts",
+      "registration": "path: '/api/android/file-incoming/claim'",
+      "endpointSource": "plugins/dsh-android-file-open/src/index.ts",
+      "access": "protected",
+      "authMarker": "authorizeIncomingRoute(req, authOptions())",
+      "authCallMarker": "authorizeIncomingRoute(req, authOptions())"
+    },
+    {
+      "id": "file-incoming-content",
+      "path": "/api/android/file-incoming/content",
+      "kind": "exact",
+      "registrationSource": "plugins/dsh-android-file-open/src/index.ts",
+      "registration": "path: '/api/android/file-incoming/content'",
+      "endpointSource": "plugins/dsh-android-file-open/src/index.ts",
+      "access": "protected",
+      "authMarker": "authorizeIncomingRoute(req, authOptions())",
+      "authCallMarker": "authorizeIncomingRoute(req, authOptions())"
+    },
+    {
+      "id": "file-incoming-complete",
+      "path": "/api/android/file-incoming/complete",
+      "kind": "exact",
+      "registrationSource": "plugins/dsh-android-file-open/src/index.ts",
+      "registration": "path: '/api/android/file-incoming/complete'",
+      "endpointSource": "plugins/dsh-android-file-open/src/index.ts",
+      "access": "protected",
+      "authMarker": "authorizeIncomingRoute(req, authOptions())",
+      "authCallMarker": "authorizeIncomingRoute(req, authOptions())"
+    },
+    {
+      "id": "file-incoming-clean",
+      "path": "/api/android/file-incoming/clean",
+      "kind": "exact",
+      "registrationSource": "plugins/dsh-android-file-open/src/index.ts",
+      "registration": "path: '/api/android/file-incoming/clean'",
+      "endpointSource": "plugins/dsh-android-file-open/src/index.ts",
+      "access": "protected",
+      "authMarker": "authorizeIncomingRoute(req, authOptions())",
+      "authCallMarker": "authorizeIncomingRoute(req, authOptions())"
+    },
+    {
+      "id": "env-status",
+      "path": "/api/android/env/status",
+      "kind": "exact",
+      "registrationSource": "plugins/dsh-android-linux-env/src/index.ts",
+      "registration": "path,",
+      "endpointSource": "plugins/dsh-android-linux-env/src/index.ts",
+      "access": "protected",
+      "authMarker": "authorizeMobileRoute(req, authOptions())",
+      "authCallMarker": "authorizeMobileRoute(req, authOptions())"
+    },
+    {
+      "id": "env-recipe",
+      "path": "/api/android/env/recipe",
+      "kind": "exact",
+      "registrationSource": "plugins/dsh-android-linux-env/src/index.ts",
+      "registration": "path,",
+      "endpointSource": "plugins/dsh-android-linux-env/src/index.ts",
+      "access": "protected",
+      "authMarker": "authorizeMobileRoute(req, authOptions())",
+      "authCallMarker": "authorizeMobileRoute(req, authOptions())"
+    },
+    {
+      "id": "directory-pick-poll",
+      "path": "/api/android/dir-pick/poll",
+      "kind": "exact",
+      "registrationSource": "dsh-host-web-compat/lib/index.js",
+      "registration": "path: '/api/android/dir-pick/poll'",
+      "endpointSource": "dsh-host-web-compat/lib/index.js",
+      "access": "protected",
+      "authMarker": "if (!authorized(req))",
+      "authCallMarker": "if (!authorized(req))"
+    },
+    {
+      "id": "directory-pick-result",
+      "path": "/api/android/dir-pick/result",
+      "kind": "exact",
+      "registrationSource": "dsh-host-web-compat/lib/index.js",
+      "registration": "path: '/api/android/dir-pick/result'",
+      "endpointSource": "dsh-host-web-compat/lib/index.js",
+      "access": "protected",
+      "authMarker": "if (!authorized(req))",
+      "authCallMarker": "if (!authorized(req))"
+    },
+    {
+      "id": "open-path",
+      "path": "/api/android/open-path",
+      "kind": "exact",
+      "registrationSource": "dsh-host-web-compat/lib/index.js",
+      "registration": "path: '/api/android/open-path'",
+      "endpointSource": "dsh-host-web-compat/lib/index.js",
+      "access": "protected",
+      "authMarker": "if (!authorized(req))",
+      "authCallMarker": "if (!authorized(req))"
+    },
+    {
+      "id": "browser-status",
+      "path": "/api/android/browser/status",
+      "kind": "exact",
+      "registrationSource": "plugins/dsh-android-browser/src/index.ts",
+      "registration": "path: BROWSER_ROUTES.status",
+      "endpointSource": "plugins/dsh-android-browser/src/contract.ts",
+      "access": "protected",
+      "authMarker": "authorizeIncomingRoute(req, authOptions())",
+      "authCallMarker": "authorizeIncomingRoute(req, authOptions())"
+    },
+    {
+      "id": "vdisplay-status",
+      "path": "/api/android/vdisplay/status",
+      "kind": "exact",
+      "registrationSource": "plugins/dsh-android-vdisplay/src/index.ts",
+      "registration": "path: VD_STATUS_PATH",
+      "endpointSource": "plugins/dsh-android-vdisplay/src/status.ts",
+      "access": "public",
+      "publicResponseMarker": "sendJson(res, 200, readVdSnapshot(faceOf()))",
+      "rationale": "Only fail-closed VirtualDisplay readiness metadata is returned. It contains no pixels, UI tree, input, task command, shell output, path, or credential."
+    }
+  ]
+}

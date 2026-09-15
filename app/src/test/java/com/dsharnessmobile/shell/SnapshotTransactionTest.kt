@@ -126,10 +126,43 @@ class SnapshotTransactionTest {
         SnapshotTransaction.Marker(SnapshotTransaction.Phase.SWAPPING, "fp1", 1L, listOf("home/.dsh/profiles")),
       )
 
-      val recovery = SnapshotTransaction.recover(filesDir, stage, File(live, "usr"), File(live, "home"), "old-fp")
+      val recovery = SnapshotTransaction.recover(filesDir, stage, File(live, "usr"), File(live, "home"))
 
       assertEquals(SnapshotTransaction.Outcome.ROLLED_BACK, recovery.outcome)
       assertEquals("old-profile", File(live, "home/.dsh/profiles/web/cordis.yml").readText())
+    } finally {
+      SnapshotFs.deletePath(filesDir)
+    }
+  }
+
+  /**
+   * review C4：备份只有「拷贝完成 + 原子 rename」后才入 journal——拷贝中途被杀的残渣
+   * （`profiles.copying`，半份内容）绝不能被恢复路径当成 displaced 覆盖 live。
+   */
+  @Test
+  fun rollbackIgnoresAHalfWrittenProfilesBackupLeftover() {
+    val filesDir = tempDir()
+    try {
+      val live = File(filesDir, "live").apply { mkdirs() }
+      writeRuntime(live, "old-node", "old-profile-live")
+      val stage = SnapshotTransaction.stageRoot(filesDir)
+      SnapshotFs.createDirectories(stage)
+      val previous = SnapshotTransaction.previousRoot(filesDir)
+      // 半份备份残渣（模拟拷贝中被杀）：目录名带 .copying，内容不完整
+      val copying = File(previous, "home/.dsh/profiles.copying/web")
+      copying.mkdirs()
+      File(copying, "cordis.yml").writeText("half-copied")
+      SnapshotTransaction.writeMarker(
+        filesDir,
+        SnapshotTransaction.Marker(SnapshotTransaction.Phase.SWAPPING, "fp1", 1L),
+      )
+
+      val recovery = SnapshotTransaction.recover(filesDir, stage, File(live, "usr"), File(live, "home"))
+
+      assertEquals(SnapshotTransaction.Outcome.ROLLED_BACK, recovery.outcome)
+      assertEquals("live 必须保持原样（半份备份不得覆盖）", "old-profile-live", File(live, "home/.dsh/profiles/web/cordis.yml").readText())
+      assertFalse("残渣不得被搬进 live", SnapshotFs.exists(File(live, "home/.dsh/profiles.copying")))
+      assertFalse("previous 整目录清掉（含残渣）", SnapshotFs.exists(previous))
     } finally {
       SnapshotFs.deletePath(filesDir)
     }
@@ -170,7 +203,7 @@ class SnapshotTransactionTest {
         SnapshotTransaction.Marker(SnapshotTransaction.Phase.SWAPPING, "fp1", 1L, listOf("usr")),
       )
 
-      val recovery = SnapshotTransaction.recover(filesDir, stage, File(live, "usr"), File(live, "home"), "old-fp")
+      val recovery = SnapshotTransaction.recover(filesDir, stage, File(live, "usr"), File(live, "home"))
 
       assertEquals(SnapshotTransaction.Outcome.ROLLED_BACK, recovery.outcome)
       assertEquals("old-node", File(live, "usr/bin/node").readText())
@@ -197,7 +230,7 @@ class SnapshotTransactionTest {
         SnapshotTransaction.Marker(SnapshotTransaction.Phase.SWAPPING, "fp1", 1L, listOf("usr", "home/.dsh/profiles")),
       )
 
-      val recovery = SnapshotTransaction.recover(filesDir, stage, File(live, "usr"), File(live, "home"), "old-fp")
+      val recovery = SnapshotTransaction.recover(filesDir, stage, File(live, "usr"), File(live, "home"))
 
       assertEquals(SnapshotTransaction.Outcome.ROLLED_BACK, recovery.outcome)
       assertEquals("old-node", File(live, "usr/bin/node").readText())
@@ -220,7 +253,7 @@ class SnapshotTransactionTest {
         SnapshotTransaction.Marker(SnapshotTransaction.Phase.SWAPPING, "fp1", 1L, listOf("usr")),
       )
 
-      SnapshotTransaction.recover(filesDir, stage, File(live, "usr"), File(live, "home"), "")
+      SnapshotTransaction.recover(filesDir, stage, File(live, "usr"), File(live, "home"))
 
       assertFalse(SnapshotFs.exists(File(live, "usr")))
     } finally {
@@ -241,7 +274,7 @@ class SnapshotTransactionTest {
         SnapshotTransaction.Marker(SnapshotTransaction.Phase.STAGED, "fp1", 1L),
       )
 
-      val recovery = SnapshotTransaction.recover(filesDir, stage, File(live, "usr"), File(live, "home"), "old-fp")
+      val recovery = SnapshotTransaction.recover(filesDir, stage, File(live, "usr"), File(live, "home"))
 
       assertEquals(SnapshotTransaction.Outcome.DISCARDED_STAGE, recovery.outcome)
       assertEquals("old-node", File(live, "usr/bin/node").readText())
@@ -265,7 +298,7 @@ class SnapshotTransactionTest {
         SnapshotTransaction.Marker(SnapshotTransaction.Phase.SWAPPED, "fp2", 1L, listOf("usr")),
       )
 
-      val recovery = SnapshotTransaction.recover(filesDir, stage, File(live, "usr"), File(live, "home"), "fp1")
+      val recovery = SnapshotTransaction.recover(filesDir, stage, File(live, "usr"), File(live, "home"))
 
       assertEquals(SnapshotTransaction.Outcome.ROLLED_FORWARD, recovery.outcome)
       assertEquals("fp2", recovery.fingerprintToCommit)
@@ -278,8 +311,12 @@ class SnapshotTransactionTest {
     }
   }
 
+  /**
+   * review C13（旧语义反转）：指纹已等于目标**不再是**提交证据——同版本重解压时指纹在交换开始前
+   * 就等于目标，交换中途被杀必须回滚（旧实现会误判前滚，live 可能只换了一半）。
+   */
   @Test
-  fun rollsForwardWhenTheFingerprintAlreadyMatchesTheTarget() {
+  fun rollsBackWhenOnlyTheTargetFingerprintMatchesButTheSwapNeverCommitted() {
     val filesDir = tempDir()
     try {
       val live = File(filesDir, "live").apply { mkdirs() }
@@ -291,11 +328,12 @@ class SnapshotTransactionTest {
         SnapshotTransaction.Marker(SnapshotTransaction.Phase.SWAPPING, "fp2", 1L, listOf("usr")),
       )
 
-      val recovery = SnapshotTransaction.recover(filesDir, stage, File(live, "usr"), File(live, "home"), "fp2")
+      val recovery = SnapshotTransaction.recover(filesDir, stage, File(live, "usr"), File(live, "home"))
 
-      assertEquals(SnapshotTransaction.Outcome.ROLLED_FORWARD, recovery.outcome)
-      assertEquals("new-node", File(live, "usr/bin/node").readText())
-      SnapshotTransaction.finish(filesDir)
+      assertEquals(SnapshotTransaction.Outcome.ROLLED_BACK, recovery.outcome)
+      // 无 previous 备份 + staged 已不在场 = 该条目是本次新装：回滚即删除（live 不得停在半交换态）。
+      assertFalse("半交换的新树必须被回滚清除", SnapshotFs.exists(File(live, "usr/bin/node")))
+      assertNull(SnapshotTransaction.readMarker(filesDir))
     } finally {
       SnapshotFs.deletePath(filesDir)
     }

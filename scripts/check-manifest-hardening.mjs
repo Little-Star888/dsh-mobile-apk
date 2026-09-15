@@ -115,6 +115,7 @@ const EXPORTED_ALLOW = new Map([
   ['.DeviceControlService', { reason: '无障碍服务，android:permission=BIND_ACCESSIBILITY_SERVICE', guard: 'permission' }],
   ['.AdbKeyboardReceiver', { reason: 'ADB 输入广播，源码 isTrustedSender 校验', guard: 'source-check' }],
   ['.BootReceiver', { reason: 'BOOT_COMPLETED（受保护系统广播）', guard: 'permission' }],
+  ['rikka.shizuku.ShizukuProvider', { reason: 'Shizuku 官方 Binder bootstrap；INTERACT_ACROSS_USERS_FULL 保护 provider', guard: 'permission' }],
 ])
 const PROTECTED_SYSTEM_ACTIONS = new Set([
   'android.intent.action.BOOT_COMPLETED',
@@ -123,7 +124,14 @@ const PROTECTED_SYSTEM_ACTIONS = new Set([
   'android.intent.action.TIME_SET',
   'android.intent.action.TIMEZONE_CHANGED',
 ])
-const COMPONENTS = ['activity', 'service', 'receiver', 'provider']
+const COMPONENTS = ['activity', 'service', 'receiver', 'provider', 'activity-alias']
+
+/** 源码级来源校验（review §2.3）：去注释后要求**调用形态** isTrustedSender( —— 旧实现只查子串，
+ * 注释里提一句就能假绿。字符串字面量近似不计（该标识符不出现在 UI 文案）。 */
+const stripKotlinComments = (text) => text
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .replace(/\/\/[^\n]*/g, '')
+const hasTrustedSenderCall = (src) => /isTrustedSender\s*\(/.test(stripKotlinComments(src))
 
 const REQUIRED_EXCLUDES = [
   ['file', 'home/.dsh/.credentials.yaml'],
@@ -183,8 +191,8 @@ if (manifest) {
     if (kind === 'receiver') {
       const cls = join(MAIN, 'java', 'com', 'dsharnessmobile', 'shell', name.replace(/^\./, '') + '.kt')
       const src = read(cls)
-      if (src !== null && src.includes('isTrustedSender')) continue
-      unguarded.push(name + '（无 android:permission，且源码无 isTrustedSender）')
+      if (src !== null && hasTrustedSenderCall(src)) continue
+      unguarded.push(name + '（无 android:permission，且源码无 isTrustedSender 调用）')
       continue
     }
     unguarded.push(name + '（无 android:permission）')

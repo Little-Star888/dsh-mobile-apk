@@ -166,7 +166,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
   fun shutdownToGuide() {
     activity.userClosedEngine = true
     flowGeneration.incrementAndGet()
-    EngineService.userShutdown = true
+    EngineService.setUserShutdown(activity, true)
     engineMonitorHandler.removeCallbacks(engineMonitorRunnable)
     freezeHandler.removeCallbacks(freezeRunnable)
     activity.runOnUiThread {
@@ -250,7 +250,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
     if (!flowRunning.compareAndSet(false, true)) return
     val generation = flowGeneration.incrementAndGet()
     activity.userClosedEngine = false
-    EngineService.userShutdown = false
+    EngineService.setUserShutdown(activity, false)
     engineMonitorHandler.removeCallbacks(engineMonitorRunnable)
     engineMonitorHandler.post(engineMonitorRunnable)
     Thread {
@@ -313,8 +313,9 @@ internal class EngineStartFlow(private val activity: MainActivity) {
           activity.runOnUiThread {
             if (!isCurrentEngineFlow(generation)) return@runOnUiThread
             // 0.13.1 W3：解压失败此前零落盘（engine.log 尚不存在、仅 logcat），镜像现场到共享目录。
-            activity.engineManager.mirrorDiagnosticsToShared("snapshot-refresh-failed")
-            activity.applyGuidePhase(GuidePhase.Error, "运行时更新失败（诊断包已存至 Documents/dshdata/diagnostics）")
+            // review C5：文案按**实际落点**回填（共享不可写时回落私有目录，不再写死 Documents 路径）。
+            val dir = activity.engineManager.mirrorDiagnosticsToShared("snapshot-refresh-failed")
+            activity.applyGuidePhase(GuidePhase.Error, "运行时更新失败（" + diagnosticsLocationHint(dir) + "）")
             activity.showGuide()
           }
           return@Thread
@@ -376,10 +377,11 @@ internal class EngineStartFlow(private val activity: MainActivity) {
       if (!isCurrentEngineFlow(generation)) return@Thread
       if (!booted && !activity.engineManager.engineProcessAlive()) {
         // 0.13.1 W3：进程死亡现场镜像到共享目录（含退出码），用户可直接取包反馈。
-        activity.engineManager.mirrorDiagnosticsToShared("engine-died-during-boot")
+        // review C5：文案按实际落点回填（共享不可写时回落私有目录）。
+        val dir = activity.engineManager.mirrorDiagnosticsToShared("engine-died-during-boot")
         activity.runOnUiThread {
           if (!isCurrentEngineFlow(generation)) return@runOnUiThread
-          activity.applyGuidePhase(GuidePhase.Error, "引擎启动失败（诊断包已存至 Documents/dshdata/diagnostics）")
+          activity.applyGuidePhase(GuidePhase.Error, "引擎启动失败（" + diagnosticsLocationHint(dir) + "）")
           activity.showGuide()
         }
         onEngineStartTimeout(generation)
@@ -464,7 +466,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
     if (!engineRestarting.compareAndSet(false, true)) return
     activity.userClosedEngine = false
     flowGeneration.incrementAndGet()
-    EngineService.userShutdown = false
+    EngineService.setUserShutdown(activity, false)
     Thread {
       try {
         try {
@@ -487,8 +489,14 @@ internal class EngineStartFlow(private val activity: MainActivity) {
 }
 
 /**
+ * 诊断包落点的用户可见文案（review C5）：按**实际**镜像结果回填，绝不写死共享目录路径——
+ * 未授权 All Files Access 的设备（issue #228 环境）会回落应用私有目录，用户按 Documents 路径找不到现场。
+ */
+internal fun diagnosticsLocationHint(dir: java.io.File?): String =
+  if (dir == null) "诊断包落盘失败（共享与私有目录均不可写）" else "诊断包已存至 " + dir.absolutePath
+
+/**
  * 启动前置（FX-210.1，JVM 单测的顺序契约）：先执行恢复入口，再做探活分流。
- *
  * 缺陷形态：探活命中「引擎已在跑」即 return@Thread，事务恢复（applyRecovery）被跳过——
  * 引擎由前台服务拉起后重开 app 时，.snapshot-transaction 判据永不消费。把这一步抽成
  * 函数是为了让「恢复先于早退」成为可断言的顺序，而不是散落在流程里的两行语句。

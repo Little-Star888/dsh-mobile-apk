@@ -120,6 +120,27 @@ foreach ($p in $pluginSrcs) {
 }
 Remove-Item $tmp2 -Recurse -Force -ErrorAction SilentlyContinue
 
+# 2f) 注入后产物门禁（review §2.3，2026-09-14）：0b 的聚合入口跑在宿主注入之前（验的是**输入**快照），
+#     而发布物是注入后的 tar——在发布快照上复跑聚合入口（--snapshot-dir 指向 $snapDir），并补跑
+#     不在声明集合里的长驻产物门禁（挂载集 / overlay 抽验 / 权限模式 / 第三方合规）。
+Write-Output "== 注入后产物门禁（发布物级复跑）=="
+node $gateAgg --run --require --snapshot-dir $snapDir
+if ($LASTEXITCODE -ne 0) { throw "注入后产物门禁未通过，中止组装" }
+$pluginManifestAll = Get-Content (Join-Path $root "scripts\plugin-dirs.json") -Raw | ConvertFrom-Json
+$pluginDirsAll = @($pluginManifestAll.dirs | ForEach-Object { Join-Path $root $_ })
+$externDirsAll = @($pluginManifestAll.externals | ForEach-Object { Join-Path $root $_ })
+node (Join-Path $root "scripts\check-patch-mounts.mjs") (Join-Path $root "scripts\profile-web.cordis.patch.yml") @pluginDirsAll @externDirsAll 2>&1 | Select-Object -Last 3
+if ($LASTEXITCODE -ne 0) { throw "注入后 patch 挂载集校验失败，中止组装" }
+foreach ($s in @(@{n='arm64'; f=$armSnap}, @{n='x86_64'; f=$x86Snap})) {
+  node (Join-Path $root "scripts\check-engine-overlay.mjs") $s.f 2>&1 | Select-Object -Last 2
+  if ($LASTEXITCODE -ne 0) { throw ("注入后引擎 overlay 抽验失败: " + $s.n) }
+  node (Join-Path $root "scripts\check-snapshot-file-modes.mjs") $s.f 2>&1 | Select-Object -Last 2
+  if ($LASTEXITCODE -ne 0) { throw ("注入后快照权限模式校验失败: " + $s.n) }
+}
+node (Join-Path $root "scripts\check-third-party.mjs") x --tar $x86Snap 2>&1 | Select-Object -Last 3
+if ($LASTEXITCODE -ne 0) { throw "注入后第三方合规校验失败（x86_64）" }
+Write-Output "  注入后产物门禁全部通过"
+
 # 3) Dual-ABI APK build (swap snapshot in assets, build twice)
 $assets = Join-Path $root "dsh-mobile-apk\app\src\main\assets\snapshot.tar.xz"
 foreach ($abi in @(@{n='arm64-v8a'; f=$armSnap}, @{n='x86_64'; f=$x86Snap})) {

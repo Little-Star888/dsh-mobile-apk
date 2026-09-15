@@ -162,6 +162,29 @@ test('a11y 通道：screenshot 走无障碍截屏（API 30+，不依赖 ADB scre
   assert.equal(calls.adbLine.length, 0, '不应走 adb screencap')
 })
 
+
+test('screen scope is enforced before either a11y or ADB can read the real screen', async () => {
+  const { face, calls } = makeFace({ backend: 'adb' })
+  face.screenScope = () => 'virtual-only'
+  face.screenAccess = () => ({
+    ok: false,
+    reason: 'screen-out-of-scope',
+    scope: 'virtual-only',
+    screenId: 'real',
+    guidance: 'real screen is outside the user scope',
+  })
+  const { byName } = applyManage(face)
+  const blocked = await byName('android_screenshot').execute({}, exec)
+  assert.equal(blocked.denied, true)
+  assert.match(blocked.text, /outside the user scope/)
+  assert.equal(calls.control.length, 0)
+  assert.equal(calls.adbLine.length, 0)
+  const listed = await byName('android_screen_list').execute({}, exec)
+  assert.equal(listed.scope, 'virtual-only')
+  assert.equal(listed.screens[0].inScope, false)
+  assert.equal(listed.screens[1].screenId, 'virtual-1')
+})
+
 test('无障碍通道失败时工具返回明确错误，不静默降级到 ADB', async () => {
   const { face, calls } = makeFace({ backend: 'a11y' })
   face.controlExec = async (op, args) => { calls.control.push({ op, args }); return { ok: false, error: '无障碍服务未开启' } }

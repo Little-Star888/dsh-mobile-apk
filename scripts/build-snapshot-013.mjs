@@ -67,8 +67,8 @@ for (const [name, v] of [['preinstall', PREINSTALL], ['strip', STRIP], ['slim', 
 // ── 配置 ────────────────────────────────────────────────────────────────
 const TERMUX_PKG = ABI === 'arm64' ? 'aarch64' : 'x86_64'
 const MIRRORS = PREINSTALL.mirrors
-// android-tools（adb 36）：下一里程碑「真实 ADB 通道」的执行客户端——
-// 壳侧用「adb pair」真实配对握手（码值不出壳），引擎侧用「adb connect/shell」经本机 adbd（shell uid）执行。
+// 0.14.0：android-tools（adb 36）已退役——内置 adb 从快照移除（无线调试配对 / 常驻 server / NSD
+// 一并下线）；特权执行改由壳侧 Shizuku UserService（uid 2000，特权 shell 通道 sh* op）承载。
 // 注：termux 无 `licenses` 包（实测索引不存在）——usr/share/LICENSES 标准文本来自基座 bootstrap 或本脚本的
 // 仓库 LICENSE 复制（见 ensureLicenseTexts；x64 基座曾缺 → 架构无关确定化）。
 const TARGETS = PREINSTALL.targets
@@ -322,6 +322,59 @@ for (const entry of OVERLAY.keepUnpublished ?? []) {
     }
     log(`引擎树补丁行为回归 ${label}: pass=${pass} fail=${fail}`)
   }
+  const arkWebTarget = join(stageRoot, 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-resources/lib/client.js')
+  const arkWebOut = execSync(`node "${join(ROOT, 'scripts', 'patches', 'tests', 'arkweb-resource-protocol.test.mjs')}" --target "${arkWebTarget}"`, {
+    encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  if (!arkWebOut.includes('arkweb-resource-protocol: all checks passed')) {
+    console.error('[引擎树补丁行为回归失败] arkweb-resource-protocol-H1: ' + arkWebOut.slice(-1000))
+    process.exit(1)
+  }
+  log('引擎树补丁行为回归 arkweb-resource-protocol-H1: PASS')
+  const externalDraftOut = execSync(`node --test "${join(ROOT, 'scripts', 'patches', 'tests', 'external-draft-conversation-seam.test.mjs')}"`, {
+    encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  // review §2.3：node --test 全 .skip 时 exit 0——要求 fail 0 **且** 有效通过数 > 0。
+  const edPass = Number(/ℹ pass (\d+)/.exec(externalDraftOut)?.[1] ?? '0')
+  if (!/ℹ fail 0/.test(externalDraftOut) || edPass <= 0) {
+    console.error('[引擎树补丁行为回归失败] external-draft-conversation-seam-J1: ' + externalDraftOut.slice(-1000))
+    process.exit(1)
+  }
+  log('引擎树补丁行为回归 external-draft-conversation-seam-J1: PASS')
+}
+
+// ── 0f-2. combo 构建期预计算（0.14.0 启动性能 P1-2 / 引擎树补丁 combo-cache-A3 的写半边）──
+// 把客户端 bundle 的 identity combo source 与 section map 在构建期算一次写进
+// home/.dsh/profiles/web/.combo-cache/（键 = sha256(client.js)）。运行时补丁按 sha256 查表，
+// 未命中/损坏回退现场生成（fail-open）。注入段的 4 条 client.js 由构建链
+// （build-apk-013.ps1 / build-apk.mjs）用 scripts/lib/combo-precompute.mjs 补算为
+// client-combos.inject.json + map 文件，经 inject-all.py --combo-cache-delta 合入 tar；
+// 两条链在注入后由 scripts/check-combo-cache.mjs 断言覆盖全部 client.js。
+// ⚠️ 双份构建脚本必须同改（雷点 10）。
+{
+  const stageRoot = join(STAGE, 'root')
+  const cacheDir = join(stageRoot, 'home', '.dsh', 'profiles', 'web', '.combo-cache')
+  if (!existsSync(join(stageRoot, 'home', '.dsh', 'profiles', 'web', 'package.json'))) {
+    console.error('[combo 预计算失败] 出厂 web profile 缺席（base-dsh 合并/seed 步骤未生效？）')
+    process.exit(1)
+  }
+  const precompute = join(ROOT, 'scripts', 'lib', 'combo-precompute.mjs')
+  const out = execSync(`node "${precompute}" --scan "${stageRoot}" --out "${cacheDir}" --manifest client-combos.json --engine "${readCfg('engine-overlay.json').engineVersion}"`,
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+  for (const line of out.split('\n')) {
+    if (line.startsWith('COMBO-PRECOMPUTE') || line.startsWith('combo-precompute: skip')) log(line)
+  }
+  const manifestPath = join(cacheDir, 'client-combos.json')
+  if (!existsSync(manifestPath)) {
+    console.error('[combo 预计算失败] manifest 缺席: ' + manifestPath)
+    process.exit(1)
+  }
+  const count = Object.keys(JSON.parse(readFileSync(manifestPath, 'utf8')).entries ?? {}).length
+  if (count === 0) {
+    console.error('[combo 预计算失败] 0 条目——扫描根或 bundle 布局变更（客户端 combo 缓存将永远 miss）')
+    process.exit(1)
+  }
+  log(`combo 预计算就位（${count} 条 identity combo + map；目录 home/.dsh/profiles/web/.combo-cache/）`)
 }
 
 // ── 0g. 能力发现目录快照（0.13.5 W3）：从 stage 引擎树生成 dsh-model-capability 的厂商目录索引 ──

@@ -11,14 +11,25 @@
 
 ---
 
-## 无障碍通道待办（0.13.5 W4 未完项）
+## 无障碍通道待办（0.13.5 W4 未完项，2026-09-14 对账）
 
-- **无障碍输入法**（API 33+，`FLAG_INPUT_METHOD_EDITOR` + `InputMethod`）：可替代 ADBKeyboard，中文输入不再依赖 IME 切换（当前 `ACTION_SET_TEXT` 已覆盖可编辑节点，非编辑节点仍需 ADBKeyboard）。
-- **`getSystemActions()` 驱动全局动作面**：当前只暴露 back/home/recents/notifications，设备实际支持的动作集合未枚举给模型。
-- **节点动作面**：长按（`ACTION_LONG_CLICK`）/展开折叠/复制粘贴/翻页/拖拽尚未暴露为工具参数。
+- **无障碍输入法**（API 33+，`FLAG_INPUT_METHOD_EDITOR` + `InputMethod`）：**【已核实不可行】**——javap 校验 android-36 的 `android.jar`，`AccessibilityNodeInfo` 无相关符号（见下方 0.13.8 批 F 登记）；非编辑节点中文输入继续由 `ACTION_SET_TEXT` + ADBKeyboard 承担。
+- **`getSystemActions()` 驱动全局动作面**：**【0.13.8 E6 已落地】**——由系统动作集合驱动（核心 back/home/recents/notifications 恒放行），见 `GlobalActionCatalog.kt`。
+- **节点动作面**：**【部分落地】**长按（`ACTION_LONG_CLICK`/`ACTION_PRESS_AND_HOLD`）已接；展开折叠/复制粘贴/翻页/拖拽仍未暴露为工具参数。
 - **单窗口截屏**（API 34 `takeScreenshotOfWindow`）与多窗口选择（`getWindows()`）未接。
-- **API <30 设备**：无障碍截屏不可用（`takeScreenshot` 需要 API 30），仍需 ADB `screencap`；`GLOBAL_ACTION_TAKE_SCREENSHOT`(28) 只存相册不回传数据。
-- **arm64 真机验证**：无障碍通道目前仅在 x86_64 模拟器验证（无 arm64 设备在线）。
+- **API <30 设备**：**【已回落】**0.13.8 E6 起无障碍截屏失败自动回落 ADB `screencap`；回落分支的真实触发设备验证仍未做（本机 API 35 无障碍截屏可用）。
+- **arm64 真机验证**：0.13.6 曾完成 V2425A 链路验证；0.13.7fx-1 之后各版发布说明均标注「arm64 真机待验」，0.14.0-preview 同样待补。
+
+## 0.14.0 收尾登记（2026-09-14，发布后工作区）
+
+- **BrowserHost 与浏览器控制面：工作区已实现、未设备回归**：壳侧 `BrowserHost`（隔离 WebView + 拒绝面 + 视口 letterbox）与六条桥 op、面板视口下拉已就绪；`plugins/dsh-android-browser` 的 17 条工具契约与 `tools.ts` 实现（open/snapshot/click/type/press/scroll/get_text/wait/navigate/back/forward/reload/tabs/identity/viewport/screenshot/tier）已在工作区落地——**但 0.14.0-preview 发布时壳侧宿主未落地（面板只读），工作区代码未过设备端到端回归**；页代次/旧 ref 拒绝、截图权限与身份切换的设备验收待补。
+- **虚拟屏多屏能力：工作区已实现、未设备回归**：壳侧已含实时 display registry（stable alias + 动态 displayId）、controller 自有选择目标、每查看器独立 bounds、查看器仲裁（同一 Surface 不能挂两个查看器，冲突返回 `viewer-target-occupied`）、`MAX_VIRTUAL_DISPLAYS=2`；面板已渲染「呈现目标」下拉（调 `vdisplaySelect`）。**发布版（0.14.0-preview）不含这些；工作区的 viewer 接管/重挂、双查看器冲突、横竖屏几何与截图仍未过设备回归。** 真实屏明确不可镜像（`screen-not-selectable`）。
+- **Shizuku 完整特权体验未收口**：UserService/AIDL v1 与固定 argv 执行已落地、建屏/launch/back 探针设备通过；「无障碍关闭时 Shizuku 提供完整特权体验」（U-4）仍缺工具面改名/能力迁移与设备矩阵；ADB 配对页仍作为迁移/诊断面保留，未按 U-4 退役。
+- **开放屏幕范围**：native 真源与执行点复查已落地；`virtual-only` 下真实屏观察面（含无障碍直连队列）的完整设备矩阵未跑。
+- **按需 skill 注入（U-5）未实施**：控制流程仍会进入常驻上下文/schema 的部分未清点，token 预算门禁未做。
+- **Shizuku 许可登记缺口**：gradle aar 依赖不在 `check-third-party.mjs` 的 dpkg 矩阵覆盖内，`assets/licenses/THIRD_PARTY_NOTICES.md` 无 Shizuku 条目（Apache-2.0）——发版合规需补。
+- **性能 A1 结论未定**：`check-perf-instrumentation` 的 P-AC-01 要求出厂值 `patchReload: startup`，但 0.14.0 设备 A/B 观测 `live` 组中位约 12.5-13.0s 快于 `startup` 组 14.6-15.0s（n 小、compose 探针缺失、单机型）——方向与方案主张相反，需 owner 拍板是锁正确性语义还是改基线（见 `docs/0.14.0-preview-VERIFICATION-LOG.md` §50）。
+- **单 ABI 静默交付**：0.13.8-b 实测「某 ABI 被拒后链路仍 exit 0」已由 `check-build-chain-abort.mjs` 拦下（坑 94），门禁已入 17 项集合。
 
 ## 0.13.8 收尾新增登记（2026-09-12 晚）
 

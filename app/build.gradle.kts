@@ -111,6 +111,9 @@ dependencies {
   implementation("dev.rikka.shizuku:api:13.1.5")
   implementation("dev.rikka.shizuku:provider:13.1.5")
   implementation("androidx.activity:activity-ktx:1.10.1")
+  // 隔离浏览器身份面（0.14.0 正式轮）：document-start 脚本注入（platform/触摸/屏幕，无竞态）
+  // 与 UA-CH（WebView >= 116 能力门）。无该库时只能用 onPageStarted 注入（有竞态）。
+  implementation("androidx.webkit:webkit:1.12.1")
   // androidx.core: FileProvider (external-reader open, issue #52); ViewCompat/
   // WindowInsetsCompat were previously satisfied transitively via activity-ktx.
   implementation("androidx.core:core-ktx:1.15.0")

@@ -61,9 +61,13 @@ const modelSync = externalNamed('dsh-model-sync')
 // 门禁集（唯一声明处；check-release-gates.mjs 断言与 build-apk-013.ps1 的差集 = 0）
 const GATE_SCRIPTS = [
   'check-patch-mirror.mjs',
+  // review C6：适配层契约（bundle 行/构建产物/版本钉）。上游 dsh/ 与基线 node_modules 是本机只读
+  // 产物（gitignore）——本链（云端自包含）对应小节 SKIP 计数；发布链以 --require 强制齐全。
+  'check-contract.mjs',
   'check-snapshot-fingerprint.mjs',
   'check-manifest-hardening.mjs',
   'check-bounded-io.mjs',
+  'check-api-route-auth.mjs',
   'check-protocol-v2.mjs',
   'check-tool-output-schema.mjs',
   'check-control-ops.mjs',
@@ -73,6 +77,7 @@ const GATE_SCRIPTS = [
   'check-engine-overlay.mjs',
   'check-patch-mounts.mjs',
   'check-inject-completeness.mjs',
+  'check-combo-cache.mjs',
   'check-strip-noop.mjs',
   'check-kotlin-comments.mjs',
   'check-build-chain-abort.mjs',
@@ -136,6 +141,9 @@ try {
   // ---- 2. 门禁（注入前；与 build-apk-013.ps1 同一份门禁集，0.13.8-b ST-06）----
   log('门禁：补丁镜像一致性…')
   run('node', [gate('check-patch-mirror.mjs')])
+  // review C6：适配层契约（上游 bundle 行引用 / 注入包 lib 产物 / 客户端槽位 / 版本钉台账）。
+  log('门禁：适配层契约（bundle/构建产物/版本钉）…')
+  run('node', [gate('check-contract.mjs')])
   log('门禁：快照指纹对账（预检）…')
   run('node', [gate('check-snapshot-fingerprint.mjs')])
   log('门禁：manifest 加固语义…')
@@ -146,6 +154,8 @@ try {
   run('node', [gate('check-build-chain-abort.mjs')])
   log('门禁：子进程有界读…')
   run('node', [gate('check-bounded-io.mjs')])
+  log('门禁：/api 路由鉴权清单…')
+  run('node', [gate('check-api-route-auth.mjs')])
   log('门禁：协议 V2 往返与体积…')
   run('node', [gate('check-protocol-v2.mjs')])
   log('门禁：工具输出 schema 契约…')
@@ -167,6 +177,18 @@ try {
   if (!SKIP_INJECT) {
     // 统一补丁门禁（Phase 2a）：engine + vendor 补丁幂等施加与校验（registry.json）
     run('node', [join(ROOT, 'scripts', 'patches', 'apply-patches.mjs'), join(ROOT, 'vendor')])
+    // combo 缓存注入段（A3 启动性能）：注入链的 client.js 不在快照段预计算范围内，这里补算为
+    // client-combos.inject.json + <sha256>.map，经 inject-all --combo-cache-delta 合入 tar；
+    // 覆盖由注入后门禁 check-combo-cache 断言（与 build-apk-013.ps1 同一份实现）。
+    log('combo 缓存注入段预计算（A3）…')
+    const comboDelta = join(work, 'combo-cache-delta')
+    mkdirSync(comboDelta, { recursive: true })
+    run('node', [
+      join(ROOT, 'scripts', 'lib', 'combo-precompute.mjs'),
+      ...pluginDirs.flatMap((p) => ['--scan', p]),
+      '--scan', undo, '--scan', market, '--scan', modelSync,
+      '--out', comboDelta, '--manifest', 'client-combos.inject.json', '--engine', 'inject',
+    ])
     log('单 pass 注入（@dsh-android + undo/market + 权威 patch，全部装配 profile）…')
     // ST-05：--all-profiles = 权威 patch 写给全部真实装配 profile（web+headless，负控 profile 除外）
     run('python', [
@@ -175,6 +197,7 @@ try {
       '--dsh-android', ...pluginDirs,
       '--external', undo, market, modelSync,
       '--all-profiles',
+      '--combo-cache-delta', comboDelta,
     ])
     snapIn = join(work, 'snap-final2.tar.xz')
   } else {
@@ -188,6 +211,11 @@ try {
   // 注入面成员完整性（P0）：包内新增文件必须随注入进 tar，且相对导入不得悬空
   log('门禁：注入成员完整性（成员集合 + 相对导入可解析）…')
   run('node', [gate('check-inject-completeness.mjs'), snapIn])
+  // combo 缓存覆盖（A3）：注入后 tar 的每条 client.js 必须有 sha256 命中的缓存条目（含注入段增量）
+  log('门禁：combo 缓存覆盖（sha256 命中 + map 在场）…')
+  run('node', [gate('check-combo-cache.mjs'), snapIn])
+  log('门禁：注入后 /api 路由鉴权 marker…')
+  run('node', [gate('check-api-route-auth.mjs'), '--snapshot', snapIn])
   log('门禁：剥离清单后置断言（清单项必须不存在）…')
   run('node', [gate('check-strip-noop.mjs'), snapIn])
   log('门禁：快照权限模式…')
@@ -198,8 +226,8 @@ try {
   }
   log('门禁：第三方许可…')
   run('node', [gate('check-third-party.mjs'), 'x', '--tar', snapIn])
-  log('门禁：机密…')
-  run('node', [gate('check-snapshot-secrets.mjs'), snapIn])
+  log('门禁：机密（严格：归档不可读/成员为空即失败）…')
+  run('node', [gate('check-snapshot-secrets.mjs'), snapIn, '--require'])
   log('门禁：ELF 架构…')
   run('node', [gate('elf-check.mjs'), snapIn, ABI])
   log('门禁：运行时补丁资产（严格，快照缺席即失败）…')

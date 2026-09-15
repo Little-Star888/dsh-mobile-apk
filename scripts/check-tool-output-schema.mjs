@@ -206,11 +206,18 @@ const pluginTest = join(PLUGIN, 'test', 'tool-output-schema.test.mjs')
 if (existsSync(pluginTest)) {
   const { spawnSync } = await import('node:child_process')
   const r = spawnSync(process.execPath, ['--test', pluginTest], { cwd: ROOT, encoding: 'utf8' })
+  const testOut = (r.stdout ?? '') + (r.stderr ?? '')
   if (r.status !== 0) {
-    console.error((r.stdout ?? '') + (r.stderr ?? ''))
+    console.error(testOut)
     problems.push('插件侧 test/tool-output-schema.test.mjs 未通过')
   } else {
-    const summary = (r.stdout ?? '').split('\n').filter((x) => /^ℹ (tests|pass|fail)/.test(x)).join('  ')
+    // review §2.3：node --test 全 .skip 时 exit 0——要求有效通过数 > 0（全 skip = 假绿）。
+    const passN = Number(/^ℹ pass (\d+)/m.exec(testOut)?.[1] ?? '0')
+    const failN = Number(/^ℹ fail (\d+)/m.exec(testOut)?.[1] ?? '0')
+    if (passN <= 0 || failN !== 0) {
+      problems.push('插件侧 test/tool-output-schema.test.mjs 未产生有效通过数（全 skip = 假绿）: pass=' + passN + ' fail=' + failN)
+    }
+    const summary = testOut.split('\n').filter((x) => /^ℹ (tests|pass|fail)/.test(x)).join('  ')
     console.log('PASS  插件侧 test/tool-output-schema.test.mjs' + (summary ? '（' + summary + '）' : ''))
   }
 } else {

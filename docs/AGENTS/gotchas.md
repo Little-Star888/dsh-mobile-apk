@@ -280,8 +280,52 @@
     并在「被拒非空」或「产出为空」时 `exit 1`。防线 = `scripts/check-build-chain-abort.mjs`（静态逐处断言 +
     `--self-test` 抽真实尾部块用合成状态驱动：被拒→非 0 / 全产出→0 / 零产出→非 0 / 去掉守卫→0 承重反证）。
 
+95. **`/api` 的保护不是路由继承：exact 或更长 prefix 会绕过 `/api` browser-session 栅栏（0.14.0 #222）**：
+    上游 WebServer 先匹配 exact、再取最长 prefix，因此 `/api/undo`、`/api/android/env/*`、市场、目录选择等
+    插件端点不会自动经过 `client-connection` 的 `/api` handler。任何读取 workspace、profile patch、快照、
+    路径或执行写操作的 mobile-owned 端点必须在 handler 的第一个副作用前自行鉴权；connection 在场时以其
+    Host/Origin/browser-session 结果为权威，401 才能由壳侧实时 control token 补足，403 不可绕过。
+    防线 = `scripts/check-api-route-auth.mjs` 与 `scripts/api-route-auth-policy.json`：枚举运行时 route source、
+    锁定登记数和动态 path 数，保护路由要求 guard marker，公开路由要求窄响应白名单；未知候选一律令构建失败。
+    构建期 vendor U1/U2 补丁、linux-env/file-open/browser 的回归测试及 post-injection artifact 均须同批复验。
 
+96. **开放屏幕范围不能只在 Web 设置页限制（0.14.0 施工）**：旧 ADB fallback 与直接控制队列都是绕开页面的执行面；若只隐藏 UI 或只在引擎工具 schema 加字段，`virtual-only` 仍可能读到真实屏。修法 = native `ScreenScopePrefs` 为真源，bridge 的 `androidPrivilege.screenAccess()` 在 manage 选择 a11y/ADB 前读该值，`DeviceControlService` 在执行点复查；范围变化丢弃现有 real snapshot/ref，`virtual-1` 未 ready 时必须 `screen-not-ready`，绝不映射为 display 0。锚点：`ScreenScope.kt`、`screen-scope.ts`、`DeviceControlService.realScreenScopeError()`。
 
+97. **Android WebView 的 `<input type=file>.click()` 可能同步触发 window focus（0.14.0 施工）**：若菜单在这次同步 focus 中恢复 `accept`，壳 `onShowFileChooser` 读到的已经是旧筛选条件，表现为“上传图片/附件”选择器不分流或一项像不可用。修法 = 仅在 SAF Activity 确实经历后台→前台、input change/cancel 或有界超时后恢复 filter；保留同一 input 和上游上传通道。锚点：`attachment-picker-menu.ts`。
 
+98. **不得对完整 `content://` URI 先做 `URLDecoder.decode`（0.14.0 外部草稿回归）**：DocumentsProvider 的 document id 是 URI 编码的 opaque segment，例如 `primary%3ADocuments%2Ffile.txt`。先全串解码会把 `%2F` 变成路径分隔符，provider 可能解析成目录并让 `openInputStream` 生成 0 B 临时草稿；文件看似“已导入”但不能发送。修法 = `Uri.parse(uriString)` 保留 encoded id，只有文件名净化单独 decode；MuMu 以 granted DocumentsProvider URI 复验复制字节数。锚点：`FileIncoming.validate()` / `W3ShellContractTest.incomingContentUriKeepsEncodedDocumentId()`。
 
+99. **`NODE_COMPILE_CACHE` 只在进程正常退出时落盘，硬杀 = 缓存永远热不起来（2026-09-14 缓存审计）**：引擎/工具子进程新编译的模块缓存只在 Node 正常退出（或显式 `module.flushCompileCache()`）时才写盘；壳侧 `killExistingEngine()` 是有界宽限的 SIGTERM→SIGKILL（0.14.0 前 3s，小于上游 CLI 的 5s 排空预算），Android 还会整进程回收（SIGKILL）。后果：换树/装机后的新编译条目永远写不进去，每次冷启动重复编译。审计证据 = 设备缓存目录 4,171 条但自 09-12 23:07 后零新增/零改写（期间 09-14 三次快照刷新、多次引擎重启）。修法 = 补丁 `perf-compile-cache-flush-N2`（bin.js 周期 flush）+ `killExistingEngine` 宽限 3s→6s；诊断用 `NODE_DEBUG_NATIVE=COMPILE_CACHE` 观察 hit/miss，**勿把「缓存目录在场」当成命中**。另注：启动慢的大头不是模块编译而是 `compose()` 无缓存（见补丁 `combo-lazy-A4` / `combo-cache-A3` 与协调仓 `docs/HANDOFF-COMBO-CACHE-2026-09-14.md`）。
 
+100. **WebView 的 `@JavascriptInterface` 按「实参个数」匹配 Java 方法——零参调用对可选参数不成立（2026-09-15 设备实测，已修）**：TS 类型面写 `browserHostShow?: (url?: string | null) => string`（可选参数）时，页面上 `window.androidBridge.browserHostShow()` 会抛 `Error: Method not found`（WebView 桥没有「缺省实参」概念；显式传 `null`/`undefined` 才命中单参方法）。`verify-browser-host.mjs` 的「重开」步骤正是零参调用，本轮在该点失败。修法 = 需要可选实参的桥方法补零参重载（`AndroidBridge.kt` 的 `browserHostShow()`）或 TS 面把参数改为必填；新增桥方法时按此检查。
+
+101. **combo 缓存预计算不得按「本地有 .map」跳过（2026-09-15 构建链实锤）**：`combo-precompute.mjs` 曾对本地存在 `lib/client.js.map` 的 bundle 一律 skip（理由是运行时走 live 路径），但**产物里没有 map**（快照 slim 全树删 .map、inject-all.py 明确排除 .map、S0 门禁还把 @dsh-android 的 .js.map 当泄露）→ 运行时 `record.sourceMap === undefined` 仍要查缓存 → `check-combo-cache` 判红（本轮首跑即逮到 6 条）。修法 = 无条件为每条 client bundle 生成条目（运行时自身有 `sourceMap !== undefined → 不查缓存` 的判定，本地有 map 时条目只是闲置）。另：该门禁在 Windows 上必须用 `path.posix` 拼 tar 成员路径，`path.join` 的反斜杠会让包名读成 undefined（假红）。
+
+102. **`adb forward --remove-all` 是 adb server 全局的，不是按设备（2026-09-15 流程教训）**：多设备循环里对每台设备执行 `--remove-all` 会清掉**其它设备**的转发（本轮两次误伤，表现为 /json/list 连接拒绝）。按端口 `adb forward --remove tcp:<port>` 或直接覆盖同端口转发。相关：`am force-stop` 后必须核对 `pidof` 是否换号才算真重启（进程存活时 BrowserHost 等进程级状态会残留，浏览器验收的「初始态」断言因此假红）。
+
+103. **`verify-state-sync.mjs` 的偏好 upsert 需容忍文件缺席（2026-09-15 横屏机实测）**：开发者日志偏好 `shared_prefs/dsh_prefs.xml` 只在该设备用过对应开关后才生成——文件缺席时原 upsert 命令（grep/sed）直接失败，ST-11 两条用例恒 FAIL（设备状态问题，非产品缺陷）。修法 = 命令先 `[ -f <file> ] ||` 落一个合法空 `<map>` 骨架再 upsert（与 SharedPreferences 自身写出的结构同形）。
+
+104. **Shizuku UserService 协议必须握手到 v2（0.14.0 §6 大输出面）**：AIDL v2 的 `execCapture/readChunk/writeChunk/removePath` 只有 v2 服务才有——旧 v1 服务（上一版 App 拉起的常驻 UserService 进程）不会随 App 升级自动换版。壳侧 `ShizukuTransport.readyService()` 必须以 `protocolVersion() < 2` 明确拒绝（`shizuku-user-service-too-old` + 「设置页重新连接 Shizuku」引导），**不得**静默退回 16 KiB 内联：screencap/`uiautomator dump` 这类大输出会被截断成半截 XML/PNG，表现为「工具偶发解析失败」而不报通道问题。
+
+105. **`readChunk` 的「不可读」与「EOF」必须可区分（0.14.0 实锤设计点）**：AIDL 返回 `byte[]`，若两者都返回空数组，pull 会把「文件不存在 / 无权限」当成功，生成 0 字节文件，工具层随后报「图片无法解码」——真因在通道里丢了。约定：`null` = 不可读，空数组 = EOF（`ShizukuUserService.readChunk` 与 `ShizukuTransport.pullFile` 两侧同源，改动必须双改）。
+
+106. **ADB 退役后 `appops` 走哪条通道（0.14.0）**：`ACCESS_RESTRICTED_SETTINGS`（Android 13+ 侧载应用）与 API 29 `LEGACY_STORAGE` 的解锁命令改走 `ShizukuTransport.runShell`（uid 2000）。`AdbState.kt` 已删除、快照 `usr/bin/adb` 已移除——壳侧**不得**再留任何 appops 的 adb 客户端路径；残留调用只会得到「命令不存在」，且不再有配对/端口发现来救。
+
+107. **`translateAdbLine` 不做 adb 字符串透传（0.14.0 §6）**：引擎侧 `execAdbLine` 先按 `&&`/`;`（引号感知）拆段，再翻成 `shExec`/`shPull`/`shPush` 步骤；`adb devices` 折成 `getprop` 自称、`connect|kill-server|start-server` 折成 no-op，**未知子命令 fail-closed 拒绝**（如 `adb install`）。新增 adb 用法必须显式加翻译规则，禁止把行原样交给 shell——否则 adb 会以「命令不存在」的形态在设备上失败，工具层误判为设备缺陷。
+
+108. **`@JavascriptInterface` 方法必须以桥对象为接收者调用（0.14.0 设备实锤）**：把桥方法抽出函数再裸调会抛
+   `Error: Java bridge method can't be invoked on a non-injected object`。客户端里任何
+   `const f = window.androidBridge.<m>; f()` / `bridge[method]()` 形态都是这条坑（返回 `undefined` 被 catch 吞掉后表现为「状态永远是 blocked / 功能静默不生效」）。正确写法：`window.androidBridge.<m>(...)` 或
+   `(candidate as () => string).call(bridge)`。0.14.0 的虚拟屏自动露出失效正是此坑：`decodeNative` 裸调 →
+   状态恒 blocked、reveal 恒 `active=false`（面板「暂无虚拟屏」+ 建屏后舞台永不挂载）。
+
+109. **`WebSettings.setInitialScale` 在 API 36 的 SDK stub 中已不存在（0.14.0 实证）**：`javap` 打
+   `platforms/android-36/android.jar` 的 `android.webkit.WebSettings` 无 `setInitialScale`，
+   `settings.initialScale = ...` / `setInitialScale(...)` 直接编译失败（不是 deprecated）。
+   BrowserHost 的分辨率 = CSS 视口语义改由 **document-start 注入 `width=<cssW>`** + 物理矩形等比 letterbox
+   实现（`window.innerWidth == 请求宽`，`dpr` 保持原生 density）。
+
+110. **`addDocumentStartJavaScript` 注册的脚本不可替换（0.14.0 实证）**：同一 WebView 上
+   `ScriptHandler.remove()` 后再注册新脚本，旧脚本仍会在下一次导航生效（设备实测：390 的脚本在切到 700 后
+   继续覆盖 meta）。因此「每实例只注册一次」是前提：身份 / 分辨率变化必须**重建隔离 WebView**
+   （`BrowserHost.recycleView()`，本就要重载），不能在原实例上重注册。

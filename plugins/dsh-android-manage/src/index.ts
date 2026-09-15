@@ -63,6 +63,13 @@ interface PrivilegeFace {
   /** 0.13.5 W4：无障碍通道执行（壳侧队列往返；未开启无障碍时直接拒绝）。 */
   controlExec?(op: string, args: Record<string, unknown>, timeoutMs?: number): Promise<{ ok: true; data: unknown } | { ok: false; error: string }>
 
+  /** 0.14: current native-owned access range; no model tool can mutate it. */
+  screenScope?(): 'virtual-only' | 'real-only' | 'all'
+  /** 0.14: fail-closed target decision before any real/virtual content operation. */
+  screenAccess?(screenId?: string):
+    | { ok: true; screenId: 'real' | 'virtual-1'; displayId: number; scope: 'virtual-only' | 'real-only' | 'all' }
+    | { ok: false; reason: string; guidance: string; scope: 'virtual-only' | 'real-only' | 'all'; screenId: string }
+
   audit(action: string, detail: Record<string, unknown>, ok: boolean): void
 }
 
@@ -83,11 +90,64 @@ function pickText(v: Record<string, unknown>, ...keys: string[]): string {
 }
 
 function tools(ctx: Context, priv: PrivilegeFace) {
+  // Every route that can observe or manipulate an Android display goes through this one scope gate
+  // before it chooses a11y/ADB. That prevents the legacy ADB fallback from bypassing virtual-only.
+  // review C11：`device_info` 已移出——它只读型号/版本等元数据，不含屏幕内容；默认 virtual-only
+  // 下把它整体拒绝属过度拦截（U-3 约束的是「屏幕内容读取与操作」）。
+  const SCREEN_ACTIONS = new Set([
+    'screenshot', 'ui_detail', 'ui_tree', 'act_input', 'ui_dump', 'ui_click',
+    'ui_scroll', 'ui_input', 'web_dump', 'app_launch', 'ui_global',
+  ])
   const guard = (action: string, args: Record<string, unknown>, exec?: { agent?: { session?: unknown } }) => {
+    if (SCREEN_ACTIONS.has(action) && priv.screenAccess) {
+      const requested = typeof args.screenId === 'string' ? args.screenId : undefined
+      const screen = priv.screenAccess(requested)
+      if (!screen.ok) {
+        priv.audit(action, { tool: 'android-manage', args, reason: screen.reason, scope: screen.scope }, false)
+        return { ok: false as const, guidance: screen.guidance }
+      }
+    }
     const a = priv.gateFor(exec?.agent?.session)
     priv.audit(action, { tool: 'android-manage', args }, a.ok)
     return a
   }
+
+  const screenList = defineTool({
+    name: 'android_screen_list',
+    description: '列出稳定屏幕别名及当前用户开放范围。此工具只返回 capability 元数据，不读取页面内容；屏幕读写仍要求 danger-full-access。',
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          scope: { type: 'string', required: true },
+          screens: { type: 'array', required: true, items: { type: 'object', additionalProperties: true } },
+          text: { type: 'string', required: true },
+        },
+      },
+      render: (_args, value: Record<string, unknown>) => [{ type: 'text', text: String(value.text ?? '') }],
+    },
+    execute: async () => {
+      const scope = priv.screenScope?.() ?? 'virtual-only'
+      const realInScope = scope === 'real-only' || scope === 'all'
+      const virtualInScope = scope === 'virtual-only' || scope === 'all'
+      return {
+        scope,
+        screens: [
+          {
+            screenId: 'real', displayId: 0, kind: 'physical', label: '真实屏幕', inScope: realInScope,
+            reason: realInScope ? '可在完全访问会话中使用无障碍或已授权 transport 操作。' : '当前用户范围不允许读取或操作真实屏幕。',
+          },
+          {
+            screenId: 'virtual-1', kind: 'virtual', label: '虚拟屏幕 1', inScope: virtualInScope,
+            reason: virtualInScope ? 'VirtualDisplay 尚未就绪；不会映射到 display 0。' : '当前用户范围不允许读取或操作虚拟屏幕。',
+          },
+        ],
+        text: `开放范围：${scope}。real = display 0；virtual-1 尚未就绪且绝不回退到真实屏幕。`,
+      } as never
+    },
+  })
 
   /** 可选服务最小面：不引 dsh-attachment/dsh-llm 依赖，能力缺失时自动回退路径模式。 */
   interface AttachmentFace {
@@ -1819,7 +1879,7 @@ function tools(ctx: Context, priv: PrivilegeFace) {
   })
 
   // 0.14 D4：uiDetail 此前 defineTool 了但没进注册数组（死代码，而提示文案还在引导模型调用）。
-  return [screenshot, uiTree, deviceInfo, actInput, uiDump, uiClick, uiScroll, uiInput, webDump, envPrepare, appLaunch, uiGlobal, uiDetail]
+  return [screenList, screenshot, uiTree, deviceInfo, actInput, uiDump, uiClick, uiScroll, uiInput, webDump, envPrepare, appLaunch, uiGlobal, uiDetail]
 }
 
 export function apply(ctx: Context, _config: Record<string, unknown> = {}) {

@@ -1,25 +1,25 @@
 # RUNTIME-PATCHES.md — assets/patched/ 运行时补丁登记
 
-> 职责：`app/src/main/assets/patched/` 逐文件的权威登记（0.13.7fx-1 起 **2 个在册**：attachment-local、session-persistence-jsonl）——消费方 `EngineManager.applyRuntimePatches()`（EngineManager.kt:610-616），逐文件目标快照路径/作用/来源线索与维护约定。在册字节数与注册行号 2026-09-11 当场 ls/grep 实测；退役批次见 §5。
+> 职责：`app/src/main/assets/patched/` 逐文件的权威登记（0.13.7fx-1 起 **2 个在册**：attachment-local、session-persistence-jsonl）——消费方 `EngineManager.applyRuntimePatches()`（EngineManager.kt:636），逐文件目标快照路径/作用/来源线索与维护约定。在册字节数与注册行号 2026-09-14 当场 ls/grep 实测；退役批次见 §5。
 
 ## 1. 机制（EngineManager.kt）
 
-- **路径速查**：快照解压根 = `filesDir`（usr/ + home/）；dshPkgs = `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai`（EngineManager.kt:410）；webDist = `dshPkgs/dsh-web-frontend/dist`（:411）；资产源 = APK 内 `assets/patched/`，经 `context.assets.open(asset)` 读取（:447-452）。
-- **触发时机**：每次 `startEngine` 前调用（EngineManager.kt:554）——首启解压后、以及每次快照刷新/重解压后自动重施加（幂等）。
-- **覆盖式全量替换**：`applyAssetPatch`（:439-462）把 asset 字节整文件写入目标，**非 delta/非行级补丁**——asset 即目标文件的完整修改版拷贝。
-- **内容指纹判定**：目标已存在且字节与 asset 完全一致（contentEquals，:454）才跳过；不用固定 marker 字符串——v1→v2 升级时旧 marker 曾导致更新后的 asset 被误跳过（:404-405、:432-434 注释实锤）。快照刷新覆盖目标后指纹失配 → 自动重施加。
-- **目标包缺席即跳过**：目标父目录不存在时不落补丁（:443-446，如包被上游裁出依赖图，宁缺毋滥不留死覆盖）。
+- **路径速查**：快照解压根 = `filesDir`（usr/ + home/）；dshPkgs = `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai`（EngineManager.kt:637）；资产源 = APK 内 `assets/patched/`，经 `context.assets.open(asset)` 读取。
+- **触发时机**：每次 `startEngine` 前调用（EngineManager.kt:636 `applyRuntimePatches`）——首启解压后、以及每次快照刷新/重解压后自动重施加（幂等）。
+- **覆盖式全量替换**：`applyAssetPatch`（:648）把 asset 字节整文件写入目标，**非 delta/非行级补丁**——asset 即目标文件的完整修改版拷贝。
+- **内容指纹判定**：目标已存在且字节与 asset 完全一致（contentEquals，:662）才跳过；不用固定 marker 字符串——v1→v2 升级时旧 marker 曾导致更新后的 asset 被误跳过（注释实锤）。快照刷新覆盖目标后指纹失配 → 自动重施加。
+- **目标包缺席即跳过**：目标父目录不存在时不落补丁（宁缺毋滥不留死覆盖）。
 - ~~hashAdaptive~~（0.13.7fx-1 随 web-frontend-index.html 退役，理由见 §8）：曾用于让 patched 模板跟随引擎 dist 的 content-hash bundle 名；`adaptIndexHashes` 已随 asset 一起删除。
-- 另有 append 式辅助 `applyAssetPatchAppend`（:493-505，marker 幂等追加，历史上用于 cordis.patch.yml 场景）——当前无调用方，仅保留备用。
+- 另有 append 式辅助 `applyAssetPatchAppend`（:674，marker 幂等追加，历史上用于 cordis.patch.yml 场景）——当前无调用方，仅保留备用。
 
 ## 2. 文件逐项登记
 
-目标根 = 快照内 `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/`（dshPkgs，EngineManager.kt:410）。asset 字节数为 ls 实测。
+目标根 = 快照内 `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/`（dshPkgs，EngineManager.kt:637）。asset 字节数为 ls 实测。
 
 | asset 文件（字节） | 目标快照路径（注册行） | 状态 | 作用 / 来源线索 |
 |---|---|---|---|
-| attachment-local-index.js（48,404） | dsh-attachment-local/lib/index.js（:612-613） | 生效 | 0.13.7 重出（引擎 0.1.5-rc.1）：Android sepolicy 禁 link(2) → copyFile/rename 回退 + F2 祖先 fsync 守卫（与构建期补丁 attach-durable-F2 同源）；内含图片归一化 2048 降采样上限（`DEFAULT_NORMALIZED_IMAGE_MAX_DIMENSION = 2048`）。补丁判定走内容指纹而非内嵌标记 |
-| session-persistence-jsonl-index.js（**138,025** 已重出 2026-09-12） | dsh-session-persistence-jsonl/lib/index.js（:614-615） | 生效 | 0.13.7 重出：**两处 link(2) 站点都带 EACCES/EPERM/ENOTSUP → rename 回退**（materialize 与 publishCurrentExclusive；后者是 v0→v3 会话迁移的必经路径，apk #154）。构建期同源补丁 spj-migration-link-F5；回归 `scripts/patches/tests/spj-migration-link-f5.test.mjs`。**0.13.8-b 起该 asset 已落后于构建期补丁**：F7（发布独占 + 失败回收）只进了快照，asset 仍是 F5 版（无 `dshMobileClaimExclusive`）→ 启动时会把 materialize 站的独占语义静默改回旧版；重出后字节 = **138,025**，回归 `scripts/patches/tests/publish-exclusive-reclaim.test.mjs` |
+| attachment-local-index.js（**47,321** 已从快照重出 2026-09-15） | dsh-attachment-local/lib/index.js（:639） | 生效 | 0.13.7 重出（引擎 0.1.5-rc.1）+ 0.14.0 review C1：**与构建期 `attach-durable-F2` 逐字节同源**（F2 已扩为三件套：祖先 fsync 守卫 + 两处 link(2)→rename 回退 + unlink ENOENT 容忍）；内含图片归一化 2048 降采样上限（`DEFAULT_NORMALIZED_IMAGE_MAX_DIMENSION = 2048`）。补丁判定走内容指纹而非内嵌标记 |
+| session-persistence-jsonl-index.js（**137,514** 已从快照重出 2026-09-15） | dsh-session-persistence-jsonl/lib/index.js（:641） | 生效 | 0.13.7 重出 + 0.13.8-b 追加 F5/F7（与构建期同源）：两处 link(2) 站点带 EACCES/EPERM/ENOTSUP → rename 回退，发布独占语义由模块级 `dshMobileClaimExclusive/ReleaseClaim` 恢复（O_EXCL 占位 + 失败回收）。**0.14.0 review C1 实锤**：v0.14.0-preview 资产曾是「内联占位 + helper 占位」双占位坏版本（恒 EEXIST 恒 false，旧会话迁移永久失败并留 0 字节毒文件）——修复 = F7 补丁增加 v1→v2 收敛分支 + 本资产从快照重出 + 门禁升级为逐字节比对。行为回归 `scripts/patches/tests/{spj-migration-link-f5,publish-exclusive-reclaim}.test.mjs`（后者支持 `--asset` 直测资产本体） |
 
 已退役资产（不在 `assets/patched/`，`applyAssetPatch` 注册行同步移除，勿再引用）：`primitives-index.js`、`fs-local-index.js`（0.13.3 批退役，d377abc——link(2) 回退族改由构建期补丁承担）；`web-frontend-index.html`（0.13.7fx-1 退役，§8）；`llm-deepseek-index.js`（rc.2 起遗留死资产，随重出批删除）。
 
@@ -53,8 +53,9 @@
 ## 6. 与协调仓 scripts/patches/ 的分工边界
 
 **协调仓 `scripts/patches/`（apply-patches.mjs + registry.json + data/compat-map.json）是快照注入链的构建期补丁框架**，按 `scope` 分两路：
-- `scope: vendor` 打 vendor 固化插件（dshmarketplace-plugin A-D、dsh-undo-savepoint E1-E7），在 `build-apk-013.ps1` 阶段施加；
-- `scope: engine` 打引擎树内上游包（attach-durable-F2 附件祖先 fsync 守卫、flock-android-F3 node-addon-system 无 Android 预编译的 stub、atomic-stale-lock-F4 孤儿写锁回收、spj-migration-link-F5 会话迁移 link(2)→rename 回退、reference-drill-F6 移动形态目录行下钻、boot-pending-G1、pi-toolcall-G2），在 `build-snapshot-013.mjs` 0f 步施加并逐个复查 marker。
+- `scope: vendor` 打 vendor 固化插件（dshmarketplace-plugin A-D + **U2 exact-route browser-session 鉴权**、dsh-undo-savepoint E1-E8 + **U1 `/api/undo` connection/token 鉴权与 no-store**），在 `build-apk-013.ps1` 阶段施加；对应行为回归在 `scripts/patches/tests/{undo-route-auth,market-route-auth}.test.mjs`。
+- `scripts/check-api-route-auth.mjs` 与 `api-route-auth-policy.json` 不属于运行时 asset：它们扫描所有 mobile-owned WebServer registration source，要求 protected guard 或窄公开白名单，并在本地/云端/CI/发布链接线。file-incoming 的 queue、claim、content、complete、clean 五个 exact route 均属于 protected 面；content 只接受进程内 ticket，不能返回源绝对路径。
+- `scope: engine` 打引擎树内上游包（当前全量以 §7.1 表为准：attach-durable-F2 / flock-android-F3 / atomic-stale-lock-F4 / spj-migration-link-F5 / publish-exclusive-F7 / reference-drill-F6 / boot-pending-G1 / pi-toolcall-G2 / perf-patch-reload-N1 / perf-compile-cache-flush-N2 / combo-lazy-A4 / combo-cache-A3 / arkweb-resource-protocol-H1 / external-draft-conversation-seam-J1），在 `build-snapshot-013.mjs` 0f 步施加并逐个复查 marker。
 
 **与本节 assets/patched/ 的分界**：同一份引擎文件的修复若能在构建期落地（随发行快照固化），优先走 `scope: engine`；运行时 asset 只承担「必须每次启动前覆盖」或「与引擎版本无关的壳侧定制」（见 §3-2）。已退役：pi-drift-F1（上游 0.1.5 原生 strict/deferred 校验）。**assets/patched/ 是设备端运行时补丁**——壳在每次引擎启动前对快照内上游引擎包做覆盖。两者层不同、目标不同、幂等机制不同（构建期 = registry 幂等标记；运行时 = 内容指纹），勿混用；构建期补丁登记见协调仓 scripts/patches/README.md 与 registry.json。
 
@@ -95,6 +96,11 @@
 | `boot-pending-G1` | `dsh-app-boot/lib/index.js` | 非官方包 pending 降级为告警并继续启动（第三方插件 inject 了 client-only 服务 → 永久 pending → 整树 boot 失败）；FAILED 与官方包 pending 仍致命（0.13.5 W1b / apk #126 P3） |
 | `pi-toolcall-G2` | `@earendil-works/pi-ai/dist/api/openai-completions.js` | 流式 tool_call 空名止血：出口丢弃空名调用（连其 tool result）+ arguments 保证非空；累加器把缺 index/id 的续块合并进唯一在途调用（0.13.5 W2 / apk #124） |
 | `perf-patch-reload-N1` | `dsh-app-boot/lib/index.js` | 性能 A1：web 模板 `patchReload` 默认 live→startup（Android 无 live reload 收益，坑 19），并把 installation-owned 当前元组下**已显式写入**的旧默认 live 归一化（上游只在键缺失时写回模板默认，存量升级永不归一化）。行为回归 `node scripts/patches/tests/patch-reload-startup-n1.test.mjs`（P-AC-23/24） |
+| `arkweb-resource-protocol-H1` | `dsh-client-resources/lib/client.js` | ArkWeb（HarmonyOS）令 `dsh-resource://<type>/...` 丢 hostname → 上游 `protocolOf()` 取不到 file provider、文件预览报资源服务不可用（apk #221）；补丁按地址文法局部恢复 type，标准 URL 与其他 scheme 行为不变。回归 `node scripts/patches/tests/arkweb-resource-protocol.test.mjs`；**仍需真实 ArkWeb + Chromium 设备验收** |
+| `external-draft-conversation-seam-J1` | `dsh-client-ui-conversation/lib/client.js` | 外部文件草稿：向 ConversationController 补受控 `addFiles(sessionId, files)` seam，复用既有 `createDrafts` / InputHub `shell.addAttachments` / refusal release——不创建第二条上传路径、不自动发送、路径不进页面/模型。回归 `node scripts/patches/tests/external-draft-conversation-seam.test.mjs` |
+| `perf-compile-cache-flush-N2` | `dsh/lib/bin.js` | 启动性能：Node 只在正常退出写 `NODE_COMPILE_CACHE`，而壳侧停引擎是有界宽限的 SIGTERM→SIGKILL、系统可整进程回收 → 换树后的新条目永远写不进去（设备实测 09-12 23:07 后零新增）。入口周期 flush（40s 首刷 + 5min）+ `exit` 兜底；不注册信号处理，不改任何命令退出语义。回归 `node scripts/patches/tests/compile-cache-flush-n2.test.mjs` |
+| `combo-lazy-A4` | `dsh-client-modules/lib/index.js` | 启动性能：装配期每次 `internal/plugin` 都触发 flush → `compose()` 全表重建（0.13.8 实测 9-14 次、单次 1.8-3.1s、占 LISTEN 墙钟 88%）。首个图读者（`graph()`/index-inject/bundle 路由）之前 flush 只置脏，全量 compose 收敛为一次；图就绪后的运行期变更与 HMR `rebuilt()` 仍即时重算。回归 `node scripts/patches/tests/combo-lazy-a4.test.mjs` |
+| `combo-cache-A3` | `dsh-client-modules/lib/index.js` | 启动性能（`requires: combo-lazy-A4`）：按 `sha256(client.js)` 查构建期预计算的 identity combo（source + section map），命中即跳过 `comboSource` 解码/`newlineCount`/`identitySectionMap`；未命中/损坏/id 不符一律回退现场生成（fail-open + 计数，日志 `combo cache (A3) state=… hits=… misses=…`）。写半边 `scripts/lib/combo-precompute.mjs`（快照段）+ 构建链注入段 delta（`inject-all.py --combo-cache-delta`）；覆盖门禁 `scripts/check-combo-cache.mjs`；逐字节等价回归 `node scripts/patches/tests/combo-cache-a3.test.mjs`（fixture = 0.1.5-rc.1 产物） |
 
 镜像纪律（0.13.8 PR-A1 起）：本仓 `scripts/patches/**` 是协调仓权威源的**逐字节镜像**（云端
 自包含构建检出本仓），`scripts/check-patch-mirror.mjs` 在两仓 CI 与构建链强制比对——
@@ -131,6 +137,33 @@ Copy-Item (Join-Path $dst 'index.js') 'dsh-mobile-apk\app\src\main\assets\patche
 `Select-String -Path <asset> -Pattern 'dshMobileClaimExclusive' | Measure-Object`（= 3：1 定义 + 2 站调用）。
 **门禁盲区（已登记）**：`check-runtime-assets.mjs` 只比 registry marker，而 F7 的 marker 未随本次收紧 →
 陈旧 asset 仍会 PASS；建议随重出把 F7 的 registry marker 收紧为 `dsh-mobile exclusive materialize (F7)`。
+
+### 7.3 0.14.0 review C1：资产「逐字节同源」判据与重出手册修订（2026-09-15）
+
+**背景**：v0.14.0-preview 发布包的 `session-persistence-jsonl-index.js`（138,025 B，`BDAEF25C…`）是
+F7 v1 双占位形态（内联 `open("wx")` 占位后又调 helper 占位 → 同一路径恒 EEXIST → `publishCurrentExclusive`
+恒 false）。旧判据只比 marker，两个 marker 在场 → 门禁全绿；`publish-exclusive-reclaim.test.mjs` 又只对
+合成 fixture 施加补丁，测不到已分叉的资产本体。
+
+**修订后的口径（三件套）**：
+
+1. **判据 = 资产 ↔ 快照同路径文件逐字节一致**（`check-runtime-assets.mjs`）：sha256 双方打印、不同即红；
+   并对资产本体跑行为回归（`publish-exclusive-reclaim.test.mjs --asset <asset>`）。
+2. **重出手册（取代 §7.2 的「旧资产上叠补丁」路径）**：
+   ```powershell
+   # 从当次构建的快照 tar 直接抽出（不经过任何中间资产；两层同源由字节比对守）
+   node .deploy-tmp/regen-assets.mjs   # 临时脚本：tar -xJOf <member> > assets/patched/<asset>
+   node scripts/check-runtime-assets.mjs x86_64 --require
+   ```
+   行尾：`.gitattributes` 已给 `app/src/main/assets/patched/*.js` 加 `-text`（autocrlf 不再把 LF 检出成
+   CRLF，否则逐字节门禁在别的机器必假红且引擎每次启动都触发整文件覆盖）。
+3. **补丁侧收敛**：`publish-exclusive-F7` 的 `check` 显式排除 v1 形态（`const claim = await open(currentPath, "wx")`），
+   `apply` 先整体切除旧内联块（含多余缩进，保证收敛输出与快照构建逐字节一致）再走 v2 注入——任何树上的
+   v1 残留都会被修复而不是被判为「已应用」。
+
+**构建期同步扩充**：`attach-durable-F2` 由「祖先 fsync 守卫」扩为三件套（+ 两处 link(2)→rename 回退 +
+unlink ENOENT 容忍），与 attachment 资产逐字节同源——此前这三处 delta 只在运行时资产里，快照缺，逐字节
+判据上线后会直接判红。
 
 **A1 出厂 profile seed（性能 §7.2 A1）**：出厂 `home/.dsh/profiles/{web,headless}/package.json` 由
 构建链 `scripts/lib/profile-seed.mjs` 写入 `dsh.profile.patchReload = "startup"`（`build-snapshot-013.mjs`

@@ -27,6 +27,7 @@ MIT）。来源为 npm 发布的 `dshmarketplace-plugin-0.1.5.tgz`（解包即�
 | B（0.13.1） | `lib/index.js` | 安装 runner execPath 安全化（linker64 回退污染 process.execPath → bad ELF magic；改 `TERMUX__PREFIX/bin/node`） |
 | C（0.13.1） | `lib/client.js` | 不可安装条目（NO_COMMAND/需凭据/仅桌面）安装钮置灰 + title 说明 |
 | D（0.13.2 W1） | `lib/index.js` + `lib/client.js` | **移动兼容性徽章 + mobile: 前缀过滤**：搜索响应逐条富化 `compat`/`compatNote`（内嵌兼容性 map，按 fullName 末段匹配；未登记=unknown）；`q` 以 `mobile:` 开头时滤除 desktop 条目；卡片 meta 行加徽章（移动可用/仅桌面/原生?/未验证），搜索框旁「仅移动端可用」复选框把前缀并入搜索词。工具面 schema（B 的 additionalProperties:false）不动——富化仅发生在 webServer 响应层 |
+| U2（0.14.0） | `lib/index.js` | `/api/dshmarketplace/search` 与 `/api/dshmarketplace/install` 是 exact 路由，handler 首行复用 `connection.requestRejection()`；这是 Web UI 的 browser-session-only 面，缺少 connection 或未认证时拒绝，403 空体、401 JSON 和成功响应均 `no-store`，避免绕过 `/api` 信任栅栏（apk #222 衍生审计） |
 
 其余文件（`lib/client.js` 无 D 前形态、`package.json`、`cordis.patch.yml`、
 `skills/dsh-plugin-store/SKILL.md`、README/LICENSE）与 0.1.5 逐字节一致（除上表补丁外）。

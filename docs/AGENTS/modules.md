@@ -5,26 +5,32 @@
 
 ## 4. 目录与源文件作用（关键函数带代码位置；文件行数随版本变化，以函数名为准）
 
-> **维护者文档（2026-09-05 Phase 4 起，权威登记处）**：`docs/ARCHITECTURE.md`（35 模块地图+依赖方向+assets 结构）/ `docs/BRIDGE-API.md`（桥协议：androidBridge 31 方法+consoleBridge 6+回调通道 8+MuxClient 协议）/ `docs/ANDROID-API-USAGE.md`（android.* 85 类按域分组+API 等级守卫点）/ `docs/DEPENDENCIES.md`（gradle 依赖+升级策略）/ `docs/RUNTIME-PATCHES.md`（assets/patched 六文件登记）。本节保留速查职能，与五文档冲突时以文档（源码 grep 实证）为准。
+> **维护者文档（权威登记处，0.13.5 起迁入 docs/AGENTS/）**：`docs/AGENTS/ARCHITECTURE.md`（65 个 .kt 模块地图 + 依赖方向 + assets 结构 + manifest 组件）/ `docs/AGENTS/BRIDGE-API.md`（桥协议 + 通道 + 增量节）/ `docs/AGENTS/ANDROID-API-USAGE.md`（android.* 按域分组 + API 等级守卫点）/ `docs/AGENTS/DEPENDENCIES.md`（gradle 依赖 + 升级策略）/ `docs/AGENTS/RUNTIME-PATCHES.md`（assets/patched 两文件登记 + 构建期 patches 分工）。本节保留速查职能，与五文档冲突时以文档（源码 grep 实证）为准。
 
 `app/src/main/java/com/dsharnessmobile/shell/`：
 
 | 文件 | 作用 | 关键点（0.13.0 定稿） |
 |---|---|---|
-| **AdbState.kt** | ADB 授权单一事实来源 + **真实通道**（内嵌 termux android-tools adb 36） | `pairWithCode(code,pairPort,connectPort)`：真执行 `adb pair 127.0.0.1:<port> <code>`（**码值只进 argv**，审计只记 codeLength；配对成功才写 paired+端口）；`revokePair`：disconnect+删 adbkey+清 paired（系统侧授权需无线调试重开才彻底清除——设置页文案说明）；`adbShellExecute` 真实 shell（uid=2000，失败关闭+幂等重连）；prefs 键 allowSwitch/paired/pairPort/connectPort/connected/**fullAccess（门1 live 键，0.13.0 Q8 判定一致化）**、**wirelessOn（ST-12 活体探测：TCP 连「无线调试」连接端口，TTL 2s < 页面 3s 轮询；引擎侧 live 同口径）**；ST-22 已删零调用者的门1 pref 读口访问器；`discoverPorts`：系统属性直读 → **NSD/mDNS（`_adb-tls-pairing._tcp`/`_adb-tls-connect._tcp`，5s 超时）** → 手动硬回退（盲扫已剔）；`runAdb` 用 engine.shellEnv()+OPENSSL_CONF 覆盖（同 UndoGate 修复） |
-| **FileIncoming.kt** | F5 文件直达：校验/净化/拷贝/元数据/清理 | `copyIn` **200MB 有界拷贝**（R17）；`sanitizeName/uniqueName/validate`；`tmpWorkspace=files/home/.dsh/workspaces/incoming`；`cleanupTmp` 生命周期礼仪 |
+| **AdbState.kt** | ADB 授权单一事实来源 + **真实通道**（内嵌 termux android-tools adb 36）；0.14 起定位为迁移/诊断面，正式特权 transport 转 Shizuku（ShizukuTransport/ShizukuUserService） | `pairWithCode(code,pairPort,connectPort)`：真执行 `adb pair 127.0.0.1:<port> <code>`（**码值只进 argv**，审计只记 codeLength；配对成功才写 paired+端口）；`revokePair`：disconnect+删 adbkey+清 paired（系统侧授权需无线调试重开才彻底清除——设置页文案说明）；`adbShellExecute` 真实 shell（uid=2000，失败关闭+幂等重连）；prefs 键 allowSwitch/paired/pairPort/connectPort/connected/**fullAccess（门1 live 键，0.13.0 Q8 判定一致化）**、**wirelessOn（ST-12 活体探测：TCP 连「无线调试」连接端口，TTL 2s < 页面 3s 轮询；引擎侧 live 同口径）**；ST-22 已删零调用者的门1 pref 读口访问器；`discoverPorts`：系统属性直读 → **NSD/mDNS（`_adb-tls-pairing._tcp`/`_adb-tls-connect._tcp`，5s 超时）** → 手动硬回退（盲扫已剔）；`runAdb` 用 engine.shellEnv()+OPENSSL_CONF 覆盖（同 UndoGate 修复） |
+| **FileIncoming.kt** | F5 外部文件草稿：校验/净化/拷贝/元数据/清理 | `copyIn` **200MB 有界拷贝**；`sanitizeName/uniqueName/validate`；`tmpWorkspace=files/home/.dsh/workspaces/incoming`；`.sessions` 未 claim 来件也受 task-removed 清理豁免，源文件交 TTL；不生成 `@路径` user message。 |
 | **UndoGate.kt** | 崩溃自动回退（F3）：看门狗连续失败→急救 CLI restore-last-good | `runCli` **必须注入 `OPENSSL_CONF=<usr>/etc/tls/openssl.cnf`**（快照 node 编译期 cnf 路径不可读→无输出→误判无快照）；幂等标记 `.undo-auto-done` |
 | **EngineManager.kt** | 引擎总管：解压/指纹/环境/进程/补丁 | `shellEnv()`：PATH/LD_LIBRARY_PATH/HOME/DSH_HOME/TMPDIR/LD_PRELOAD(+termux-exec force)/TERMUX__PREFIX/SSL_CERT_FILE/DSH_ADB_*/DSH_ADB_FULLACCESS（=壳侧 fullAccess() 同源）/**UV_THREADPOOL_SIZE=min(8,cores)（C1/P-AC-03；见顶层 `uvThreadPoolSize`）**/密钥注入；`startWithArgs`（spawn 点）落 **P-AC-04 启动分段插桩**：`LogCollector.markBootStart(context)`（立即落 `note=boot-start` 行）+ 有界监听观察线程（90s 上限，500ms 一探）→ `LogCollector.markListen(context)`——挂在 spawn 点使看门狗/控制台路径同样有 t_listen；判据文件是壳侧 `files/boot-segments.log`；`refreshSnapshot`（0.13.3 起=**事务化**：`SnapshotTransaction` 暂存解压 → 交换 usr + home 工厂条目 → 指纹提交；**用户数据全程不动**，旧 `.dsh-backup` 仅作 ≤0.13.2 遗留一次性补写）；`recoverInterruptedRefresh()`（每次启动解析中断事务：STAGED 丢弃 / SWAPPING 回滚 / SWAPPED 前滚，`snapshotRefreshing` 期间直接返回防竞态）；**`snapshotRefreshing` companion 级闸门（0.13.2-fix 三批）**：刷新期 startEngine 直接跳过——看门狗自愈路径无此闸门时会拿「解压到一半的运行时」拉引擎（实例分属 MainActivity/EngineService，标志必须挂 companion，同 STARTING CAS 道理）；`killExistingEngine`（destroyForcibly+pkill bin.js）；90s 冷却窗探活绕过 |
 | **EngineService.kt** | 前台服务 + 看门狗 | watchdog 5s 探活 + UndoGate 触发 + 唤醒锁续期/释放 + onTaskRemoved 清理（F5 生命礼仪） |
-| **MainActivity.kt** | 主界面/桥接线/意图处理 | `maybeProcessIncoming`（VIEW/SEND→FileIncoming→POST /api/android/file-incoming）；AndroidBridge 接线含 `onSetAdbPair={code,pairPort,connectPort->AdbState.pairWithCode}`；`onRevokeAdbPair`、`onAdbShell` |
-| **AndroidBridge.kt** | `window.androidBridge` 协议 v1 | `setAdbPair(code,pairPort,connectPort):Boolean`（**3 参**）、`getAdbState()`、`adbShell(cmd)`、`requestAllFilesAccess/hasAllFilesAccess`、`pickToken` 鉴权、`openNativePath`（FileProvider 白名单） |
+| **MainActivity.kt** | 主 WebView、隔离 BrowserHost、桥接线与意图处理 | `FileIncoming.processIncomingIntent`（VIEW/SEND→POST `/api/android/file-incoming`）；BrowserHost 按生命周期暂停/销毁；AndroidBridge 接线含 ScreenScope 与 BrowserHost callbacks。 |
+| **AndroidBridge.kt** | `window.androidBridge` 协议 v1（方法计数由 `check-bridge-symmetry.mjs` 从源码守） | 设置/路径/授权族 + `get/setScreenScope`（用户设置唯一写面）+ `browserHostStatus/show/hide/reload/bounds/viewport` + `vdisplayStatus/Create/Destroy/LaunchSettingsProbe/BackProbe/Bounds` + `a11yStatus/openA11ySettings/unlockRestrictedSettings`。 |
+| **BrowserHost.kt** / **BrowserHostNavigationPolicy.kt** | 惰性第二个、无 bridge 的浏览 WebView | 仅 http(s)/`about:blank` 顶层导航，拒绝 file/content/data/javascript 与 loopback；root layout 变化重算可信 stage 覆盖边界；视口预设（真机/390x844/768x1024/1280x720/1920x1080）走物理 letterbox rect，不做 CSS 缩放；Activity 销毁先释放该 renderer。 |
+| **ScreenScope.kt** | 用户拥有的 Android 屏幕访问范围真源 | `virtual-only`（默认）/`real-only`/`all`；stable `real`/`virtual-1` aliases，只有 real 固定 display 0。 |
 | **SnapshotExtractor.kt** | tar 解压（xz→dest、symlink、exec 属性戳印）+ **zip-slip 防护**（resolveEntry 拒绝 .. / 绝对路径 / 越界 symlink） | `extract(input,totalBytes,dest,onProgress,runtimeRoot)`：`runtimeRoot`（默认=dest）是绝对符号链接目标的允许根——快照内 554 个绝对链接中 ~530 个指向 `files/usr/...`（busybox/vim applets），暂存解压必须放行，交换后即正确路径；`isLinkTargetAllowed()` 为纯策略函数（单测覆盖，无需符号链接特权） |
 | **SnapshotTransaction.kt** | 运行时替换事务（0.13.3 新增）：暂存/交换/标记/回滚/前滚 | 标记 `.snapshot-transaction`（phase=STAGED/SWAPPING/SWAPPED + fingerprint + moved 日志，原子写）；`swap()` 只换 usr 与 home/.dsh 的**工厂条目**，`preservedNames` 内的用户数据**从不移动/复制/删除**；旧工厂条目停 `.snapshot-previous`，每条目**先记账后改名**（两段 rename 间被杀也能回滚）；`recover()`：STAGED 丢弃暂存 / SWAPPED 或指纹已等于目标 → 前滚 / 否则回滚 |
 | **SnapshotFs.kt** | 符号链接安全的文件原语（0.13.3 新增） | `exists/isSymbolicLink/deletePath/move/createDirectories`——全部 NOFOLLOW：递归删除绝不穿透链接进用户数据 |
 | **SnapshotUserData.kt** | ≤0.13.2 遗留 `.dsh-backup` 一次性补写（0.13.3 改语义） | `restoreLegacyBackup()` **只增不减**：缺项补齐、被截断的普通文件补全、settings/credentials 等小单体整体还原；新事务路径**不再产生备份**（用户数据从不被触碰） |
 | **UpdateManager.kt** | 在线快照更新（第一版） | usr→usr-old 两步切换 + 指纹写 |
 | **WatchdogV2.kt** | 引擎看门狗（v2） | 连续失败熔断；boot 恢复用户同意状态；**FX-212.3 标记消费面**：`.task-done.ndjson` 按字节偏移推进（`markerConsumeWindow` 纯函数 + 有界 CAP + 永不截断），偏移 `@Volatile markerOffset` 并落 prefs `notify.markerOffset` |
-| **ShizukuSupport.kt** | Shizuku 反射探活（仅示例；真实通道走 adb 二进制路线，Shizuku 源码作参考存主仓库 .deploy-tmp/shizuku-adb/） | — |
+| **ShizukuSupport.kt** | Shizuku 反射探活（历史：引导页状态行只读展示，不参与授权链） | — |
+| **ShizukuTransport.kt** / **ShizukuUserService.kt** | 0.14 新增：特权 transport（应用侧 UserService 生命周期 + shell/root 侧 AIDL v1 实现） | 固定 argv、16KB 输出上限；页面/引擎拿不到原始 binder 或任意 shell 面；授权只能由用户在 Shizuku App 授予（api/provider 13.1.5 已入 gradle） |
+| **ShizukuProbe.kt** | 0.14 新增：Shizuku 五态探针（absent/not-running/denied/prev11/…，fail-closed + guidance） | 与 ShizukuSupport 同走反射；调试/诊断面 |
+| **VdisplayController.kt** / **VdisplayHost.kt** / **VirtualDisplayProbe.kt** | 0.14 新增：虚拟屏 controller（建屏/销毁/`input -d` 探针）+ viewer SurfaceView 宿主 + 建屏 flags 探针 | viewer 几何来自可信 Files stage；`virtual-1` 建成前一律 `screen-not-ready`，绝不映射 display 0 |
+| **BackGate.kt** | 0.14 新增：返回网关（页内层栈信号 → Activity 决策） | `dshBackBridge`（setAvailable/getBackAvailable）供注入层回传层栈可用性 |
 | **ConsoleActivity/ConsoleSession** | 内置终端 | 环境与引擎一致 |
 | **LogCollector.kt** | 调试日志收集 + **P-AC-04 启动分段插桩** | 日文件轮转；三字段 `t_boot_start`/`t_listen`/`t_compose_total` 落**壳侧自有判据文件 `files/boot-segments.log`**（O_APPEND、单写者、超 64 KiB 轮转 .1；三字段恒在场，未知写 -1）；**绝不写 engine.log**——它是引擎 stdout 重定向、fd 非 append，壳侧追加会被引擎从自己的偏移整行覆盖（设备实测 r10：三字段全丢、无残尾）；采集器在跑时同一行另落按天日志（出口脱敏）；`t_compose_total` 解析探针行 `[perf] TOTAL totalMs=`（与 `scripts/perf/count-compose.mjs` 同源）；审计另见 AdbAudit（files/audit/audit.ndjson） |
 | **EngineAuth.kt** | 引擎 /api 浏览器鉴权载体（0.13.3 W2 新增）：P0=engine.log（三代取最新）解析 `dsh web: .../?token=` 行 → GET / 捕 303 Set-Cookie 存 SharedPreferences；P1=读 files/home/.dsh/.credentials.yaml records[client-connection/browser-session] 自 mint cookie（HMAC-SHA256/sha256/base64url 标准件，cookie 名 dsh-auth-+b64url(sha256(authority))，authority=127.0.0.1:3080）；**token/cookie/secret 禁落日志**；handleUnauthorized=**强制刷新**（force：丢内存+prefs 后重取，不被缓存短路）；ST-13 起 mux 握手 401/403 走 `handleUnauthorizedBound()`（无 Context 形参）；attachMux 供 WS 握手；cookie 跨引擎重启有效（签名密钥持久） |
@@ -40,12 +46,13 @@
 
 | 层 | 通道 | 语义 |
 |---|---|---|
-| 页面 → 壳 | `window.androidBridge` | ADB 授权变更**唯一**入口（setAdbAllow/setAdbPair/revokeAdbPair——被提权方不得自改授权，Shizuku 对照）；目录/图片 pick（token）；全文件访问；重启/控制台 |
-| 壳 → 引擎 | HTTP 127.0.0.1:3080 | 文件直达 POST；pick 端点；**只读**状态端点（/api/android/privilege/status） |
-| 引擎 → 插件 | cordis 服务面 | androidPrivilege（状态机/execAdbShell/execAdbLine/gateFor 会话级 danger）；dsh-shell-termux 执行器 |
-| 插件 → 页面 | dsh.client 模块 + slots | ui-responsive（AppFrame/DevSection/settings.dev.item/F5 消费端轮询）；bridge client（AdbAuthSection 双端口配对 UI）；undo/marketplace 注册 |
+| 页面 → 壳 | `window.androidBridge` | 设置/路径/授权/ScreenScope/BrowserHost/虚拟屏等桥的**唯一**入口；ADB 授权变更只能走壳侧原生 AdbState（被提权方不得自改授权）；目录/文件 pick（token）；全文件访问；重启/控制台 |
+| 页面 → 壳 | `window.dshBackBridge`（BackGateBridge） | 注入层回传「页内层栈是否可用」（setAvailable）+ 只读回读（getBackAvailable） |
+| 壳 → 引擎 | HTTP 127.0.0.1:3080 | 文件来件 POST；pick 端点；**只读**状态端点（/api/android/privilege/status）；通知/控制队列 exact 路由自带鉴权 |
+| 引擎 → 插件 | cordis 服务面 | androidPrivilege（状态机/execAdbShell/execAdbLine/gateFor 会话级 danger/screenScope/screenAccess）；dsh-shell-termux 执行器 |
+| 插件 → 页面 | dsh.client 模块 + slots | ui-responsive（移动形态、DevSection/屏幕与 Shizuku 控制、F5 消费端轮询）；bridge client（授权 UI）；undo/marketplace 注册 |
 
-**授权模型（定稿）**：引擎级 = 门1 All Files Access（**live prefs 键 `fullAccess`，壳 syncFullAccess 写入；env DSH_ADB_FULLACCESS 仅兜底**——0.13.0 Q8 不再重启生效）+ 门2 允许开关（live prefs）+ 门3 真实配对（adb pair 握手）；会话级 = `gateFor(exec.agent.session)` 实时 resolve，**ADB 能力（含观察类）仅 danger-full-access**，自动审批不参与；写面唯一在壳侧原生 AdbState（桥/引擎只读 live `dsh-adb.xml`）。0.13.8 #172：部署默认写面档位（tier）**只是视图字段，不参与任何能力门**——ADB 能力门 = 引擎级三道门 + 会话档位实时 resolve（出厂 workspace-write 默认不再钉死 ADB 通道，坑 29 定例）。
+**授权模型（定稿）**：引擎级 = 门1 All Files Access（**live prefs 键 `fullAccess`，壳 syncFullAccess 写入；env DSH_ADB_FULLACCESS 仅兜底**——0.13.0 Q8 不再重启生效）+ 门2 允许开关（live prefs）+ 门3 真实配对（adb pair 握手）；会话级 = `gateFor(exec.agent.session)` 实时 resolve，**ADB 能力（含观察类）仅 danger-full-access**，自动审批不参与；写面唯一在壳侧原生 AdbState（桥/引擎只读 live `dsh-adb.xml`）。0.13.8 #172：部署默认写面档位（tier）**只是视图字段，不参与任何能力门**——ADB 能力门 = 引擎级三道门 + 会话档位实时 resolve（出厂 workspace-write 默认不再钉死 ADB 通道，坑 29 定例）。**0.14.0（U-4 方向）**：正式特权 transport 转 Shizuku，ADB 三道人门保留为迁移/诊断面。
 
 
 ## 6. 关键实现细节与坑（每次踩坑必须登记）
@@ -65,7 +72,7 @@
 13. **apt/dpkg 编译期路径（issue #80，2026-08-24 重写）**：apt/apt-get/dpkg 二进制内置 `/data/data/com.termux/files/usr` 编译期路径。`-o Dir::Etc=...` 参数覆盖不了 apt.conf.d 早期扫描（仍报 Permission denied）；**有效方案 = APT_CONFIG 主文件**（build-snapshot-013.mjs 7d 段生成 `usr/etc/apt/apt.conf`，wrapper 统一 `export APT_CONFIG`）——注意 `K='...$B...'` 单引号不展开曾令 wrapper 失效。**dpkg 的 SYSCONFDIR（dpkg.cfg.d 配置目录）无 env 可覆盖**（strings 证实无 DPKG_CONFIG_DIR 变量；`--admindir/--instdir` 不覆盖）→ apt 在线安装 dpkg 阶段受限；`scripts/check-prefix-residue.sh` 设备端自检验证。
 14. **配对伪成功防御（2026-08-24 真机实锤）**：`nativeBridge()?.setAdbPair?.()` 可选链在桥缺失/方法缺失时返回 undefined → `ok === false` 恒 false → 前端误报「配对完成」——**显式检查 `typeof b.setAdbPair === 'function'` 且无函数即 throw**。设置页两端口输入框是必经项，用户嫌手动抄录——0.13.0 起端口发现用 **NSD/mDNS**（AdbState.discoverPorts：系统属性直读优先 → `_adb-tls-pairing._tcp`/`_adb-tls-connect._tcp` NSD 发现（5s 超时）→ 手动输入硬回退；盲扫 37000-45999 已剔除，Q17）。
 15. **临时工作区面板不可见（issue #60，2026-08-24 已修）**：workspace registry 只从**既有会话 cwd** bootstrap——无会话时「临时工作区」不出现在工作区面板。修复：dsh-android-file-open apply 时 `workspaceRegistry.create(tmpWorkspace(), '临时工作区')`（幂等复用）。TTL 清理（7 天）壳侧 FileIncoming.sweepExpired（启动 + 每次入队前）。
-16. **老内核 ES2022 polyfill（issue apk#81/#79）**：华为/荣耀/小米定制 WebView（Chromium<92）缺 `Object.hasOwn`/`Array.at`/`String.at` → 前端加载插件报 "Failed to load plugins"。polyfill 注入点 = `assets/patched/web-frontend-index.html` `<head>` 首个 script 之前（引擎 applyAssetPatch 用它替换内核 index.html）；**升级 dsh 后其模块脚本哈希（index-ClqxG24t.js）须同步更新**。
+16. **老内核 ES2022 polyfill（issue apk#81/#79）**：华为/荣耀/小米定制 WebView（Chromium<92）缺 `Object.hasOwn`/`Array.at`/`String.at` → 前端加载插件报 "Failed to load plugins"。polyfill 现由注入层 `dsh-host-web-compat` 承担（0.1.12 起：装配补分号 + 装载期逐段 `new Function` 断言 + 常驻 `smoke-injections.mjs` 门禁，坑 61）；旧的 `assets/patched/web-frontend-index.html` 注入点已于 0.13.7fx-1 退役（坑 64）。
 17. **错位目录（issue #80 P5）**：relocate-snapshot 曾把包内绝对路径 `/data/data/com.termux` 当相对路径搬进 usr 树（`usr/data/data/...`）——纯冗余；构建链 7e 无条件删除 `usr/data`。
 18. **debug APK 默认 x86_64 快照（2026-08-24 本日重大事故）**：`app/build.gradle.kts` mergeDebugAssets 注释写死「从 GitHub Releases 下载 snapshot-x86_64.tar.xz 放 assets」→ `app-debug.apk` 内快照是 x86_64；**装到 arm64 真机覆盖终版后引擎崩**：`error: "/data/data/.../usr/bin/node" is for EM_X86_64 (62) instead of EM_AARCH64 (183)`。核对方法：解快照 tar 读 `usr/bin/node` 的 ELF e_machine（62=x86_64，183=arm64），或 `aapt dump badging <apk>` 看 native-code。修复/预防：构建/安装前核对设备 ABI 与快照 ABI；换 arm64 快照须**同时替换** `assets/snapshot.tar.xz` + `snapshot.sha256`（指纹变→refreshSnapshot 全量重解压 2-4 分钟，勿中断）。
 19. **cordis.patch.yml 装配缺陷**：基座 cordis.patch.yml 只含 shell-termux/host-web-compat/ui-responsive——0.13.0 新增的 android-bridge/android-manage/android-linux-env/android-file-open/undo-savepoint/marketplace **从不进入快照装配** → 引擎不加载这些插件（`/api/android/file-incoming` 404、ADB 设置项缺失、通知事件桥无宿主）。修复：build-snapshot-013.mjs 7b2 用 `scripts/profile-web.cordis.patch.yml` **权威覆盖**快照内同名文件（缺失即 `process.exit` 拒发）。**注意**：真机热改 cordis.patch.yml 后必须**冷启动 app**（`am force-stop` + start）才重装配——watchdog 热重启引擎不重读 profile（只重跑 node）。
@@ -86,7 +93,7 @@
 34. **UndoGate.runCli 直接 exec app-data ELF 无 linker64 fallback（#118 根因2，2026-09-02 修）**：`runCli` 直接 `ProcessBuilder` exec `usr/bin/node`（对比 `EngineManager.startWithArgs` 有 `/system/bin/linker64` fallback）——Android 15+ 拒绝直接 exec app-data ELF → error=13 → auto-undo 从未真正执行。修复 = 与 startWithArgs 同款：捕获「Permission denied」降级 `linker64` 加载（`build` 复用 shellEnv/OPENSSL_CONF/redirectErrorStream）。
 35. **requestLegacyExternalStorage 对 targetSdk≥30 应用无效（#120/MT 调研，2026-09-02 实锤）**：该 flag 仅对「targetSdk≤29 + 运行在 Android 10」生效；targetSdk≥30（含 34）应用即使运行在 Android 10 设备上 flag 也被忽略（SO 63365334 / cgeo #10386 / 小米适配指南多源实锤）→ Android 10 上 SAF 树授权不解锁 FUSE 原始路径、bash 走不了 ContentResolver → 非 root 下「读用户任意目录作工作区」不可达成。落地：SDK 26-28（无分区存储）运行时 READ/WRITE 权限放行；SDK 29 保留拒绝但显式 reason（`__dsh_pick_refused__:android-10`）而非伪装取消；SDK 30+ 维持 All Files Access。
 36. **自包含内置子仓副本必须与协调仓同版（2026-09-02 实锤）**：本仓库是**云端自包含构建宿主**（`.github/workflows/build-apk.yml` 依赖 `$GITHUB_WORKSPACE`=本仓库，不签协调私库），仓库内自带整套子仓副本（`dsh-shell-termux`、`dsh-client-ui-responsive`、`dsh-host-web-compat`、`plugins/dsh-android-*`）。**协调仓改动这些子仓的源码或 bump 版本后，必须把产物同步进本仓库对应子目录（src + package.json + lib/），否则自包含链（云端构建 + `gradlew assembleDebug` 直打）注入的是旧副本**——设备上表现「悬浮球开关消失 / ADB 面板缺失 / #120 拒绝信号缺席 / 配置导入导出按钮消失」这类**功能性缺失但编译通过**的幽灵缺陷。0.13.2 实测：协调仓 ui-responsive 0.1.11 含悬浮球开关、apk 仓副本 0.1.9 无它（DevSection 少了 W7 悬浮球开关行 + 配置导入导出块）；host-web-compat 0.1.8 vs 0.1.6（#120 拒绝信号缺席）。**教训：凡协调仓动了这三个独立子仓/bridge/manage，发布前必须比对两个仓库的 package.json version + 抽验 apk 仓副本 lib/client.js 关键字符串（如「悬浮球」），不一致即用 robocopy 从协调仓同步**（`robocopy "<协调仓子仓>" "<本仓\<同名子目录>" /E /XD .git node_modules /XF *.tgz`，lib/ 必须一并拷入——自包含链不对这些子仓执行 npm build）。
-37. **快照刷新中途杀进程 → 看门狗拿半解压运行时拉引擎 → 用户 settings 被剪（2026-09-05 三重实锤）**：① refreshSnapshot 全量解压在模拟器实测 **~8 分钟**（44805 文件；流式逐文件覆盖——「bridge mtime 已新」≠ 完成，**唯一完成标志 = `.snapshot-fingerprint` 翻转新值 + `.dsh-backup` 消失**，中途抽验必误判）；② 解压中 force-stop → 无闸门的看门狗 5s 一拍用「半新半旧运行时」spawn 引擎（12:45:26 补丁日志实证）→ 混合态引擎的 settings 归一化把 `llm-pi-ai.providers`（**用户自定义供应商 Hy3/opencode-go 挂此**）剪成出厂空模板，且后续刷新备份忠实保留损坏结果；③ 恢复通道 = `undo-snapshots/auto/<最后好版本>/home-settings.yaml` 拷回 `.dsh/settings.yaml` + 重启（.credentials.yaml 的 apiKeyEnv 引用未受损）。**修复**：`EngineManager.snapshotRefreshing` companion 级 @Volatile 闸门（MainActivity/EngineService 各持实例字段互不可见，同 STARTING CAS 道理），刷新期 startEngine 直接跳过、finally 清标志。**升级/排障铁律：装新包触发重解压期间，禁 force-stop、禁拔 USB、禁 adb reboot（协调仓雷点 1 同源）。**
+37. **快照刷新中途杀进程 → 看门狗拿半解压运行时拉引擎 → 用户 settings 被剪（2026-09-05 三重实锤）**：① refreshSnapshot 全量解压在模拟器实测 **~8 分钟**（44805 文件；流式逐文件覆盖——「bridge mtime 已新」≠ 完成，**唯一完成标志 = `.snapshot-fingerprint` 翻转新值 + `.snapshot-transaction` 消失**（0.13.3 事务化后不再用 `.dsh-backup`；中途抽验必误判）；② 解压中 force-stop → 无闸门的看门狗 5s 一拍用「半新半旧运行时」spawn 引擎（12:45:26 补丁日志实证）→ 混合态引擎的 settings 归一化把 `llm-pi-ai.providers`（**用户自定义供应商 Hy3/opencode-go 挂此**）剪成出厂空模板，且后续刷新备份忠实保留损坏结果；③ 恢复通道 = `undo-snapshots/auto/<最后好版本>/home-settings.yaml` 拷回 `.dsh/settings.yaml` + 重启（.credentials.yaml 的 apiKeyEnv 引用未受损）。**修复**：`EngineManager.snapshotRefreshing` companion 级 @Volatile 闸门（MainActivity/EngineService 各持实例字段互不可见，同 STARTING CAS 道理），刷新期 startEngine 直接跳过、finally 清标志。**升级/排障铁律：装新包触发重解压期间，禁 force-stop、禁拔 USB、禁 adb reboot（协调仓雷点 1 同源）。**
 
 ## 7. GPL 合规（2026-08-23 定稿）
 
@@ -97,8 +104,10 @@
 
 ## 8. 待办与已知缺口（非本轮范围，记录防止再探）
 
+> **现行清单以 `docs/AGENTS/known-gaps.md` 为准**（0.13.8 / 0.14.0 收尾登记在彼处维护）；本节保留历史条目。
+
 - F2「T1 授权豁免自动升级」未落地（电池白名单仅引导 Intent；指数退避仅日志不改调度）——涉及系统策略写面，不自动执行。
-- F1.10 引擎更新通道未实现；F0.3 引擎事件桥未实现。
+- ~~F0.3 引擎事件桥未实现~~（0.13.x 已落地：dsh-android-bridge 监听 `session/event` → `.task-done.ndjson` / `.notify.ndjson` → 壳侧消费）；F1.10 引擎更新通道未实现。
 - 子代理 PRD 评审完整清单见协调仓库 `docs/review-0.13.0-20260823.md §九` 与 `.deploy-tmp/prd-gap-review.md`（U4/U5、A4/A6/A8、B4/B5/B7、F4、P4 未修项）。
 - **~~扫描/图片版 PDF → 页图渲染受限~~（0.13.1 已修，0.13.0 记录作废）**：原记录「`@napi-rs/canvas` 仅 glibc 预编译装不上」系**误判**——npm 有 `@napi-rs/canvas-android-arm64`（N-API/Bionic 预编译，os=android cpu=arm64，真机 createCanvas 实测可用）。0.13.1 起随出厂快照装配（profiles/web package.json 登记 + tarball 解入，仅 arm64；npm 无 android-x86_64 triple，x86_64 模拟器维持守卫降级）。构建脚本 7c2 段。
 - **marketplace 惰性加载决策（0.13.0 D4）**：cordis 装配层无惰性概念；拆装配违反 F4「内置市场」。启动速度优化由 D2（快照瘦身）+ D3（NODE_COMPILE_CACHE）承担，marketplace 保持启动装配。
@@ -110,6 +119,7 @@
 
 | 时间 | 版本 | 更新内容 | 更新者 |
 |---|---|---|---|
+| 2026-09-14 | **0.14.0-preview 已发布（vc38）+ 工作区续做** | 发布：B0/B1 缺陷收口（#204/#205/#206/#210/#211/#214）+ B2 门禁闭环（17 项聚合、五处接线、SKIP=0）+ 返回手势/通知分级与通知内应答/外部文件草稿；浏览器与虚拟屏为实验特性不接产品路径。工作区（未提交/未验收）：Shizuku 特权 transport（ShizukuTransport/ShizukuUserService，api/provider 13.1.5）、虚拟屏（VdisplayController/VdisplayHost/VirtualDisplayProbe）、隔离 BrowserHost + 视口、ScreenScope 开放屏幕范围、#222 路由保护（check-api-route-auth + policy）。本文件同步新模块行与新坑（91-98）。 | AI 开发助手 |
 | 2026-09-06 | 0.13.3 | **0.13.3 开发批落地（W1-W8 代码面全绿；回归与 push/PR 待用户口令；vc30/0.13.3 版本号已入 build.gradle.kts）**：**壳侧**（本仓）：EngineAuth.kt 新增（P0 engine.log token 交换 + P1 .credentials.yaml browser-session grant 自 mint cookie；token/cookie/secret 禁落日志；handleUnauthorized 401 自愈；attachMux 供 WS 握手）+ EngineProbe 401/303 视作 alive + postRpc/postRespond/downloadToDownloads 全调用面 Cookie + WebView CookieManager 注入或 token URL 自愈 + MuxClient 传输面重做（/api/remote.mux + Cookie 握手 + open $events 流 + waterfall/emit 帧迁移 eventId/agentId + 应答 POST /api/$events/result）+ OverlayService.applyAgentStatus 官方忙态锚点（api-session/status，turn_start 退役）+ OverlayPanel/OverlayLiveFeed 帧迁移（PendingApproval/Question 改 eventId/agentId，.overlay-test-pending 新帧形）+ AndroidBridge/MainActivity/WebUiChrome setTextZoom 桥与持久化退役（D6）+ compileDebugKotlin BUILD SUCCESSFUL。**构建链**（scripts 双写雷点 10）：build-snapshot-013.mjs 0e 引擎 overlay（engine-overlay.json 264 包 + pi-ai pin 0.85.1 + 闭包缺口补齐 vendorTop 17/nested 24 + keepUnpublished 断言）+ 0f 引擎树补丁（pi-drift-F1 --scope engine，4 锚点降级告警+跳过）+ snapshot-config/engine-overlay{,-licenses}.json 新增 + check-engine-overlay.mjs 门禁（269 断言+marker+license，ps1 每ABI）+ pi-catalog-diff.mjs（P2 例行，ps1 接入）+ build-apk-013.ps1（overlay 抽验 + model-sync external + 挂载集）+ build-apk.mjs model-sync + patches（apply-patches --scope + registry pi-drift-F1）+ profile-web.cordis.patch.yml model-sync 挂载 + vendor/dsh-model-sync。**子仓副本**（坑 36 robocopy）：ui-responsive 0.1.13（字体滑杆退役）/ host-web-compat 0.1.9（withResolvers polyfill）/ bridge 0.1.4（turn_start 行退役）+ lib 产物 | AI 开发助手 |
 | 2026-09-06 | 0.13.2-fix | **Phase 5 终包回归收官（本地提交；push 待批准）**：双模拟器（16416/16384）终包 x86_64 探活双 200、指纹翻转重解压闸门正常（2.5/10.5 分钟）、零 FATAL；**F8 dumpsys 实证：球窗 z 序高于光环窗且中心重合 (842,567)**；**F9 实证：任务移除 → 悬浮窗清零 + 引擎停机**（完整关闭语义按用户拍板）；快照静态验证补丁 D 双侧在场；P1 修复（AdbState.adbShellExecute requireFullAccess 参数——API 29 SAF 方案 B 专用通道级门）；报告见协调仓 docs/PHASE5-REGRESSION-2026-09-05.md | AI 开发助手 |
 | 2026-09-05 | 0.13.2-fix | **Phase 4 维护者五文档建立（docs/ 新增，源码 grep 实证）**：ARCHITECTURE.md（35 个 .kt 共 8516 行模块地图/构造注入方向/assets 六资产/manifest 8 组件 12 权限）、BRIDGE-API.md（androidBridge 31 方法逐条行号锚点+consoleBridge 6+原生→页面回调通道 8+MuxClient /api/events.mux 四帧型与 /api/respond 信封+__dsh_pick_refused__ 哨兵）、ANDROID-API-USAGE.md（android.* 导入 205 行去重 85 类/33 文件+11 个 API 等级守卫点+targetSdk 34 与 minSdk 26 理由）、DEPENDENCIES.md（gradle 5 依赖+用途与升级策略 4 条）、RUNTIME-PATCHES.md（assets/patched 六文件逐项：5 生效 1 在场未启用（llm-deepseek-index.js 无 applyAssetPatch 调用），内容指纹机制非 marker，与协调仓 scripts/patches/ 分工）；§4 头部加五文档指针（冲突以文档为准）；修正口径：桥方法 31+6=37（旧调研记 32 系估算） | AI 开发助手 |
@@ -144,13 +154,15 @@
 
 | 文件 | 职责 | 关键函数 |
 |---|---|---|
-| `DeviceControlService.kt` | 无障碍服务（语义控制面）：能力声明、树快照（路径 id + 与 uiautomator XML 同构的 attrs）、动作执行 | `buildSnapshot()` / `nodeAtPath()` / `handleClick/setText/scroll/global/screenshot()` / `token()` / `statusJson()` / `heartbeat()` |
+| `DeviceControlService.kt` | 无障碍服务（语义控制面）：能力声明、树快照（路径 id + 与 uiautomator XML 同构的 attrs）、动作执行 | `buildSnapshot()` / `nodeAtPath()` / `handleClick/setText/scroll/global/screenshot()` / `token()` / `statusJson()` / `heartbeat()`；每个 real-screen op 在执行点重查 ScreenScope，范围切换会丢弃旧 snapshot/ref。 |
 | `ControlPoller.kt` | 引擎队列客户端：长轮询取活（空闲 5s / 有活即时）、执行、回填、退避 | `loop()` / `execute()` / `post()` |
 
 相关壳侧改动：`AndroidBridge.a11yStatus()/openA11ySettings()/unlockRestrictedSettings()`；`AdbState.unlockRestrictedSettings()`（appops 一键解锁）；`MainActivity.openAccessibilitySettings()`；`EngineManager.snapshotSettingsBackup()`（换树前 settings 备份，issue #126 P1 兜底）。
 能力面/权限面全量参考：`docs/AGENTS/ACCESSIBILITY-API.md`。
 
 ## 0.14.0-preview 新增模块（通知分级与通知内应答，计划 §6）
+
+> 0.14.0 后段的 Shizuku 特权 transport、虚拟屏、BrowserHost、ScreenScope、BackGate 已在 §4 表内登记（0.14 行）。
 
 | 文件 | 职责 | 关键函数 |
 |---|---|---|

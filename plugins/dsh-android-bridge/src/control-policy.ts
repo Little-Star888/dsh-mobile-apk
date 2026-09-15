@@ -13,6 +13,8 @@
  *   - 策略是纯函数，便于单测；调用方（工具层）必须使用它的结论，不得自行旁路。
  */
 
+import { SHELL_OPS } from './shell-ops.js'
+
 // 0.13.8 收口 longClick：壳侧 handle 的 `longClick` 分支此前未进本类型联合与 A11Y_OPS，
 // 于是 a11y 在线时落 `A11Y_OPS.includes` 判假 → 「暂不支持」deny（坑 52 的存量 leak）。
 //
@@ -34,9 +36,10 @@
 // 再同批改 ROUTE_OPS；ROUTE_OPS ⊂ ControlOp 的约束在两种做法下都成立，门禁不会替你做这个判断。
 export type ControlOp = 'snapshot' | 'click' | 'longClick' | 'setText' | 'scroll' | 'global' | 'screenshot' | 'state'
   | 'nodeText' | 'webSnapshot' | 'webAction'
-  | 'browserCaps' | 'browserShow' | 'browserHide' | 'browserOpen' | 'browserJs'
+  | 'browserCaps' | 'browserShow' | 'browserHide' | 'browserClose' | 'browserOpen' | 'browserJs'
   | 'browserInput' | 'browserShot' | 'browserState' | 'browserSetUa' | 'browserViewport'
   | 'vdCreate' | 'vdDestroy' | 'vdLaunch' | 'vdMoveTask' | 'vdInfo'
+  | 'shExec' | 'shPull' | 'shPush' | 'shRemove'
 
 export interface ControlPolicyInput {
   op: ControlOp
@@ -82,6 +85,12 @@ export function decideControl(input: ControlPolicyInput): ControlDecision {
     }
   }
 
+  // 特权 shell 通道（0.14.0 §6）：neverA11y，由壳侧 ControlCarrier + Shizuku UserService 承载。
+  // 就绪判定以壳侧结构化 code/guidance 为准（本策略不猜 Shizuku 状态，也不把 shell op 混进 a11y 面）。
+  if (SHELL_OPS.includes(input.op as (typeof SHELL_OPS)[number])) {
+    return { backend: input.adbReady ? 'adb' : 'deny', reason: '特权 shell 通道（Shizuku UserService 承载，经控制队列投递）' }
+  }
+
   if (input.forceBackend === 'adb') {
     return input.adbReady
       ? { backend: 'adb', reason: '已显式指定 ADB 通道' }
@@ -97,7 +106,7 @@ export function decideControl(input: ControlPolicyInput): ControlDecision {
     return {
       backend: 'deny',
       reason: `无障碍通道暂不支持操作 ${input.op}`,
-      guidance: '该操作请用 ADB 通道（android_adb_shell_exec / 截图等）。',
+      guidance: '该操作请用特权 shell 通道（android_shell_exec / 截图等）。',
     }
   }
 

@@ -9,9 +9,11 @@
 
 ## 0. 一句话
 
-无障碍通道**不是 ADB 的降级替代**：Android 11（API 30）起自带 `takeScreenshot()`（截屏不再需要 ADB），
-Android 13（API 33）起自带无障碍输入法（`FLAG_INPUT_METHOD_EDITOR`，中文输入不再需要 ADBKeyboard）。
-真正只能靠 ADB 的只剩：**shell 执行、pm/dumpsys/appops 等系统面、以及 API <30 的字节级截图**。
+无障碍通道**不是 ADB 的降级替代**：Android 11（API 30）起自带 `takeScreenshot()`（截屏不再需要 ADB）。
+Android 13 起 AOSP 存在无障碍输入法（`FLAG_INPUT_METHOD_EDITOR`）设计，但**本项目实测不可用**：
+javap 校验 android-36 的 `android.jar`，`AccessibilityNodeInfo` 无该符号（见 known-gaps.md 与
+0.13.8 批 F 登记），中文输入由 `ACTION_SET_TEXT` + ADBKeyboard 承担。
+真正只能靠系统面/ADB 的：**shell 执行、pm/dumpsys/appops 等系统面、以及 API <30 的字节级截图**。
 
 ## 1. 服务级能力（`AccessibilityServiceInfo.CAPABILITY_*` ↔ XML 属性）
 
@@ -25,7 +27,7 @@ Android 13（API 33）起自带无障碍输入法（`FLAG_INPUT_METHOD_EDITOR`�
 | `CAPABILITY_CAN_REQUEST_FILTER_KEY_EVENTS` | 18 | `canRequestFilterKeyEvents` | 不用 |
 | `CAPABILITY_CAN_REQUEST_ENHANCED_WEB_ACCESSIBILITY` | 18 | `canRequestEnhancedWebAccessibility` | 不用（已废弃方向） |
 | `CAPABILITY_CAN_REQUEST_FINGERPRINT_GESTURES` | 26 | `canRequestFingerprintGestures` | 不用 |
-| `FLAG_INPUT_METHOD_EDITOR` | 33 | （flag） | 无障碍输入法（待办） |
+| `FLAG_INPUT_METHOD_EDITOR` | 33 | （flag） | **不可用**：android-36 android.jar 无相关符号（known-gaps 已核实）；中文输入走 `ACTION_SET_TEXT` + ADBKeyboard |
 
 ## 2. 服务 API（含 API 级别）
 
@@ -72,7 +74,7 @@ Android 13（API 33）起自带无障碍输入法（`FLAG_INPUT_METHOD_EDITOR`�
 |---|---|---|
 | `getSoftKeyboardController().switchToInputMethod(imeId)` | 24 | 切换输入法（**替代 ADB `ime set`**） |
 | `getSoftKeyboardController().setInputMethodEnabled(imeId, enabled)` | 33 | 启用/停用 IME（限同包） |
-| `onCreateInputMethod()` / `getInputMethod()` | 33 | 无障碍输入法（配 `FLAG_INPUT_METHOD_EDITOR`） |
+| `onCreateInputMethod()` / `getInputMethod()` | 33 | 无障碍输入法（配 `FLAG_INPUT_METHOD_EDITOR`）——**本 SDK 无此符号，不可用**（known-gaps） |
 | `getSoftKeyboardController().setShowMode(...)` | 24 | 软键盘显示策略 |
 
 ### 2.5 其他
@@ -148,16 +150,20 @@ Android 13（API 33）起自带无障碍输入法（`FLAG_INPUT_METHOD_EDITOR`�
 | 服务与能力声明 | `app/src/main/AndroidManifest.xml`（`DeviceControlService`）+ `res/xml/accessibility_service_config.xml` |
 | 树快照（路径 id + attrs 同构 uiautomator XML） | `DeviceControlService.buildSnapshot()` / `nodeAtPath()` |
 | 动作（click/setText/scroll/global/screenshot） | `DeviceControlService.handle*()` |
+| 屏幕范围失败关闭 | `ScreenScopePrefs` + `DeviceControlService.realScreenScopeError()`；每次 real op 重查，切换范围使旧 snapshot/ref 失效；`virtual-1` 未 ready 时不映射 display 0 |
 | 队列客户端（长轮询 + 心跳 + 回填） | `ControlPoller.kt` |
 | 状态与令牌 | `DeviceControlService.statusJson()` / `token()`；prefs `dsh-adb.xml` 的 `a11yEnabled` / `controlToken` |
 | 桥方法 | `AndroidBridge.a11yStatus()/openA11ySettings()/unlockRestrictedSettings()`（MainActivity 接线） |
 | 引擎侧门禁与路由 | 协调仓 `plugins/dsh-android-bridge/src/control-policy.ts` / `control-queue.ts`；工具面在 `plugins/dsh-android-manage` |
 
-## 7. 状态与待办（2026-09-10）
+## 7. 状态与待办（2026-09-14 对账）
 
 已完成：服务 + 能力声明、树快照、click/setText/scroll/global、队列长轮询 + 心跳、门禁双通道、
-设置页无障碍优先、`takeScreenshot` 代码落地（**待新 APK 装机验证**）。
+设置页无障碍优先、`takeScreenshot`（设备实测通过）、**全局动作面由 `getSystemActions()` 驱动**
+（0.13.8 E6，`GlobalActionCatalog`）、**无障碍截屏失败回落 ADB**（E6）、**屏幕范围执行点复查**
+（`ScreenScopePrefs` + `DeviceControlService.realScreenScopeError`）。
 
-待办：① 无障碍输入法（API 33+，替代 ADBKeyboard）；② `getSystemActions()` 驱动全局动作面；
-③ 长按/展开/复制/翻页等节点动作暴露给模型；④ `takeScreenshotOfWindow`(34) 用于单窗口观察；
-⑤ 多窗口 `getWindows()` 的窗口选择面。
+待办：① ~~无障碍输入法~~ **已核实不可用**（android-36 无符号）；② ~~`getSystemActions()` 驱动全局动作面~~ **已落地**；
+③ 长按已接，展开/折叠/复制/翻页/拖拽等节点动作仍未暴露给模型；④ `takeScreenshotOfWindow`(34) 单窗口观察未接；
+⑤ 多窗口 `getWindows()` 的窗口选择面未接；⑥ 回落 ADB 路径只在本机 API 35 验过「无障碍可用」分支，API<30 真机回落未验。
+完整缺口清单维护在 `known-gaps.md`（本文件只登记 API 参考与实现映射）。

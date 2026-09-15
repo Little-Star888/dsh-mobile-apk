@@ -31,10 +31,9 @@
     },
     {
       "repo": "plugins/dsh-android-file-open",
-      "reason": "同 dsh-android-bridge：0.13.7 后未随版对齐（dev 钉 0.1.1-rc.2 / cordis 4.0.1）。",
+      "reason": "同 dsh-android-bridge：0.13.7 后未随版对齐（dev 钉 0.1.1-rc.2 / cordis 4.0.1）。dsh-llm 已对齐（@0.1.5-rc.1）故移出 accepted——桩条目保留会红（stale）。",
       "accepted": [
         "@deepseek-ai/cordis@4.0.1",
-        "@deepseek-ai/dsh-llm@0.1.1-rc.2",
         "@deepseek-ai/dsh-tools@0.1.1-rc.2"
       ]
     },

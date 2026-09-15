@@ -181,6 +181,31 @@ class FactoryProfilePatchTest {
     assertFalse(result.text.contains("disabled: true"))
   }
 
+  /**
+   * review C8：按 id 粒度清 disabled——`- insert:` 混合块里清退役行不得连带清未取证条目
+   * （旧实现 removeDisabledTrue 清块内**所有** `disabled: true`，多 id 块会误伤 permission 等）。
+   */
+  @Test
+  fun retiredRepairClearsOnlyTheRetiredIdInsideAMixedBlock() {
+    val live = """
+      - insert:
+          - id: ui-layout
+            disabled: true
+          - id: permission
+            disabled: true
+    """.trimIndent() + "\n"
+
+    val result = FactoryProfilePatch.repairRetiredDisabledRows(live)
+
+    val block = FactoryProfilePatch.topLevelBlocks(result.text).single()
+    assertTrue("非退役条目仍在场", block.contains("id: permission"))
+    val disabledLines = block.lines().withIndex().filter { it.value.contains("disabled:") }
+    assertEquals("只允许剩一条 disabled（permission 的）", 1, disabledLines.size)
+    val permissionAt = block.lines().indexOfFirst { it.contains("id: permission") }
+    assertTrue("剩余 disabled 必须归属于 permission（按 id 粒度）", disabledLines.single().index > permissionAt)
+    assertEquals("changes 只记退役行", 1, result.changes.size)
+  }
+
   @Test
   fun repairIsIdempotentOnACleanFile() {
     val result = FactoryProfilePatch.repairRetiredDisabledRows(currentFactory)

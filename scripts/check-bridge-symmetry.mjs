@@ -74,6 +74,8 @@ function getterToken(name) {
 
 const report = { kotlinOnly: [], tsOnly: [], setterWithoutGetter: [], preferenceGetters: [] }
 const keyOf = (surface, name) => surface + '/' + name
+/** 各 surface 的壳侧方法名集合（preferenceGetters 登记核对用）。 */
+const surfaceMethods = new Map()
 
 // 布局无关解析：协调仓根用 dsh-mobile-apk/...；apk 自包含根落到同名相对路径（壳侧 Kotlin 在本仓根）。
 const resolveRepoPath = (rel) => {
@@ -90,6 +92,7 @@ for (const surface of baseline.surfaces) {
     continue
   }
   const kotlinMethods = kotlinBridgeMethods(readFileSync(kotlinPath, 'utf8'), surface.kotlinStart)
+  surfaceMethods.set(surface.id, new Set(kotlinMethods))
   const tsText = readFileSync(tsPath, 'utf8')
   const tsMembers = tsDeclaredMembers(tsText, surface.tsBlock, surface.tsInlineBlock)
   if (tsMembers === null) { check('surface ' + surface.id + ' 类型面可解析', false); continue }
@@ -118,7 +121,9 @@ const sortAll = (arr) => [...new Set(arr)].sort()
 report.kotlinOnly = sortAll(report.kotlinOnly)
 report.tsOnly = sortAll(report.tsOnly)
 report.setterWithoutGetter = sortAll(report.setterWithoutGetter)
-report.preferenceGetters = baseline.preferenceGetters.map((p) => keyOf(p.surface, p.method)).sort()
+// review §2.3（2026-09-14）：preferenceGetters 是**登记清单**（「返回值是偏好不是事实」的语义无法自动
+// 推导）——旧实现把基线条目抄进 report 再与基线 compare（同义反复，永远绿）。现改为逐条核对
+// 「壳侧方法真实存在」+「reason 在场」；新增不对称仍由 kotlinOnly/tsOnly/setterWithoutGetter 拦截。
 
 if (process.argv.includes('--list')) {
   for (const [k, v] of Object.entries(report)) {
@@ -141,9 +146,16 @@ const compare = (kind, actual) => {
 compare('kotlinOnly', report.kotlinOnly)
 compare('tsOnly', report.tsOnly)
 compare('setterWithoutGetter', report.setterWithoutGetter)
-compare('preferenceGetters', report.preferenceGetters)
 
+// preferenceGetters：登记核对（存在 + reason），而非与基线自我比对。
 for (const p of baseline.preferenceGetters) {
+  const methods = surfaceMethods.get(p.surface)
+  if (methods === undefined) {
+    check('preferenceGetters surface 在场: ' + p.surface, false, '基线 surface 未解析到壳侧文件')
+    continue
+  }
+  check('preferenceGetters 壳侧方法存在: ' + keyOf(p.surface, p.method), methods.has(p.method),
+    '壳侧无该方法（登记 stale 或方法名写错）')
   if (!p.reason || !String(p.reason).trim()) check('preferenceGetters 条目有 reason: ' + p.method, false)
 }
 

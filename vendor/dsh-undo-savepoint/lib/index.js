@@ -2573,8 +2573,51 @@ export function apply(ctx, config = {}) {
   if (webServer) {
     const send = (res, status, body) => {
       const text = JSON.stringify(body);
-      res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
+      res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }); // dsh-mobile undo no-store (U1)
       res.end(text);
+    };
+    // dsh-mobile undo route auth (U1): /api/undo is a longer prefix than /api, so it must
+    // enforce the same Host/Origin/browser-session fence before every read or mutation.
+    const dshMobileUndoHeader = (req, name) => {
+      const value = req?.headers?.[name];
+      return typeof value === 'string' ? value : (Array.isArray(value) ? value[0] : undefined);
+    };
+    const dshMobileUndoControlToken = () => {
+      const valid = (value) => typeof value === 'string' && value.length >= 8 ? value : undefined;
+      const prefsPath = process.env.DSH_ADB_PREFS_PATH
+        ?? ((process.env.TERMUX__PREFIX && process.env.DSH_HOME) ? '/data/user/0/com.dsharnessmobile.shell/shared_prefs/dsh-adb.xml' : undefined);
+      let fromPrefs;
+      if (prefsPath) {
+        try { fromPrefs = valid(/<string\s+name="controlToken">([^<]*)<\/string>/.exec(readFileSync(prefsPath, 'utf8'))?.[1]); }
+        catch { /* Android prefs unavailable: the browser-session path below remains fail-closed. */ }
+      }
+      const testMode = process.env.DSH_CONTROL_TOKEN_TEST;
+      return testMode === '1' || testMode === 'true' ? valid(process.env.DSH_CONTROL_TOKEN) ?? fromPrefs : fromPrefs;
+    };
+    const dshMobileUndoAuthorize = (req) => {
+      let connection;
+      try { connection = ctx.get?.('connection'); } catch { connection = undefined; }
+      if (typeof connection?.requestRejection === 'function') {
+        try {
+          const rejection = connection.requestRejection(req);
+          if (rejection === undefined) return undefined;
+          if (rejection === 403) return { status: 403 };
+          const controlToken = dshMobileUndoControlToken();
+          return controlToken !== undefined && controlToken === dshMobileUndoHeader(req, 'x-dsh-control-token') ? undefined : { status: 401 };
+        } catch { return { status: 401 }; }
+      }
+      const host = dshMobileUndoHeader(req, 'host')?.trim().toLowerCase();
+      if (host !== '127.0.0.1:3080' && host !== 'localhost:3080') return { status: 403 };
+      if (dshMobileUndoHeader(req, 'sec-fetch-site')?.toLowerCase() === 'cross-site') return { status: 403 };
+      const origin = dshMobileUndoHeader(req, 'origin');
+      if (origin && origin.toLowerCase() !== 'http://127.0.0.1:3080' && origin.toLowerCase() !== 'http://localhost:3080') return { status: 403 };
+      const controlToken = dshMobileUndoControlToken();
+      return controlToken !== undefined && controlToken === dshMobileUndoHeader(req, 'x-dsh-control-token') ? undefined : { status: 401 };
+    };
+    const dshMobileUndoReject = (res, rejection) => {
+      if (rejection.status === 403) { res.writeHead(403, { 'cache-control': 'no-store' }); res.end(); return; }
+      res.writeHead(401, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+      res.end(JSON.stringify({ ok: false, error: 'unauthorized' }));
     };
     const readJson = (req) => new Promise((resolve) => {
       const chunks = [];
@@ -2592,6 +2635,8 @@ export function apply(ctx, config = {}) {
       kind: 'prefix',
       path: '/api/undo',
       handler: async (req, res) => {
+        const rejection = dshMobileUndoAuthorize(req);
+        if (rejection !== undefined) { dshMobileUndoReject(res, rejection); return; }
         try {
           const url = new URL(req.url ?? '/', 'http://dsh.local');
           const path = url.pathname;

@@ -104,10 +104,10 @@ class EngineManager(private val context: Context, private val pickToken: String?
     val fingerprint = bundledFingerprint()
     val startedAt = System.currentTimeMillis()
     val stage = SnapshotTransaction.stageRoot(filesDir)
-    EngineManager.snapshotRefreshing = true
+    EngineManager.snapshotRefreshing.set(true)
     try {
       onStage("正在检查上次更新…")
-      applyRecovery(SnapshotTransaction.recover(filesDir, stage, usrDir, homeDir, liveFingerprint()))
+      applyRecovery(SnapshotTransaction.recover(filesDir, stage, usrDir, homeDir))
       if (snapshotFresh()) {
         // A rolled-forward transaction already activated this snapshot.
         return true
@@ -173,34 +173,36 @@ class EngineManager(private val context: Context, private val pickToken: String?
       }
       return false
     } finally {
-      EngineManager.snapshotRefreshing = false
+      EngineManager.snapshotRefreshing.set(false)
     }
   }
 
   /**
    * Resolves a transaction interrupted by a kill, an OEM cleaner or a low-memory restart.
    * Cheap when nothing is pending (one stat) and safe to call on every start.
+   *
+   * review C13：整个函数体由 CAS 保护（旧实现 check-then-set 可被并发重入——两个线程同时
+   * 读到 null marker 后各自 delete stage，或与 refresh 交错时同时操作 stage/previous）。
    */
   fun recoverInterruptedRefresh() {
-    // Another refresh owns the stage/previous trees right now: never race it.
-    if (EngineManager.snapshotRefreshing) return
-    val filesDir = context.filesDir
-    val marker = SnapshotTransaction.readMarker(filesDir)
-    if (marker == null) {
-      // No marker: only a stale stage directory can survive (a rollback that was
-      // interrupted before it deleted the stage).
-      SnapshotFs.deletePath(SnapshotTransaction.stageRoot(filesDir))
-      return
-    }
-    EngineManager.snapshotRefreshing = true
+    // Another refresh/recovery owns the stage/previous trees right now: never race it.
+    if (!EngineManager.snapshotRefreshing.compareAndSet(false, true)) return
     try {
+      val filesDir = context.filesDir
+      val marker = SnapshotTransaction.readMarker(filesDir)
+      if (marker == null) {
+        // No marker: only a stale stage directory can survive (a rollback that was
+        // interrupted before it deleted the stage).
+        SnapshotFs.deletePath(SnapshotTransaction.stageRoot(filesDir))
+        return
+      }
       applyRecovery(
-        SnapshotTransaction.recover(filesDir, SnapshotTransaction.stageRoot(filesDir), usrDir, homeDir, liveFingerprint()),
+        SnapshotTransaction.recover(filesDir, SnapshotTransaction.stageRoot(filesDir), usrDir, homeDir),
       )
     } catch (t: Throwable) {
       Log.e(TAG, "snapshot transaction recovery failed; marker retained", t)
     } finally {
-      EngineManager.snapshotRefreshing = false
+      EngineManager.snapshotRefreshing.set(false)
     }
   }
 
@@ -690,7 +692,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
   fun startEngine(port: Int = 3080, force: Boolean = false): Boolean {
     // 快照刷新进行中禁止拉起（看门狗旁路闸门）：主流程刷新完成后自会启动；期间拉起只会
     // 起在半新半旧的运行时上。返回 true = 「无需再启动」（与冷却窗语义一致，5s 后看门狗复检）。
-    if (EngineManager.snapshotRefreshing) {
+    if (EngineManager.snapshotRefreshing.get()) {
       LogCollector.log(TAG, "engine start skipped (snapshot refresh in progress)")
       return true
     }
@@ -865,11 +867,16 @@ class EngineManager(private val context: Context, private val pickToken: String?
 
   private fun rotateEngineLog(log: File) {
     try {
-      val prev1 = File(log.parentFile, "engine.log.1")
-      val prev2 = File(log.parentFile, "engine.log.2")
-      if (prev2.exists()) prev2.delete()
-      if (prev1.exists()) prev1.renameTo(prev2)
-      if (log.exists()) log.renameTo(prev1)
+      // review C5：旧实现只保 3 代（log/.1/.2）——后台崩溃循环（看门狗每 5s 一拍、常态重启不一定
+      // 镜像诊断）会把首个崩溃现场滚掉，直接影响 #228 这类须看原始 engine.log 的取证。
+      // 现保 5 代；镜像与诊断包同步遍历全部世代（见 mirrorDiagnosticsToShared）。
+      val parent = log.parentFile ?: return
+      SnapshotFs.deletePath(File(parent, "engine.log.$ENGINE_LOG_GENERATIONS"))
+      for (i in (ENGINE_LOG_GENERATIONS - 1) downTo 1) {
+        val from = File(parent, "engine.log.$i")
+        if (from.exists()) from.renameTo(File(parent, "engine.log." + (i + 1)))
+      }
+      if (log.exists()) log.renameTo(File(parent, "engine.log.1"))
     } catch (t: Throwable) {
       Log.w(TAG, "engine.log rotation failed", t)
     }
@@ -892,17 +899,36 @@ class EngineManager(private val context: Context, private val pickToken: String?
    * 用户用文件管理器即可直接复制去反馈（此前全在私有目录，失败时外界拿不到任何现场）。
    * 触发点：spawn 失败 / 进程死亡 / 健康检查超时 / 快照解压失败 / UndoGate 急救。
    */
-  fun mirrorDiagnosticsToShared(reason: String) {
+  fun mirrorDiagnosticsToShared(reason: String): File? {
     try {
       val ts = java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US).format(java.util.Date())
-      val dir = File(File(dshDataDir, "diagnostics"), ts + "-" + reason)
-      if (!dir.mkdirs() && !dir.isDirectory) return
+      val name = ts + "-" + reason
+      // review C5：共享目录不可写（未授权 All Files Access，issue #228 环境）→ 回退应用私有
+      // filesDir/diagnostics/，界面按**实际路径**回填。旧实现 mkdirs 失败静默 return，
+      // 界面却写死「诊断包已存至 Documents/dshdata/diagnostics」——用户去 Documents 找不到现场。
+      val sharedDir = File(File(dshDataDir, "diagnostics"), name)
+      val privateDir = File(File(context.filesDir, "diagnostics"), name)
+      val dir = when {
+        ensureDirectory(sharedDir) -> sharedDir
+        ensureDirectory(privateDir) -> {
+          LogCollector.log(TAG, "diagnostics mirror: shared storage not writable, using app-private fallback")
+          privateDir
+        }
+        else -> {
+          Log.w(TAG, "diagnostics mirror skipped: no writable diagnostics directory")
+          return null
+        }
+      }
       val log = File(context.filesDir, "engine.log")
       // 0.13.8 #184：诊断包落共享存储（任何持 All Files Access 的应用可读），engine.log
       // 内含引擎 launch token——副本先过 redact，本体不动（壳侧鉴权链 tokenFromLog 依赖）。
       // #211.3：有界读——原先 readText() → redact → writeText() 的峰值约 3× 单份日志
       // （多 GB 的 engine.log 会 OOM/卡死看门狗线程）；现在按上限读尾部并标注截断。
-      for (f in arrayOf(log, File(log.parentFile, "engine.log.1"), File(log.parentFile, "engine.log.2"))) {
+      // review C5：遍历全部轮转世代（现为 5 代），崩溃循环的现场不再在取证前被滚掉。
+      val generations = ArrayList<File>(ENGINE_LOG_GENERATIONS + 1)
+      generations += log
+      for (i in 1..ENGINE_LOG_GENERATIONS) generations += File(log.parentFile, "engine.log.$i")
+      for (f in generations) {
         try {
           mirrorLogBounded(f, File(dir, f.name), MIRROR_LOG_LIMIT_BYTES)
         } catch (_: Throwable) {
@@ -922,9 +948,18 @@ class EngineManager(private val context: Context, private val pickToken: String?
       } catch (_: Throwable) {
       }
       LogCollector.log(TAG, "diagnostics mirrored: " + dir.absolutePath)
+      return dir
     } catch (t: Throwable) {
       Log.w(TAG, "diagnostics mirror failed", t)
+      return null
     }
+  }
+
+  /** mkdirs 语义修正：已存在目录也算成功（mkdirs 对已存在返回 false，会被误判不可写）。 */
+  private fun ensureDirectory(dir: File): Boolean = try {
+    if (dir.isDirectory) true else dir.mkdirs() || dir.isDirectory
+  } catch (_: Throwable) {
+    false
   }
 
   private fun buildDiagnosticsText(reason: String): String {
@@ -973,22 +1008,47 @@ class EngineManager(private val context: Context, private val pickToken: String?
   private fun repairProfilePatch() {
     val marker = File(context.filesDir, ".profile-patch-repair-" + BuildConfig.VERSION_NAME)
     if (marker.exists()) return
+    var failed = false
     try {
       val profilesRoot = File(File(homeDir, ".dsh"), "profiles")
+      // review C8：只处置**工厂拥有的 profile**（出厂 seed 的 package.json 形态：name=dsh-profile-* +
+      // dsh.profile 块）。旧实现遍历 profilesRoot 下全部目录，连用户自建 profile 也一并改写。
       val targets = (profilesRoot.listFiles() ?: emptyArray())
         .sortedBy { it.name }
+        .filter { isFactoryOwnedProfile(it) }
         .map { File(it, "cordis.patch.yml") }
         .filter { it.isFile }
       var repaired = 0
       for (target in targets) {
-        val live = try { target.readText() } catch (_: Throwable) { continue }
+        val live = try { target.readText() } catch (_: Throwable) { failed = true; continue }
         val result = FactoryProfilePatch.repairRetiredDisabledRows(live)
         if (result.text == live) continue
+        // 解析校验（review C8）：只允许移除退役行——其余 id 集合必须原样保留，否则不写。
+        val before = FactoryProfilePatch.blockIds(live).toSet()
+        val after = FactoryProfilePatch.blockIds(result.text).toSet()
+        if (!after.containsAll(before - FactoryProfilePatch.RETIRED_DISABLED_ROW_IDS)) {
+          Log.w(TAG, "profile patch repair skipped (parse check failed): " + target.absolutePath)
+          failed = true
+          continue
+        }
         val backup = File(target.parentFile, target.name + ".pre-" + BuildConfig.VERSION_NAME + ".bak")
         if (!backup.exists()) {
           try { backup.writeText(live) } catch (_: Throwable) {}
         }
-        target.writeText(result.text)
+        // 原子写（review C8）：旧实现 writeText 直接覆盖，写盘中被杀会留截断 YAML（引擎装配直接失败）。
+        val tmp = File(target.parentFile, target.name + ".repair.tmp")
+        try {
+          tmp.writeText(result.text)
+          if (!tmp.renameTo(target)) {
+            target.writeText(result.text)
+            SnapshotFs.deletePath(tmp)
+          }
+        } catch (t: Throwable) {
+          failed = true
+          SnapshotFs.deletePath(tmp)
+          Log.w(TAG, "profile patch repair write failed (retried next boot): " + target.absolutePath, t)
+          continue
+        }
         repaired++
         LogCollector.log(
           TAG,
@@ -996,12 +1056,30 @@ class EngineManager(private val context: Context, private val pickToken: String?
             result.changes.joinToString(" | ") + " ; backup=" + backup.name,
         )
       }
-      marker.writeText("repaired=" + repaired + " targets=" + targets.size + " at " + System.currentTimeMillis() + "\n")
-      if (repaired > 0) {
-        LogCollector.log(TAG, "profile patch repair (apk #214): " + repaired + " profile(s) cleaned; marker=" + marker.name)
+      if (failed) {
+        // review C8：部分失败不写 marker → 下次启动重试（旧实现失败后本版内不再重试）。
+        LogCollector.log(TAG, "profile patch repair deferred (partial failure; retried next start)")
+      } else {
+        marker.writeText("repaired=" + repaired + " targets=" + targets.size + " at " + System.currentTimeMillis() + "\n")
+        if (repaired > 0) {
+          LogCollector.log(TAG, "profile patch repair (apk #214): " + repaired + " profile(s) cleaned; marker=" + marker.name)
+        }
       }
     } catch (t: Throwable) {
       Log.w(TAG, "profile patch repair failed (non-fatal)", t)
+    }
+  }
+
+  /** review C8：工厂拥有的 profile = 出厂 seed 形态（name=dsh-profile-* 且带 dsh.profile 块）。 */
+  private fun isFactoryOwnedProfile(profileDir: File): Boolean {
+    val pkg = File(profileDir, "package.json")
+    if (!pkg.isFile) return false
+    return try {
+      val json = org.json.JSONObject(pkg.readText())
+      json.optString("name").startsWith("dsh-profile-") &&
+        json.optJSONObject("dsh")?.optJSONObject("profile") != null
+    } catch (_: Throwable) {
+      false
     }
   }
 
@@ -1078,14 +1156,19 @@ class EngineManager(private val context: Context, private val pickToken: String?
   /**
    * 终结残留引擎进程：先杀持有句柄的（destroyForcibly + waitFor 有界等待），
    * 再兜底 pkill 快照 node 进程（处理服务/看门狗曾被 fork、句柄已被覆盖的孤儿）。
-   * 幂等：无残留时零动作。绝不等待超过 5s（不阻塞启动路径）。
+   * 幂等：无残留时零动作。
+   *
+   * 0.14.0 缓存审计：SIGTERM 宽限从 3s 提到 6s——上游 CLI 的关机预算是「dispose 最多 5 秒」
+   * （apps/cli/reference/README 原文），而 Node 只在进程正常退出时才把 NODE_COMPILE_CACHE 落盘；
+   * 3s 强杀会稳定截断 5s 预算内的优雅排空，编译缓存条目连同每次换树后的热编译一起丢。6s 覆盖
+   * 上游预算 + 1s 余量；上限仍是硬界（超时 destroyForcibly，5s→6s 只影响重启路径，不阻塞首启）。
    */
   private fun killExistingEngine() {
     val held = engineProcess
     if (held != null) {
       try {
         held.destroy()
-        if (!held.waitFor(3, java.util.concurrent.TimeUnit.SECONDS)) {
+        if (!held.waitFor(6, java.util.concurrent.TimeUnit.SECONDS)) {
           held.destroyForcibly()
           held.waitFor(2, java.util.concurrent.TimeUnit.SECONDS)
         }
@@ -1230,13 +1313,8 @@ class EngineManager(private val context: Context, private val pickToken: String?
       "DSH_APP_VERSION_CODE" to BuildConfig.VERSION_CODE.toString(),
       // Directory-picker endpoint auth token (validated by the web-compat plugin via x-dsh-pick-token).
       "DSH_PICK_TOKEN" to (pickToken ?: ""),
-      // ADB 授权状态（0.13.0 F1.7）：dsh-android-bridge 插件据此失败关闭；门控=完全访问档位+开关+配对。
-      "DSH_ADB_ALLOW" to (if (AdbState.allowSwitch(context)) "1" else "0"),
-      "DSH_ADB_PAIRED" to (if (AdbState.paired(context)) "1" else "0"),
-      "DSH_ADB_WIRELESS" to (if (AdbState.paired(context)) "1" else "0"),
-      // 门1「完全访问档位」= All Files Access（系统权限）——引擎侧判定与壳侧 AdbState.fullAccess() 同源
-      // （审校 C6 语义分裂修复：此前引擎把「写面档位」误当门1，见 review 文档）；授予后重启引擎生效。
-      "DSH_ADB_FULLACCESS" to (if (AdbState.fullAccess()) "1" else "0"),
+      // 0.14.0：内置 adb 退役——DSH_ADB_* 授权快照不再注入（引擎侧特权面改由 Shizuku 承载，
+      // 就绪事实经控制队列 caps.shizuku 实时上报，不再有启动期快照与活体两套口径）。
       // Vision backend (Qwen-VL) API key: read from a private file rather than hardcoded in source.
       "DASHSCOPE_API_KEY" to (File(context.filesDir, "dashscope-key.txt").takeIf { it.exists() }?.readText()?.trim() ?: ""),
       // DeepSeek 官方 provider（dsh-llm-deepseek，provider=deepseek-official）：同模式私有文件注入。
@@ -1307,9 +1385,10 @@ description: 手机操控纪律：无障碍语义树优先、ref 语义点击/�
     /** 快照刷新进行中（companion 级：MainActivity 与 EngineService 各持 EngineManager 实例，实例字段
      *  互不可见——同 STARTING CAS 道理）。看门狗自愈拉起在此期间必须止步：刷新先备份再全量解压
      *  （模拟器实测 8 分钟），期间 startEngine 会拿到「解压到一半的运行时」——2026-09-05 用户质询
-     *  实锤「引擎先于刷新跑起来」。主流程自身在刷新完成后照常拉起（finally 清标志）。 */
-    @Volatile
-    var snapshotRefreshing: Boolean = false
+     *  实锤「引擎先于刷新跑起来」。主流程自身在刷新完成后照常拉起（finally 清标志）。
+     *  review C13：改 CAS（AtomicBoolean）——旧实现「if (设位) return; … 设位」的 check-then-set
+     *  在刷新入口与恢复入口之间无互斥，两个线程可同时通过检查并同时操作 stage/previous。 */
+    val snapshotRefreshing = java.util.concurrent.atomic.AtomicBoolean(false)
 
     /** Last real start time (epoch ms); the watchdog cooldown-window baseline. */
     @Volatile
@@ -1344,6 +1423,9 @@ internal fun uvThreadPoolSize(cores: Int): Int = minOf(8, cores.coerceAtLeast(1)
 
 /** 诊断镜像的单份上限（#211.3）：只需现场尾部；内存峰值从 3× 整份压到 3× 上限内。 */
 internal const val MIRROR_LOG_LIMIT_BYTES: Long = 2L * 1024 * 1024
+
+/** engine.log 轮转保留世代数（review C5；旧为 2 代 + 本体 = 3 份，崩溃循环会滚掉首个现场）。 */
+internal const val ENGINE_LOG_GENERATIONS = 5
 
 /**
  * 诊断镜像的有界单份复制（#211.3，JVM 单测）：只读 [limitBytes] 上限内的**尾部**字节，

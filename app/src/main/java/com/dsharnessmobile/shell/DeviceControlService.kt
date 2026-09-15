@@ -287,7 +287,9 @@ class DeviceControlService : AccessibilityService() {
   @Volatile
   private var lastInvalidateAt = 0L
 
-  private var poller: ControlPoller? = null
+  /** Last user-owned range observed by a screen operation; a change invalidates all real refs. */
+  @Volatile
+  private var observedScreenScope: ScreenScope? = null
 
   /** 0.13.8 E4：服务代次（onServiceConnected 递增；诊断用——重连后缓存全部作废的观测点）。 */
   @Volatile
@@ -303,13 +305,11 @@ class DeviceControlService : AccessibilityService() {
     setEnabledFlag(this, true)
     token(this)
     invalidated = true
-    // 0.13.8 #181：先停旧代 poller 再起新代——直接覆盖引用会让旧 daemon 线程
-    // 永不可停（进程内长期双轮询，同一请求可能被两个 poller 相继取走）。
-    poller?.stop()
-    val p = ControlPoller(this)
-    poller = p
-    p.start()
-    LogCollector.log(TAG, "accessibility service connected; control channel online")
+    // 0.14.0 承载拆离：轮询由 ControlCarrier 持有（随前台引擎服务起停）；本服务只登记为
+    // 语义/输入类 op 的处理器。a11y 关闭时队列照跑，browser*/vd* 不再随之不可达。
+    ControlCarrier.a11y = this
+    ControlCarrier.ensureStarted(this)
+    LogCollector.log(TAG, "accessibility service connected; a11y handler registered")
   }
 
   override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -341,12 +341,12 @@ class DeviceControlService : AccessibilityService() {
   }
 
   private fun teardown() {
-    poller?.stop()
-    poller = null
+    if (ControlCarrier.a11y === this) ControlCarrier.a11y = null
     instance = null
     synchronized(lock) { snapshot = null }
+    observedScreenScope = null
     setEnabledFlag(this, false)
-    LogCollector.log(TAG, "accessibility service disconnected; control channel offline")
+    LogCollector.log(TAG, "accessibility service disconnected; a11y handler unregistered")
   }
 
   // ── 快照 ──────────────────────────────────────────────────────────────
@@ -458,7 +458,14 @@ class DeviceControlService : AccessibilityService() {
 
   /** 执行一个队列请求；返回 null 表示成功（数据由调用方组装）。 */
   fun handle(op: String, args: JSONObject): JSONObject {
-    return when (op) {
+    // 0.14：无障碍服务当前只承载真实物理屏。 Every content read and action is
+    // scope-checked before it can build a tree, consume a ref, or issue an input gesture. The
+    // virtual alias is never mapped to display 0 while VirtualDisplay remains unavailable.
+    if (op in REAL_SCREEN_OPS) {
+      val scopeError = realScreenScopeError(args)
+      if (scopeError != null) return scopeError
+    }
+    val result = when (op) {
       "snapshot" -> handleSnapshot(args)
       "click" -> handleClick(args)
       "longClick" -> handleLongClick(args)
@@ -470,40 +477,97 @@ class DeviceControlService : AccessibilityService() {
       "nodeText" -> handleNodeText(args)
       "webSnapshot" -> handleWebSnapshot(args)
       "webAction" -> handleWebAction(args)
-      // ── 六面登记链已冻结、壳侧实现尚未落地（browser* / vd*）：**必须写分支**且 fail-closed ──
-      // 门禁 A 项断言「handle 分支集合 == SUPPORTED_OPS」；若落进兜底的「未知操作」错误分支，
-      // 则「尚未实现」与「op 名打错」在工具层/诊断面同形（DESIGN-PROTOCOL-V2 的教训）。
-      // 注：本条注释刻意不写出兜底分支的字面形态——门禁以该字面量截断 handle 块做集合比对。
-      // 实现落地时逐条替换为真实分支，并同步删除 scripts/control-ops-pending.json 的族条目。
-      "browserCaps" -> unsupported(op)
-      "browserShow" -> unsupported(op)
-      "browserHide" -> unsupported(op)
-      "browserOpen" -> unsupported(op)
-      "browserJs" -> unsupported(op)
-      "browserInput" -> unsupported(op)
-      "browserShot" -> unsupported(op)
-      "browserState" -> unsupported(op)
-      "browserSetUa" -> unsupported(op)
-      "browserViewport" -> unsupported(op)
-      "vdCreate" -> unsupported(op)
-      "vdDestroy" -> unsupported(op)
-      "vdLaunch" -> unsupported(op)
-      "vdMoveTask" -> unsupported(op)
-      "vdInfo" -> unsupported(op)
+      // ── 六面登记链已冻结、壳侧实现落地（browser* / vd*）：**必须逐条写分支** ──
+      // 门禁 A 项断言「handle 分支集合 == SUPPORTED_OPS」；每个 op 单独一行，静态门禁按行首
+      // 引号解析分支名（多值分支行会漏项）。browser* 不进 A11Y_OPS（契约 neverA11y），但由本
+      // 服务的控制队列承载；浏览器 WebView 由 MainActivity 持有，经 BrowserHostHolder 路由。
+      "browserCaps" -> BrowserHostHolder.control(op, args)
+      "browserShow" -> BrowserHostHolder.control(op, args)
+      "browserHide" -> BrowserHostHolder.control(op, args)
+      "browserClose" -> BrowserHostHolder.control(op, args)
+      "browserOpen" -> BrowserHostHolder.control(op, args)
+      "browserJs" -> BrowserHostHolder.control(op, args)
+      "browserInput" -> BrowserHostHolder.control(op, args)
+      "browserShot" -> BrowserHostHolder.control(op, args)
+      "browserState" -> BrowserHostHolder.control(op, args)
+      "browserSetUa" -> BrowserHostHolder.control(op, args)
+      "browserViewport" -> BrowserHostHolder.control(op, args)
+      // Virtual-display lifecycle is native/privileged rather than an accessibility action; the
+      // dispatch lives in VdisplayOps so ControlCarrier can serve vd* with a11y off. Branches stay
+      // here verbatim for the six-face registration gate (scripts/check-control-ops.mjs, A 项).
+      "vdCreate" -> VdisplayOps.handle(this, op, args)
+      "vdDestroy" -> VdisplayOps.handle(this, op, args)
+      "vdLaunch" -> VdisplayOps.handle(this, op, args)
+      "vdMoveTask" -> VdisplayOps.handle(this, op, args)
+      "vdInfo" -> VdisplayOps.handle(this, op, args)
+      // 特权 shell 通道同样是 native/privileged 面（0.14.0 §6：替换内置 adb），分发在 ShellOps；
+      // 分支留在 handle 里满足六面登记链门禁（scripts/check-control-ops.mjs, A 项）。
+      "shExec" -> ShellOps.handle(this, op, args)
+      "shPull" -> ShellOps.handle(this, op, args)
+      "shPush" -> ShellOps.handle(this, op, args)
+      "shRemove" -> ShellOps.handle(this, op, args)
       else -> error("未知操作 $op")
     }
+    // Successful legacy a11y results are explicitly labelled, so a caller cannot mistake a
+    // physical display-0 response for a future virtual-screen result.
+    if (op in REAL_SCREEN_OPS && !result.has("__error")) {
+      result.put("screenId", ScreenTargets.REAL)
+      result.put("displayId", ScreenTargets.REAL_DISPLAY_ID)
+      result.put("scope", ScreenScopePrefs.current(this).wire)
+    }
+    return result
+  }
+
+  private val REAL_SCREEN_OPS = setOf(
+    "snapshot", "click", "longClick", "setText", "scroll", "global", "screenshot", "state", "nodeText", "webSnapshot", "webAction",
+  )
+
+  /** A scope transition is a screen barrier: old real-screen refs cannot regain validity later. */
+  private fun observeScreenScope(scope: ScreenScope) {
+    if (observedScreenScope == scope) return
+    observedScreenScope = scope
+    synchronized(lock) { snapshot = null }
+    invalidated = true
   }
 
   /**
-   * 已登记但壳侧尚未实现的 op：fail-closed 的**结构化**拒绝。
+   * Enforce the user-owned scope before any existing real-screen handler runs.
    *
-   * 保留既有错误通道键 `__error`（消费方 optString("__error") 不变），另附机器可读的
-   * `reason=unsupported` 与 `op`——工具层/设置页据此把「尚未实现」与「op 名打错」分开。
+   * There is currently no VirtualDisplay implementation in this service. A virtual request is
+   * therefore either out of the user's range or explicitly `screen-not-ready`; it is never routed
+   * through rootInActiveWindow or a caller-provided display id.
    */
-  private fun unsupported(op: String): JSONObject = JSONObject()
-    .put("__error", "暂不支持：$op（壳侧已登记、实现未落地——fail-closed 拒绝）")
-    .put("reason", "unsupported")
-    .put("op", op)
+  private fun realScreenScopeError(args: JSONObject): JSONObject? {
+    val requested = args.optString("screenId", ScreenTargets.REAL)
+    val scope = ScreenScopePrefs.current(this)
+    observeScreenScope(scope)
+    if (!ScreenTargets.known(requested)) {
+      return error("screen-not-found：未知屏幕 $requested")
+        .put("reason", "screen-not-found")
+        .put("screenId", requested)
+    }
+    if (!scope.allows(requested)) {
+      return error("screen-out-of-scope：用户当前开放范围为 ${scope.wire}，不允许访问 $requested")
+        .put("reason", "screen-out-of-scope")
+        .put("screenId", requested)
+        .put("scope", scope.wire)
+    }
+    if (requested == ScreenTargets.VIRTUAL) {
+      return error("screen-not-ready：虚拟屏幕尚未由 Shizuku VirtualDisplay 建立；绝不会回退到真实屏幕")
+        .put("reason", "screen-not-ready")
+        .put("screenId", ScreenTargets.VIRTUAL)
+        .put("scope", scope.wire)
+    }
+    if (args.has("displayId") && !args.isNull("displayId") &&
+      args.optInt("displayId", ScreenTargets.REAL_DISPLAY_ID) != ScreenTargets.REAL_DISPLAY_ID
+    ) {
+      return error("screen-display-mismatch：真实屏幕固定为 display 0，拒绝 caller 指定的其它 displayId")
+        .put("reason", "screen-display-mismatch")
+        .put("screenId", ScreenTargets.REAL)
+        .put("displayId", ScreenTargets.REAL_DISPLAY_ID)
+    }
+    return null
+  }
 
   /**
    * 无障碍截屏（API 30+，`AccessibilityService.takeScreenshot`，需 `canTakeScreenshot="true"`）。
@@ -519,7 +583,9 @@ class DeviceControlService : AccessibilityService() {
     if (legacyShotDirCleaned.compareAndSet(false, true)) {
       try { java.io.File(filesDir, "control-shots").deleteRecursively() } catch (_: Throwable) { /* 忽略 */ }
     }
-    val displayId = args.optInt("displayId", android.view.Display.DEFAULT_DISPLAY)
+    // Scope validation has already fixed this handler to the physical target; never trust an
+    // arbitrary displayId supplied with a legacy request.
+    val displayId = ScreenTargets.REAL_DISPLAY_ID
     val latch = java.util.concurrent.CountDownLatch(1)
     var payload: JSONObject? = null
     val executor = java.util.concurrent.Executor { command -> mainHandler.post(command) }
