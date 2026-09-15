@@ -16,9 +16,9 @@ enum class ScreenScope(val wire: String) {
 
   /** Whether this user choice includes one stable product screen alias. */
   fun allows(screenId: String): Boolean = when (this) {
-    VIRTUAL_ONLY -> screenId == ScreenTargets.VIRTUAL
+    VIRTUAL_ONLY -> ScreenTargets.isVirtual(screenId)
     REAL_ONLY -> screenId == ScreenTargets.REAL
-    ALL -> screenId == ScreenTargets.REAL || screenId == ScreenTargets.VIRTUAL
+    ALL -> screenId == ScreenTargets.REAL || ScreenTargets.isVirtual(screenId)
   }
 
   companion object {
@@ -29,10 +29,19 @@ enum class ScreenScope(val wire: String) {
 /** Stable model-facing aliases. Only [REAL] has a fixed Android display id. */
 object ScreenTargets {
   const val REAL = "real"
+  /** 规格 §2.1：壳侧分配 1..N 编号；本版上限 1 屏。 */
   const val VIRTUAL = "virtual-1"
   const val REAL_DISPLAY_ID = 0
 
-  fun known(screenId: String): Boolean = screenId == REAL || screenId == VIRTUAL
+  private val VIRTUAL_PATTERN = Regex("^virtual-([1-9][0-9]{0,2})$")
+
+  /** `virtual-N` 编号；非虚拟别名返回 null。 */
+  fun virtualOrdinal(screenId: String?): Int? =
+    VIRTUAL_PATTERN.matchEntire(screenId ?: "")?.groupValues?.get(1)?.toIntOrNull()
+
+  fun isVirtual(screenId: String?): Boolean = virtualOrdinal(screenId) != null
+
+  fun known(screenId: String): Boolean = screenId == REAL || isVirtual(screenId)
 }
 
 /** Native source of truth for the screen scope selector. */

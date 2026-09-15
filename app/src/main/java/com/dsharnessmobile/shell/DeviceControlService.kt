@@ -291,6 +291,26 @@ class DeviceControlService : AccessibilityService() {
   @Volatile
   private var observedScreenScope: ScreenScope? = null
 
+  /** 当前 op 的目标屏幕（handle 内设置，串行队列保证不并发）。 */
+  @Volatile
+  private var activeScreenId: String = ScreenTargets.REAL
+
+  @Volatile
+  private var activeDisplayId: Int = ScreenTargets.REAL_DISPLAY_ID
+
+  /** 无障碍语义树最远可读的窗口根：真实屏走 rootInActiveWindow，虚拟屏走该 display 的窗口。 */
+  private fun rootFor(displayId: Int): AccessibilityNodeInfo? {
+    if (displayId == ScreenTargets.REAL_DISPLAY_ID) return rootInActiveWindow
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+    val perDisplay = try { getWindowsOnAllDisplays() } catch (_: Throwable) { null } ?: return null
+    val windows = perDisplay[displayId] ?: return null
+    for (window in windows) {
+      val root = window.root
+      if (root != null) return root
+    }
+    return null
+  }
+
   /** 0.13.8 E4：服务代次（onServiceConnected 递增；诊断用——重连后缓存全部作废的观测点）。 */
   @Volatile
   var serviceEpoch: Int = 0
@@ -355,7 +375,7 @@ class DeviceControlService : AccessibilityService() {
     synchronized(lock) {
       val current = snapshot
       if (!force && !invalidated && current != null) return current
-      val root = rootInActiveWindow ?: return null
+      val root = rootFor(activeDisplayId) ?: return null
       val nodes = LinkedHashMap<String, AccessibilityNodeInfo>()
       val bounds = HashMap<String, Rect>()
       val rows = ArrayList<ControlProtocolV2.Row>(512)
@@ -444,7 +464,7 @@ class DeviceControlService : AccessibilityService() {
   /** 按路径重新定位节点（不复用快照里的节点对象——页面可能已重建）。 */
   private fun nodeAtPath(path: String): AccessibilityNodeInfo? {
     if (path.isEmpty()) return null
-    var node: AccessibilityNodeInfo? = rootInActiveWindow ?: return null
+    var node: AccessibilityNodeInfo? = rootFor(activeDisplayId) ?: return null
     for (segment in path.split('.')) {
       val index = segment.toIntOrNull() ?: return null
       val current = node ?: return null
@@ -508,12 +528,13 @@ class DeviceControlService : AccessibilityService() {
       "shRemove" -> ShellOps.handle(this, op, args)
       else -> error("未知操作 $op")
     }
-    // Successful legacy a11y results are explicitly labelled, so a caller cannot mistake a
-    // physical display-0 response for a future virtual-screen result.
+    // 成功结果显式标注目标屏幕与动作模式：真实屏 display 0 / 虚拟屏动态 displayId，
+    // actionMode=a11y 表示语义树/ref 可用；coordinate 表示该屏只能坐标操作（见 §4.2）。
     if (op in REAL_SCREEN_OPS && !result.has("__error")) {
-      result.put("screenId", ScreenTargets.REAL)
-      result.put("displayId", ScreenTargets.REAL_DISPLAY_ID)
+      result.put("screenId", activeScreenId)
+      result.put("displayId", activeDisplayId)
       result.put("scope", ScreenScopePrefs.current(this).wire)
+      if (!result.has("actionMode")) result.put("actionMode", "a11y")
     }
     return result
   }
@@ -552,11 +573,16 @@ class DeviceControlService : AccessibilityService() {
         .put("screenId", requested)
         .put("scope", scope.wire)
     }
-    if (requested == ScreenTargets.VIRTUAL) {
-      return error("screen-not-ready：虚拟屏幕尚未由 Shizuku VirtualDisplay 建立；绝不会回退到真实屏幕")
-        .put("reason", "screen-not-ready")
-        .put("screenId", ScreenTargets.VIRTUAL)
-        .put("scope", scope.wire)
+    if (ScreenTargets.isVirtual(requested)) {
+      // 虚拟屏：语义树/截屏只有无障碍通道可达；displayId 由 VdisplayController 动态分配（永不为 0）。
+      val displayId = VdisplayController.displayIdForAlias(requested)
+        ?: return error("screen-not-found：虚拟屏 $requested 尚未建立或已销毁；请先 android_vdisplay_create")
+          .put("reason", "screen-not-found")
+          .put("screenId", requested)
+          .put("scope", scope.wire)
+      activeScreenId = requested
+      activeDisplayId = displayId
+      return null
     }
     if (args.has("displayId") && !args.isNull("displayId") &&
       args.optInt("displayId", ScreenTargets.REAL_DISPLAY_ID) != ScreenTargets.REAL_DISPLAY_ID
@@ -566,6 +592,8 @@ class DeviceControlService : AccessibilityService() {
         .put("screenId", ScreenTargets.REAL)
         .put("displayId", ScreenTargets.REAL_DISPLAY_ID)
     }
+    activeScreenId = ScreenTargets.REAL
+    activeDisplayId = ScreenTargets.REAL_DISPLAY_ID
     return null
   }
 
@@ -583,9 +611,8 @@ class DeviceControlService : AccessibilityService() {
     if (legacyShotDirCleaned.compareAndSet(false, true)) {
       try { java.io.File(filesDir, "control-shots").deleteRecursively() } catch (_: Throwable) { /* 忽略 */ }
     }
-    // Scope validation has already fixed this handler to the physical target; never trust an
-    // arbitrary displayId supplied with a legacy request.
-    val displayId = ScreenTargets.REAL_DISPLAY_ID
+    // displayId 由 realScreenScopeError 解析并固定（真实屏 0 / 虚拟屏动态 id），不接受 caller 直接指定。
+    val displayId = activeDisplayId
     val latch = java.util.concurrent.CountDownLatch(1)
     var payload: JSONObject? = null
     val executor = java.util.concurrent.Executor { command -> mainHandler.post(command) }
@@ -723,7 +750,19 @@ class DeviceControlService : AccessibilityService() {
    * `view`（"all" | "target"）由引擎经请求下推（L1 降级阶梯：报文超限时先收窄口径）。
    */
   private fun handleSnapshot(args: JSONObject): JSONObject {
-    val snap = buildSnapshot(force = true) ?: return error("无法获取当前窗口（rootInActiveWindow 为空）——请确认屏幕已点亮且有无障碍可读窗口")
+    val snap = buildSnapshot(force = true) ?: return if (ScreenTargets.isVirtual(activeScreenId)) {
+      // 虚拟屏语义树只有无障碍通道可达，且该屏必须有可读窗口（需在其中启动 App）。
+      // 拿不到树时给出显式的坐标模式拒绝（不静默失败、不回退真实屏），坐标操作仍可用。
+      JSONObject()
+        .put("__error", "虚拟屏 $activeScreenId 上暂无可读窗口（未在其中启动 App），无法给出语义树。")
+        .put("reason", "virtual-no-window")
+        .put("screenId", activeScreenId)
+        .put("displayId", activeDisplayId)
+        .put("actionMode", "coordinate")
+        .put("guidance", "先 android_app_launch 到 $activeScreenId 再 dump；或改用坐标操作（android_ui_click 的 x/y + screenId）。")
+    } else {
+      error("无法获取当前窗口（rootInActiveWindow 为空）——请确认屏幕已点亮且有无障碍可读窗口")
+    }
     val view = if (args.optString("view", "all") == "target") "target" else "all"
     return ControlProtocolV2.encode(
       rows = snap.rows,
@@ -785,7 +824,7 @@ class DeviceControlService : AccessibilityService() {
 
   /** 按子下标路径重定位节点（V2 行句柄寻址；逐级 getChild，无字符串解析）。 */
   private fun nodeAtChildPath(childPath: IntArray): AccessibilityNodeInfo? {
-    var node: AccessibilityNodeInfo = rootInActiveWindow ?: return null
+    var node: AccessibilityNodeInfo = rootFor(activeDisplayId) ?: return null
     for (index in childPath) {
       if (index < 0 || index >= node.childCount) return null
       node = node.getChild(index) ?: return null
@@ -960,7 +999,7 @@ class DeviceControlService : AccessibilityService() {
   }
 
   private fun findFocusedEditable(): AccessibilityNodeInfo? {
-    val root = rootInActiveWindow ?: return null
+    val root = rootFor(activeDisplayId) ?: return null
     fun walk(node: AccessibilityNodeInfo?, depth: Int): AccessibilityNodeInfo? {
       if (node == null || depth > MAX_DEPTH) return null
       if (node.isFocused && node.isEditable) return node
@@ -1042,7 +1081,7 @@ class DeviceControlService : AccessibilityService() {
   }
 
   private fun findFirstScrollable(): AccessibilityNodeInfo? {
-    val root = rootInActiveWindow ?: return null
+    val root = rootFor(activeDisplayId) ?: return null
     fun walk(node: AccessibilityNodeInfo?, depth: Int): AccessibilityNodeInfo? {
       if (node == null || depth > MAX_DEPTH) return null
       if (node.isScrollable) return node

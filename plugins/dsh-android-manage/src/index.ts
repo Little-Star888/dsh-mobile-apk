@@ -67,7 +67,7 @@ interface PrivilegeFace {
   screenScope?(): 'virtual-only' | 'real-only' | 'all'
   /** 0.14: fail-closed target decision before any real/virtual content operation. */
   screenAccess?(screenId?: string):
-    | { ok: true; screenId: 'real' | 'virtual-1'; displayId: number; scope: 'virtual-only' | 'real-only' | 'all' }
+    | { ok: true; screenId: string; displayId: number; scope: 'virtual-only' | 'real-only' | 'all' }
     | { ok: false; reason: string; guidance: string; scope: 'virtual-only' | 'real-only' | 'all'; screenId: string }
 
   audit(action: string, detail: Record<string, unknown>, ok: boolean): void
@@ -132,19 +132,47 @@ function tools(ctx: Context, priv: PrivilegeFace) {
       const scope = priv.screenScope?.() ?? 'virtual-only'
       const realInScope = scope === 'real-only' || scope === 'all'
       const virtualInScope = scope === 'virtual-only' || scope === 'all'
+      // 规格 §2.1：别名 1..N 由壳侧分配；枚举真源是原生注册表（vdInfo），不硬编码 virtual-1。
+      const virtuals: Array<{ screenId: string; displayId?: number }> = []
+      try {
+        const info = await priv.controlExec?.('vdInfo', {})
+        if (info !== undefined && info.ok) {
+          const data = info.data as { screens?: Array<{ alias?: string; displayId?: number; kind?: string }> }
+          for (const screen of data.screens ?? []) {
+            if (screen.kind === 'virtual' && typeof screen.alias === 'string') {
+              virtuals.push({ screenId: screen.alias, displayId: screen.displayId })
+            }
+          }
+        }
+      } catch {
+        /* 注册表不可达：下面如实报告「尚未建立」 */
+      }
+      const screens: Record<string, unknown>[] = [
+        {
+          screenId: 'real', displayId: 0, kind: 'physical', label: '真实屏幕', inScope: realInScope,
+          reason: realInScope ? '可在完全访问会话中使用无障碍或已授权 transport 操作。' : '当前用户范围不允许读取或操作真实屏幕。',
+        },
+      ]
+      for (const virtual of virtuals) {
+        screens.push({
+          screenId: virtual.screenId,
+          displayId: virtual.displayId,
+          kind: 'virtual',
+          label: '虚拟屏幕 ' + virtual.screenId.replace('virtual-', ''),
+          inScope: virtualInScope,
+          reason: virtualInScope ? '已就绪；语义树需开启无障碍（纯 Shizuku 只能坐标操作）。' : '当前用户范围不允许读取或操作虚拟屏幕。',
+        })
+      }
+      if (virtuals.length === 0) {
+        screens.push({
+          screenId: 'virtual-1', kind: 'virtual', label: '虚拟屏幕 1', inScope: virtualInScope,
+          reason: virtualInScope ? 'VirtualDisplay 尚未建立；不会映射到 display 0。' : '当前用户范围不允许读取或操作虚拟屏幕。',
+        })
+      }
       return {
         scope,
-        screens: [
-          {
-            screenId: 'real', displayId: 0, kind: 'physical', label: '真实屏幕', inScope: realInScope,
-            reason: realInScope ? '可在完全访问会话中使用无障碍或已授权 transport 操作。' : '当前用户范围不允许读取或操作真实屏幕。',
-          },
-          {
-            screenId: 'virtual-1', kind: 'virtual', label: '虚拟屏幕 1', inScope: virtualInScope,
-            reason: virtualInScope ? 'VirtualDisplay 尚未就绪；不会映射到 display 0。' : '当前用户范围不允许读取或操作虚拟屏幕。',
-          },
-        ],
-        text: `开放范围：${scope}。real = display 0；virtual-1 尚未就绪且绝不回退到真实屏幕。`,
+        screens,
+        text: `开放范围：${scope}。real = display 0；虚拟屏别名 virtual-N（当前 ${virtuals.length} 块），绝不回退到真实屏幕。`,
       } as never
     },
   })

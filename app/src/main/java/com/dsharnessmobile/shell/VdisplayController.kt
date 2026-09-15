@@ -79,6 +79,21 @@ object VdisplayController {
     records[alias]
   }
 
+  /** Android display id for one owned virtual alias, or null when the alias is unknown/not owned. */
+  fun displayIdForAlias(alias: String?): Int? = synchronized(lock) {
+    if (alias == null) return null
+    records[alias]?.displayId
+  }
+
+  /** Owned alias for one virtual Android display id, or null. Never maps display 0. */
+  fun aliasForDisplayId(displayId: Int): String? = synchronized(lock) {
+    if (displayId == Display.DEFAULT_DISPLAY) return null
+    records.values.firstOrNull { it.displayId == displayId }?.alias
+  }
+
+  /** Owned virtual aliases ordered by allocation (the model-facing `virtual-N` set). */
+  fun activeAliases(): List<String> = synchronized(lock) { records.keys.toList() }
+
   private fun selectedRecord(): Record? = synchronized(lock) { records[selectedAlias] }
 
   /**

@@ -1,13 +1,26 @@
 import { readFileSync } from 'node:fs'
 
 /** User-owned, stable screen aliases exposed to model-facing Android tools. */
-export type ScreenId = 'real' | 'virtual-1'
+export type ScreenId = string
 export type UserScreenScope = 'virtual-only' | 'real-only' | 'all'
 
 export const DEFAULT_SCREEN_SCOPE: UserScreenScope = 'virtual-only'
-export const REAL_SCREEN_ID: ScreenId = 'real'
-export const VIRTUAL_SCREEN_ID: ScreenId = 'virtual-1'
+export const REAL_SCREEN_ID = 'real'
+export const VIRTUAL_SCREEN_ID = 'virtual-1'
 export const REAL_DISPLAY_ID = 0
+
+/** 规格 §2.1：壳侧分配 1..N 的 `virtual-N`；本版上限 1 屏。 */
+const VIRTUAL_SCREEN_PATTERN = /^virtual-([1-9][0-9]{0,2})$/
+
+/** `virtual-N` 编号；非虚拟别名返回 null。 */
+export function virtualScreenOrdinal(screenId: string | undefined): number | null {
+  const match = VIRTUAL_SCREEN_PATTERN.exec(screenId ?? '')
+  return match === null ? null : Number(match[1])
+}
+
+export function isVirtualScreenId(screenId: string | undefined): boolean {
+  return virtualScreenOrdinal(screenId) !== null
+}
 
 const SHELL_SCREEN_SCOPE_PREFS_DEFAULT = '/data/user/0/com.dsharnessmobile.shell/shared_prefs/dsh_screen_scope.xml'
 
@@ -99,16 +112,16 @@ export function decideScreenAccess(
   options: ScreenAccessOptions = {},
 ): ScreenAccessDecision {
   const screenId = requested === undefined || requested === '' ? REAL_SCREEN_ID : requested
-  if (screenId !== REAL_SCREEN_ID && screenId !== VIRTUAL_SCREEN_ID) {
+  if (screenId !== REAL_SCREEN_ID && !isVirtualScreenId(screenId)) {
     return {
       ok: false,
       reason: 'screen-not-found',
       scope,
       screenId,
-      guidance: `未知屏幕 ${screenId}；请先调用 android_screen_list，并使用 real 或 virtual-1。`,
+      guidance: `未知屏幕 ${screenId}；请先调用 android_screen_list，并使用 real 或 virtual-N。`,
     }
   }
-  const inScope = scope === 'all' || (scope === 'real-only' && screenId === REAL_SCREEN_ID) || (scope === 'virtual-only' && screenId === VIRTUAL_SCREEN_ID)
+  const inScope = scope === 'all' || (scope === 'real-only' && screenId === REAL_SCREEN_ID) || (scope === 'virtual-only' && isVirtualScreenId(screenId))
   if (!inScope) {
     return {
       ok: false,
@@ -118,18 +131,18 @@ export function decideScreenAccess(
       guidance: `用户当前开放屏幕范围为 ${scope}，不允许读取或操作 ${screenId}。请由用户在设置中修改范围。`,
     }
   }
-  if (screenId === VIRTUAL_SCREEN_ID) {
+  if (isVirtualScreenId(screenId)) {
     const resolved = options.virtualDisplayId
     if (typeof resolved === 'number' && Number.isInteger(resolved) && resolved > 0) {
       // review C11 alias 契约闭环：原生注册表给出的动态 displayId（绝不假设恒为 1、绝不回退 0）。
-      return { ok: true, screenId: VIRTUAL_SCREEN_ID, displayId: resolved, scope }
+      return { ok: true, screenId, displayId: resolved, scope }
     }
     return {
       ok: false,
       reason: 'screen-not-ready',
       scope,
       screenId,
-      guidance: '虚拟屏幕尚未就绪；系统绝不会把 virtual-1 静默映射为真实屏幕 display 0。',
+      guidance: `虚拟屏幕 ${screenId} 尚未就绪；系统绝不会把虚拟屏静默映射为真实屏幕 display 0。`,
     }
   }
   return { ok: true, screenId: REAL_SCREEN_ID, displayId: REAL_DISPLAY_ID, scope }

@@ -22,6 +22,7 @@ import {
   decideScreenAccess,
   controlOpNeedsRealScreen,
   realScreenAdbCommandDenied,
+  isVirtualScreenId,
   type ScreenAccessDecision,
   type UserScreenScope,
 } from './screen-scope.js'
@@ -459,12 +460,12 @@ export class AndroidPrivilegeService {
    */
   async resolveScreenDisplayId(screenId: string): Promise<number | null> {
     if (screenId === 'real') return 0
-    if (screenId !== 'virtual-1') return null
+    if (!isVirtualScreenId(screenId)) return null
     try {
       const r = await this.controlExec('vdInfo', {})
       if (!r.ok) return null
       const data = (r.data ?? {}) as { screens?: Array<{ alias?: string; displayId?: number; kind?: string }> }
-      const hit = (data.screens ?? []).find((s) => s.alias === 'virtual-1' && s.kind === 'virtual')
+      const hit = (data.screens ?? []).find((s) => s.alias === screenId && s.kind === 'virtual')
       const id = hit?.displayId
       return typeof id === 'number' && Number.isInteger(id) && id > 0 ? id : null
     } catch {
@@ -477,7 +478,7 @@ export class AndroidPrivilegeService {
     const scope = this.screenScope()
     const base = decideScreenAccess(scope, screenId)
     if (base.ok || base.reason !== 'screen-not-ready') return base
-    return decideScreenAccess(scope, screenId, { virtualDisplayId: await this.resolveScreenDisplayId('virtual-1') })
+    return decideScreenAccess(scope, screenId, { virtualDisplayId: await this.resolveScreenDisplayId(base.screenId) })
   }
 
   /**
