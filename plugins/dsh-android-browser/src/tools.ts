@@ -154,12 +154,20 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
     }
   }
 
-  const gate = (exec: unknown): { ok: true } | { ok: false; guidance: string } => {
-    const control = face()
-    if (control?.gateFor === undefined) return { ok: true }
-    const result = control.gateFor((exec as { agent?: { session?: unknown } } | undefined)?.agent?.session)
-    return result.ok ? { ok: true } : { ok: false, guidance: result.guidance }
-  }
+  // 浏览器面**不做任何授权校验**（0.14.0 实锤缺陷修复）。
+  //
+  // 原实现复用 bridge 的 device-control gateFor()：它要求会话档位 danger-full-access 且
+  // a11y / Shizuku / adb 三条至少有其一。于是「无障碍未开 + Shizuku 未就绪」的机器上
+  // browser_open 直接报 session-not-full-access，引导用户去开无障碍或装 Shizuku——而浏览器是
+  // **应用内隔离 WebView**（壳侧 BrowserHost 自持一个 WebView），既不碰无障碍、也不碰 Shizuku、
+  // 也不碰 adb，与设备控制完全无关。这条误门把本来可用的能力锁死（用户实测三个站点全部失败）。
+  //
+  // 为什么校验**不放在工具层**：这是权限/归属问题，不是工具能力问题。真正要守的两件事都在
+  // 原生 BrowserHost 内强制执行、且与工具层无关：
+  //   ① 会话归属——bindOwner/requireOwner 按 args.session 判定，非归属会话结构化拒绝；
+  //   ② URL 准入——只允许非本地 http(s)/about:blank，拒 loopback/file/content/data/javascript。
+  // 因此本层直接透传，由原生执行点做它该做的校验（单一真源，避免两处各写一份漂移）。
+  const gate = (_exec: unknown): { ok: true } | { ok: false; guidance: string } => ({ ok: true })
 
   const audit = (tool: string, args: Payload, ok: boolean): void => {
     try { face()?.audit?.(tool, { tool, args }, ok) } catch { /* 审计缺失不阻塞 */ }

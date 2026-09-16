@@ -102,6 +102,33 @@ object ShizukuTransport {
       .put("guidance", "Shizuku shell UserService 已就绪（uid=$uid）。")
   }
 
+  /**
+   * 非阻塞「催一下」：已装 + 已运行 + 已授权但尚未绑定时，在后台发起一次 UserService 绑定。
+   *
+   * 为什么需要它（0.14.0 设备实锤缺陷）：status() 是**纯读**且不得阻塞（它在控制队列与 UI
+   * 轮询路径上被高频调用，绝不能等 binder）。但设置页「刷新 Shizuku 状态」与面板的
+   * vdisplayStatus 轮询走的正是 status()——此前唯一会发起绑定的是建屏路径的 ensureBound()，
+   * 于是「用户已授权、Shizuku 在运行」的机器上，那条 UI 路径**无论刷新多少次都不会建连**，
+   * 永远停在 shizuku-user-service-not-bound（用户实测「会一直卡在这」）。
+   *
+   * 这里把绑定动作与读取动作解耦：读路径只负责**触发**一次后台绑定并立即返回当前状态，
+   * 真正的等待交给下一次轮询（2s）自然收敛。绑定成功后 status() 会如实报 ok=true。
+   */
+  fun kickBind(context: Context) {
+    val app = context.applicationContext
+    val current = status(app)
+    if (!current.optBoolean("installed") || !current.optBoolean("running")) return
+    if (!current.optBoolean("granted")) return
+    if (current.optBoolean("bound")) return
+    // 已有绑定在飞（binding=true）时不重复发起——Shizuku.bindUserService 幂等但没必要抖动。
+    if (binding) return
+    Thread({
+      runCatching { ensureBound(app) }.onFailure {
+        Log.w(TAG, "background bind failed: " + it.javaClass.simpleName + ": " + (it.message ?: ""))
+      }
+    }, "dsh-shizuku-kick").start()
+  }
+
   /** Establish the UserService on an explicit user action. */
   fun ensureBound(context: Context): JSONObject {
     val before = status(context)

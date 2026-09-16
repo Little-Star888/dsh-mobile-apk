@@ -158,7 +158,12 @@ object VdisplayController {
 
   /** Current public state for the Files-sidebar panel and controller responses. */
   fun status(context: Context): JSONObject {
-    val privileged = ShizukuTransport.status(context.applicationContext)
+    val appContext = context.applicationContext
+    // 读路径解耦（0.14.0 缺陷修复）：设置页「刷新 Shizuku 状态」与面板轮询都走这里。
+    // 若已授权但 UserService 尚未绑定，触发一次**后台**绑定并立即返回当前状态——下一次
+    // 轮询（2s）即收敛为 ready。绝不在此阻塞等待（本函数在 UI/控制队列高频路径上）。
+    ShizukuTransport.kickBind(appContext)
+    val privileged = ShizukuTransport.status(appContext)
     val active = synchronized(lock) { records.values.toList() }
     val selected = synchronized(lock) { selectedAlias }
     val out = JSONObject()
