@@ -329,3 +329,37 @@
    `ScriptHandler.remove()` 后再注册新脚本，旧脚本仍会在下一次导航生效（设备实测：390 的脚本在切到 700 后
    继续覆盖 meta）。因此「每实例只注册一次」是前提：身份 / 分辨率变化必须**重建隔离 WebView**
    （`BrowserHost.recycleView()`，本就要重载），不能在原实例上重注册。
+111. **主线程里 sleep 等异步回调 = 自死锁（0.14.0 设备实锤）**：`browser_open` 需要返回「导航后」的状态
+   （`loadUrl()` 立即返回，`onPageStarted` 是异步回调），最初的实现是在 `onMain { }` 块里 `Thread.sleep`
+   轮询等页代次前进——**必然 timeout**：`onPageStarted` 要投递到主线程，而主线程正被这个 sleep 占住，
+   回调永远排不上。设备现象：`browser_open` 连续三次返回 `reason: timeout`，而 `browser_list_tabs` /
+   `browser_snapshot` 显示页面其实早就打开了（代次 1）。正确结构：**主线程只做立即返回的动作**（选/建页 +
+   `loadUrl` + 返回一个「已发起」标记），把等待放到调用线程上，等完再 `onMain { status() }` 取快照。
+   判据：任何「等回调」的循环都不得位于 `onMain`/`runOnUiThread` 块内。
+
+112. **`ControlCarrier` 的 neverA11y op 集合漏登记 → 报误导性错误（0.14.0 设备实锤）**：`ControlCarrier` 有
+   三份 op 直连路由集合（`BROWSER_OPS` / `VD_OPS` / `SHELL_OPS`）。漏登记一条 op 的后果**不是拒绝**，而是
+   该 op 落进无障碍分支，模型收到「需要无障碍服务支持」——与无障碍毫无关系，于是模型去开无障碍。实测：
+   `browserTabs`（= `browser_list_tabs`）漏登记时 Agent 原话「browser_list_tabs 似乎需要无障碍服务支持」。
+   已由 `check-control-ops.mjs` 新增面 `ControlCarrier 路由 ⊇ 契约 neverA11y op` 守（故意删一条即红）。
+
+113. **`check-control-ops.mjs` 的 `unionBlock()` 要求 `ControlOp` 联合保持连续行（0.14.0 实锤）**：解析从
+   `export type ControlOp =` 起逐行累积，遇到不以 `'` 或 `|` 结尾的行即停止。在联合**内部**插注释会把其后的
+   op（含 `vd*` / `sh*`）整段截掉，门禁于是以「多个族未落地」的形式集体报红（看起来像三处独立故障，实际
+   一个根因）。注释必须写在类型声明**之前**。
+
+114. **CI shell 里 `set -e` 下不能裸跑「先失败再取 `$?`」（0.14.0 CI 实锤）**：`git ls-remote --exit-code --heads`
+   在分支不存在时 exit 2，`set -e` 会**立刻中止脚本**，`probe=$?` 根本执行不到——回退 main 的分支形同虚设，
+   作业以 exit 128 死掉且因为失败早于任何输出，日志里只看得到一行 `Process completed with exit code 128`
+   （哑失败）。探测必须放进 `if` 条件（`set -e` 豁免），并且**不要**把 clone 输出重定向到 /dev/null，
+   否则失败原因不可见。
+
+115. **诊断脚本不得把 token 嵌进 git URL（0.14.0 两次实锤）**：`https://x-access-token:<TOKEN>@github.com/...`
+   会让 Git Credential Manager 把该内嵌用户名写成**一条额外的凭据条目**（`LegacyGeneric:target=git:https://x-access-token@github.com`），
+   污染用户凭据库。诊断一律走 REST API + `Authorization: token <pw>` 请求头，或
+   `git -c http.extraheader=... -c credential.helper=`；清理用 `cmdkey /delete:"git:https://x-access-token@github.com"`。
+
+116. **大源文件禁止整文件重写（0.14.0 再次实锤）**：`write` 一个 1400+ 行的 Kotlin 文件时，`read` 返回的是
+   **截断窗口**，据此整文件回写会把文件写短（实测 1463 → 1166 行）且报一堆 `Unresolved reference`。
+   大文件一律用 `edit` 定点替换；若已写坏，立即 `git checkout -- <file>` 恢复后重做。
+

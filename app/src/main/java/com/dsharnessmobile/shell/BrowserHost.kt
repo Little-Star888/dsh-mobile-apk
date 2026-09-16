@@ -717,7 +717,10 @@ a{display:inline-block;margin-top:16px;padding:10px 20px;border-radius:8px;backg
         .put("guidance", "BrowserHost 只接受 http(s) 顶层导航；本机回环、file/content/data/javascript 一律拒绝。")
     val requestedTabId = args.optString("tabId", "").takeIf { it.isNotBlank() }
     val wantsNewTab = args.optBoolean("newTab", false)
-    return onMain {
+    // 两个阶段：① 主线程里选/建页 + loadUrl；② **调用线程**上等「导航已开始」再读 status。
+    // 绝不能在主线程里 sleep 等 onPageStarted——那是自死锁：onPageStarted 要投递到主线程，
+    // 主线程被占住就永远收不到（0.14.0 实测：browser_open 全部 timeout）。
+    val started = onMain {
       // 0.14.0 多页签：tabId = **一次「任务」的标识**（见 notes）。三种落法：
       //   ① 传了 tabId 且该页不存在 → 新建并沿用该 id；已存在 → 切过去再导航（不静默改投）；
       //   ② 不带 tabId 但 newTab=true → 自动分配新页（browser_open 的默认语义：开一个网页）；
@@ -736,8 +739,7 @@ a{display:inline-block;margin-top:16px;padding:10px 20px;border-radius:8px;backg
         val before = created.generation.get()
         browser.loadUrl(target)
         applyVisibility()
-        awaitNavigation(created, before)
-        return@onMain status().put("ok", true).put("tabId", created.id)
+        return@onMain JSONObject().put("__go", true).put("tabId", created.id).put("__before", before)
       }
       val newTab = requestedTabId != null && !tabs.containsKey(requestedTabId)
       if (newTab && tabs.size >= MAX_TABS) {
@@ -758,9 +760,12 @@ a{display:inline-block;margin-top:16px;padding:10px 20px;border-radius:8px;backg
       val before = tab.generation.get()
       browser.loadUrl(target)
       applyVisibility()
-      awaitNavigation(tab, before)
-      status().put("ok", true).put("tabId", tab.id)
-    } ?: controlTimeout()
+      JSONObject().put("__go", true).put("tabId", tab.id).put("__before", before)
+    } ?: return controlTimeout()
+    if (!started.optBoolean("__go", false)) return started
+    val tab = tabOrNull(started.optString("tabId", "")) ?: return controlTimeout()
+    awaitNavigation(tab, started.optLong("__before", 0L))
+    return onMain { status().put("ok", true).put("tabId", tab.id) } ?: controlTimeout()
   }
 
   /**
