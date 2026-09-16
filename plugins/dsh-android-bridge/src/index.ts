@@ -28,7 +28,7 @@ import {
 } from './screen-scope.js'
 import { negotiateProtocol } from './control-queue.js'
 import { translateAdbLine } from './shell-ops.js'
-import { installCapabilityGate } from './capability-gate.js'
+import { installCapabilityGate, DEVICE_TOOL_GROUPS, DEVICE_TOOLS, CAPABILITY_TOOL_NAME } from './capability-gate.js'
 import {
   ControlQueue,
   controlTokenFrom,
@@ -82,6 +82,11 @@ export {
   sendMobileRouteRejection,
   CONTROL_TOKEN_HEADER,
   FALLBACK_LOOPBACK_HOSTS,
+  // 0.14.0 §4.1：能力分组常量与 facade 名从单一源再导出——工具面预算门禁据此推导「初始可见集」
+  // （= 注册集 - 被 capability gate 掩蔽的组），避免门禁另写一份组名单而与实现漂移。
+  DEVICE_TOOL_GROUPS,
+  DEVICE_TOOLS,
+  CAPABILITY_TOOL_NAME,
 }
 export type {
   MobileRouteRequest,

@@ -87,6 +87,8 @@ const GATE_SCRIPTS = [
   'elf-check.mjs',
   'check-runtime-assets.mjs',
   'check-perf-instrumentation.mjs',
+  // 模型面工具 wire 预算（0.14.0 §4.1 渐进披露）：注册集 + 初始可见集双口径（与本地链同一份实现）。
+  'check-tool-surface-budget.mjs',
 ]
 
 // ---- 参数解析 ----
@@ -214,6 +216,10 @@ try {
   // combo 缓存覆盖（A3）：注入后 tar 的每条 client.js 必须有 sha256 命中的缓存条目（含注入段增量）
   log('门禁：combo 缓存覆盖（sha256 命中 + map 在场）…')
   run('node', [gate('check-combo-cache.mjs'), snapIn])
+  // 模型面工具 wire 预算（0.14.0 §4.1）：注册集（解锁后上限）+ 初始可见集（模型第一眼）双口径。
+  // 前置于本步的插件 npm build 已产出 plugins/*/lib，门禁真跑各插件 apply() 采集工具定义。
+  log('门禁：模型面工具 wire 预算（注册集 + 初始可见集）…')
+  run('node', [gate('check-tool-surface-budget.mjs')])
   log('门禁：注入后 /api 路由鉴权 marker…')
   run('node', [gate('check-api-route-auth.mjs'), '--snapshot', snapIn])
   log('门禁：剥离清单后置断言（清单项必须不存在）…')

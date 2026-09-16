@@ -60,6 +60,10 @@ const GATES = [
   // combo 缓存覆盖（0.14.0 启动性能 P1-2 / 引擎树补丁 combo-cache-A3）：注入后快照的每条
   // client.js 必须有 sha256 命中的缓存条目，否则运行期回退现场生成会吞掉全部启动收益。
   { script: 'check-combo-cache.mjs', ci: false, needsSnapshot: true },
+  // 模型面工具 wire 预算（0.14.0 §4.1 渐进披露）：注册集（解锁后上限）+ 初始可见集（模型第一眼）
+  // 双口径。掩蔽组名单从 capability-gate 实现导出，门禁不另写一份（防清单漂移假绿）。
+  // 离线可跑（真跑各插件 apply()，只需 plugins/*/lib 构建产物）-> CI 与两条链都跑。
+  { script: 'check-tool-surface-budget.mjs', ci: true, needsSnapshot: false },
 ]
 const CI_GATES = GATES.filter((g) => g.ci).map((g) => g.script)
 const ALL_GATES = GATES.map((g) => g.script)

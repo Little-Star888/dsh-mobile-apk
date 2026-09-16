@@ -229,6 +229,10 @@ if (peer) {
     'scripts/gen-protocol-v2-fixture.mjs',
     'scripts/profile-web.cordis.patch.yml',
     'scripts/snapshot-config/engine-overlay.json',
+    // 模型面工具 wire 预算门禁（0.14.0 §4.1）：脚本 + 基线双仓同源——只有一侧更新基线会让
+    // 另一侧以旧阈值判红/判绿（基线是「事实值」，单边演进即口径分裂）。
+    'scripts/check-tool-surface-budget.mjs',
+    'scripts/tool-surface-budget.json',
   ]
   /** 递归列出目录下所有文件（相对路径；node_modules/.git 排除）——目录级镜像面用。 */
   const walkAll = (dir, prefix = '') => {

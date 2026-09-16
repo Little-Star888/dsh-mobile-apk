@@ -100,6 +100,14 @@ jobs:
           node scripts/check-kotlin-comments.mjs
           node scripts/check-build-chain-abort.mjs
           node scripts/check-perf-instrumentation.mjs
+      # 模型面工具 wire 预算（0.14.0 §4.1 渐进披露）：双口径；名单从 capability-gate 导出。
+      # 需先构建七个模型面插件的 lib（门禁真跑 apply()），缺产物时门禁明确拒绝而非假绿。
+      - name: 模型面工具 wire 预算门禁
+        run: |
+          for d in plugins/dsh-android-bridge plugins/dsh-android-manage plugins/dsh-android-linux-env plugins/dsh-android-file-open plugins/dsh-android-browser plugins/dsh-android-vdisplay plugins/dsh-model-capability; do
+            (cd "$d" && npm install --no-audit --no-fund && npm run build)
+          done
+          node scripts/check-tool-surface-budget.mjs
 
   compile:
     name: Kotlin 编译门禁

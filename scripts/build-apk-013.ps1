@@ -203,6 +203,11 @@ foreach ($abi in @('arm64', 'x86_64')) {
         Write-Host "== combo 缓存覆盖门禁（$abi）=="
         node (Join-Path $Root "scripts\check-combo-cache.mjs") (Join-Path $work "snap-final2.tar.xz") 2>&1
         if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "combo 缓存覆盖不全（回退将吞掉全部启动收益）"; continue }
+        # 模型面工具 wire 预算（0.14.0 §4.1）：注册集 + 初始可见集双口径。真跑各插件 apply()，
+        # 需 plugins/*/lib 构建产物（本链前置已构建）。防「工具面无声膨胀」吃掉每会话固定预算。
+        Write-Host "== 工具面预算门禁（$abi）=="
+        node (Join-Path $Root "scripts\check-tool-surface-budget.mjs") 2>&1
+        if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "模型面工具 wire 超预算（新增工具须归组掩蔽或评审改基线）"; continue }
         # #222：源文件 guard 不等于发行 tar guard；必须逐 profile 读取已注入 artifact 的 marker。
         Write-Host "== 注入后 /api 路由鉴权门禁（$abi）=="
         node (Join-Path $Root "scripts\check-api-route-auth.mjs") --snapshot (Join-Path $work "snap-final2.tar.xz") 2>&1
