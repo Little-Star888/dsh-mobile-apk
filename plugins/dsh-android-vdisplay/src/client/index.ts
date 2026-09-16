@@ -237,27 +237,34 @@ export function apply(ctx: ClientContext): void {
     // 与「AI 浏览器自动落位」互斥（0.14.0 P0-2 用户语义）：两侧共用 localStorage 里的
     // 最近声索记录（id + 时间戳），**最近一次模型驱动的能力动作赢**。浏览器的机制见
     // dsh-client-ui-responsive 的 'ui-responsive: AI browser auto-place'。
-    const CLAIM_KEY = 'dsh.capabilityReveal'
+    // 同浏览器侧：**边沿触发 + 收起时延迟落位**，不是每秒无条件抢焦点。
+    // 旧实现每 800ms 无条件 openTab，用户收起侧栏后会被下一拍拽开、点 × 收起也会被切回来
+    // （设备实测：浏览器侧与虚拟屏侧是同一个结构缺陷，两侧一起改）。
+    /** 上一次已处理过的舞台标记（'' = 还没出现过）。 */
+    let seenActive = false
+    /** 收起期间出现过、等待用户展开后补落位。 */
+    let pending = false
+    // 同浏览器侧：收起信号在祖先元素上，用属性选择器查全文档。
+    const collapsedNow = (): boolean => document.querySelector('[data-rightbar-collapsed="true"]') !== null
     const reveal = () => {
       const active = decodeNative('vdisplayStatus')?.state === 'active'
-      if (!active) return
+      if (!active) { seenActive = false; return }
       if (document.querySelector('[data-testid=vdisplay-stage]') !== null) return
       try {
-        // 浏览器在近 60s 内声明过落位 → 本次不抢（用户刚让 AI 开了浏览器）。
-        const raw = window.localStorage?.getItem(CLAIM_KEY)
-        if (raw !== null && raw !== undefined) {
-          const claim = JSON.parse(raw) as { id?: unknown; at?: unknown }
-          const claimedByBrowser = typeof claim.id === 'string' && !claim.id.includes('vdisplay')
-          if (claimedByBrowser && typeof claim.at === 'number' && Date.now() - claim.at < 60_000) return
+        if (seenActive) {
+          // 无新事件：仅当「收起期间攒下待落位」且用户已展开时，补一次。
+          if (pending && !collapsedNow()) {
+            pending = false
+            sidebar.openTab(VD_TAB_KIND, { revealIfOpened: true })
+          }
+          return
         }
-        window.localStorage?.setItem(CLAIM_KEY, JSON.stringify({ id: VD_TAB_KIND, at: Date.now() }))
-        if (document.querySelector('[data-sidebar-right-open]') === null) {
-          const toggle = document.querySelector('[data-conversation-header-corner] button') as HTMLElement | null
-          toggle?.click()
-        }
+        seenActive = true
+        if (collapsedNow()) { pending = true; return }
         sidebar.openTab(VD_TAB_KIND, { revealIfOpened: true })
       } catch {
-        /* 侧栏未挂载：下一拍重试 */
+        /* 侧栏未挂载：下一拍重试（seenActive 未置位，保持可重试） */
+        seenActive = false
       }
     }
     reveal()
