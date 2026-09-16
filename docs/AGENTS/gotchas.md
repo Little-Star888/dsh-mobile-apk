@@ -382,3 +382,12 @@
    永远读到 `false`，修复看似生效实则失效。同理 `data-sidebar-right-open` 在收起态**仍然存在**、舞台也仍有
    布局矩形——不能用它判断可见性。
 
+120. **`fullscreen` 态同样是 `collapsed=true`，判收起必须放行全屏（0.14.0 设备实证）**：把上面的坑 119 直接
+   落地成 `!stage.closest('[data-rightbar-collapsed="true"]')` 会**引入新缺陷**——面板「全屏」（分栏时的
+   fullscreen 视图）下 `data-rightbar-col` 宽为 0、祖先 `collapsed` 仍为 `true`，但面板**确实可见**、
+   舞台有正常矩形。实测一次真实命中：`fullscreen:true` + `collapsed:true` + 舞台 225x650 +
+   `data-sidebar-right-open=true` —— 只按坑 119 判会算出 `visible:false`，把用户正在看的页面**隐藏掉**。
+   正确判据 = `!fullscreen && closest(collapsed)`；其中 `fullscreen` 用
+   `stage.closest('[data-rightbar-fullscreen="true"]') !== null` 判定。**改可见性判据后必须两端都验**：
+   收起（应隐藏）与全屏（应可见），只验一边会把另一边改成回归。
+
