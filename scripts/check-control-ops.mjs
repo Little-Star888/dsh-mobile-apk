@@ -136,6 +136,19 @@ const routeBlock = arrayBlock(bridge, 'const ROUTE_OPS', '= [', ']')
 if (routeBlock === null) failParse('index.ts 的 ROUTE_OPS')
 const routeOps = new Set(quoted(routeBlock))
 
+// 6b) 壳侧 ControlCarrier 的 neverA11y 直连路由集合（0.14.0 设备实锤补线）
+// 这一面此前**完全没被门禁覆盖**，后果不是「拒绝服务」而是**误导性错误**：
+// browserTabs（= browser_list_tabs）漏登记时，op 落进 a11y 分支，模型收到「需要无障碍服务支持」
+// ——它与无障碍毫无关系，于是模型去开无障碍。同类漏登记必须由门禁挡住。
+const carrier = readOrDie(join(SHELL_ROOT, 'app', 'src', 'main', 'java', 'com', 'dsharnessmobile', 'shell', 'ControlCarrier.kt'))
+const carrierOps = new Set()
+for (const symbol of ['BROWSER_OPS', 'VD_OPS', 'SHELL_OPS']) {
+  const block = arrayBlock(carrier, 'val ' + symbol, 'setOf(', ')')
+  if (block === null) failParse('ControlCarrier.' + symbol)
+  for (const op of quoted(block)) carrierOps.add(op)
+}
+if (carrierOps.size === 0) failParse('ControlCarrier 的 neverA11y 路由集合')
+
 // 6) manage 工具面（实参集合；支持 a11yExec(<ident>) 的 const 三目解析）
 const manage = readOrDie(join(PLUGIN_ROOT, 'plugins', 'dsh-android-manage', 'src', 'index.ts'))
 const manageOps = new Set([...manage.matchAll(/(?:a11yExec|controlExec)\(\s*'([A-Za-z]+)'/g)].map((m) => m[1]))
@@ -149,6 +162,7 @@ const show = (n, s) => console.log('  ' + n.padEnd(16) + ' [' + [...s].sort().jo
 console.log('六处登记面：')
 show('handle', shellHandle)
 show('SUPPORTED_OPS', shellSupported)
+show('ControlCarrier', carrierOps)
 show('ControlOp', engineOps)
 show('A11Y_OPS', a11yOps)
 show('ROUTE_OPS', routeOps)
@@ -196,6 +210,13 @@ const supportedOnly = diff(withoutFamily(shellSupported), withoutFamily(manageOp
 // review §2.3：台账在场（哪怕 families=[]）差集非空一律判红；不再有「缺段降级 WARN」分支。
 check('manage 工具面 == SUPPORTED_OPS（族外 op）', manageOnly.length === 0 && supportedOnly.length === 0,
   'manage 独有=[' + manageOnly.join(', ') + ']；SUPPORTED_OPS 独有=[' + supportedOnly.join(', ') + ']')
+
+// D2. ControlCarrier 的 neverA11y 路由集合 ⊇ 契约全部 neverA11y op（0.14.0 补线）
+// 缺一条 = 该 op 落进 a11y 分支报**误导性错误**（实测 browserTabs 让模型去开无障碍）。
+// 只查「契约里的 neverA11y op 是否都被路由」，不要求反向相等：集合里多写的 op 无害（仍进同一分支）。
+const carrierMissing = [...familyOps].filter((op) => !carrierOps.has(op) && !exempt(op, 'handle')).sort()
+check('ControlCarrier 路由 ⊇ 契约 neverA11y op（漏登记即报误导性错误）', carrierMissing.length === 0,
+  '未登记: [' + carrierMissing.join(', ') + ']（会落进 a11y 分支并返回「需要无障碍」）')
 
 // E. ROUTE_OPS 声明为子集（诊断面只列常用 op）
 const routeOut = diff(routeOps, engineOps).filter((op) => !exempt(op, 'ROUTE_OPS'))
