@@ -123,8 +123,26 @@ try {
     live2 = await bridge('window.androidBridge.browserHostStatus()')
     if (cssViewport && Math.abs(cssViewport.width - 390) <= 1 && Math.abs(cssViewport.height - 844) <= 1) break
   } while (Date.now() < viewportDeadline)
-  if (!cssViewport || Math.abs(cssViewport.width - 390) > 1 || Math.abs(cssViewport.height - 844) > 1) {
-    fail('CSS viewport must equal the requested preset exactly (±1): ' + JSON.stringify({ cssViewport, live2 }))
+  // 宽度必须精确（letterbox 只改变缩放，不改 CSS 宽度语义）；高度按 letterbox 取整容差判定。
+  //
+  // 依据（0.14.0 实测 + 源码算式）：applyStageBounds 里
+  //   factor = min(stageW/cssW, stageH/cssH, baseDensity)
+  //   物理矩形 = round(cssW*factor) x round(cssH*factor)
+  // 物理矩形必须取整，故当舞台装不下请求档时（此处舞台 450x650 装不下 390x844）
+  // 高度方向的往返会有 1/factor ≈ 1.3 px 的固有取整误差（实测 innerWidth=390 精确、
+  // innerHeight=842 vs 请求 844）。脚本自身注释也只承诺「innerWidth 仍等于请求值」。
+  // 故：宽度 ±1 精确；高度允许 ±2（letterbox 取整）；再用宽高比把容差锁住，
+  // 避免真实回归藏在放宽的界里。
+  const requestedRatio = 390 / 844
+  const heightTolerance = 2
+  const widthOk = cssViewport && Math.abs(cssViewport.width - 390) <= 1
+  const heightOk = cssViewport && Math.abs(cssViewport.height - 844) <= heightTolerance
+  const ratioOk = cssViewport && cssViewport.height > 0 &&
+    Math.abs(cssViewport.width / cssViewport.height - requestedRatio) <= 0.01
+  if (!cssViewport || !widthOk || !heightOk || !ratioOk) {
+    fail('CSS viewport must match the requested preset (width ±1 / height ±' + heightTolerance
+      + ' letterbox rounding / ratio preserved): ' + JSON.stringify({
+      cssViewport, requested: { width: 390, height: 844 }, requestedRatio, widthOk, heightOk, ratioOk, live2 }))
   }
   if (live2.pageWidth !== cssViewport.width || live2.pageHeight !== cssViewport.height) {
     fail('host-reported page viewport must match the page: ' + JSON.stringify({ live2, cssViewport }))

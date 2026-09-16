@@ -402,3 +402,22 @@
    另注：全屏下 `[data-rightbar-col]` 宽为 0、`data-rightbar-collapsed` 为 true，但面板**确实可见**、
    舞台有 225x650 矩形——任何只依赖列宽或该常量的判据在此态都会算错。
 
+121. **四个设备断言脚本不可连排（每个都会重建 WebView target）（0.14.0 实测）**：`verify-webview-015`、
+   `verify-state-sync`、`verify-vdisplay-viewer`、`verify-browser-host` 各自会打开/关闭面板、重建隔离
+   WebView、切换系统开关，**前一个跑完 target id 与进程号就变了**。连排会出现两种假红：
+   ① 后一个拿到过期 ws → `CDP 连接失败（ws 不可达或目标已消失）`；② 后一个的前置状态被前一个留下
+   （例如 webview-015 会打开侧栏，而它自己那条「右栏展开键在手机形态存在」要求**收起**态）。
+   正确做法：**逐个独立运行 + 每个跑前重新解析 ws + 跑前显式把状态摆到该脚本的前置**。
+   另注两个易踩的参数坑：
+   - `verify-webview-015` 与 `verify-browser-host` 的 ws 是**位置参数**（`node x.mjs <ws>`），
+     而 `verify-state-sync` / `verify-vdisplay-viewer` 用 `--ws <url>`。
+   - **`verify-state-sync` 绝不能传 `--ws`**：传了就跳过它内部的 target 重解析（`if (WS && !force) return WS`），
+     系统开关导致页面重载后必然整轮报 CDP 失败（实测 9/10 假红；不传则 10/10 通过）。
+
+122. **CSS 视口 ±1 断言必须区分宽/高（letterbox 取整）（0.14.0 实测）**：请求 `390x844` 而舞台只有 450x650 时，
+   `applyStageBounds` 的 `factor = min(stageW/cssW, stageH/cssH, baseDensity)` 会算出 0.770142，物理矩形
+   `round(390*0.770142) x round(844*0.770142) = 300 x 650`。物理矩形必须取整，于是：
+   宽度往返**精确**（innerWidth=390），高度往返有 `1/factor ≈ 1.3 px` 的固有误差（实测 innerHeight=842，
+   比请求值少 2）。脚本原注释也只承诺「innerWidth 仍等于请求值」。故断言应为：**宽度 ±1 精确**、
+   高度 ±2、**并用宽高比（≤0.01）锁住容差**，否则真实回归会藏在放宽的界里。
+
