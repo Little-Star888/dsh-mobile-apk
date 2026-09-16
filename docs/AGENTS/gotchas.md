@@ -375,22 +375,19 @@
    （上游设计「看不见就不算打开」）。所以**收起态下调 `openTab` 必然强制展开**。要满足「收起态自动建窗、
    不强制展开，用户手动展开即可见」，只能：收起时**只记 pending 不落位**，等观察到用户已展开时再补一次 `openTab`。
 
-119. **`data-rightbar-collapsed` 不在 `[data-rightbar-col]` 上，而在其祖先元素上（0.14.0 设备实证）**：
-   两个属性属于不同元素——`col` 的 className 是 `..._rightbarCol`、**没有**该属性（`getAttribute` 恒 `null`），
-   带 `data-rightbar-collapsed` 的是外层 `..._frame`，且 `frame.contains(col)` 为真、`col.contains(frame)` 为假。
-   因此判断收起**必须向上查找祖先**（`stage.closest('[data-rightbar-collapsed="true"]')`），只读 col 一层会
-   永远读到 `false`，修复看似生效实则失效。同理 `data-sidebar-right-open` 在收起态**仍然存在**、舞台也仍有
-   布局矩形——不能用它判断可见性。
+119. **收起/可见性判据的三个错误候选（0.14.0 连错三版，全部实测推翻）**：本判据最终定为「上游展开控件
+   是否在场」（见坑 120），此前三版各自造成用户可见缺陷，故把错误候选一并留档，防止后人再试：
+   ① `data-sidebar-right-open`：收起态**仍为 true**、舞台仍有 450x650 矩形 → 恒判可见（覆盖层压在聊天上）。
+   ② `[data-rightbar-col]` 上的 collapsed 属性：该元素身上**根本没有**此属性（恒 null）。
+   ③ 祖先 frame 上的 `data-rightbar-collapsed`：该属性与 `data-rightbar-col` **不同元素**（前者在
+      `..._frame`、后者在 `..._rightbarCol`，`frame.contains(col)=true` 而反向为 false），且它是**常量**
+      ——在展开/收起/全屏**三态下恒为 true**。用它当判据 → 恒判「已收起」→ 页面几乎永远不可见，
+      自动落位永远走「收起只记 pending」分支 → 永不落位（这版一度被误判为「修好了」，实为假修，
+      并直接导致 verify-vdisplay-viewer 回归）。
+   教训：**换这类判据的字段前，先在设备上把该字段在 {收起, 展开, 全屏} 三态下的取值一次打印出来**，
+   再决定用它；只在一个态里验证过就改，会把缺陷从一种形态换成另一种形态。
 
-120. **`fullscreen` 态同样是 `collapsed=true`，判收起必须放行全屏（0.14.0 设备实证）**：把上面的坑 119 直接
-   落地成 `!stage.closest('[data-rightbar-collapsed="true"]')` 会**引入新缺陷**——面板「全屏」（分栏时的
-   fullscreen 视图）下 `data-rightbar-col` 宽为 0、祖先 `collapsed` 仍为 `true`，但面板**确实可见**、
-   舞台有正常矩形。实测一次真实命中：`fullscreen:true` + `collapsed:true` + 舞台 225x650 +
-   `data-sidebar-right-open=true` —— 只按坑 119 判会算出 `visible:false`，把用户正在看的页面**隐藏掉**。
-   教训：**给「可见性/收起」这类判据换字段前，必须先在设备上把该字段在 {收起, 展开, 全屏} 三态下的取值
-   实测出来**（一条 evaluate 就能同时打印三态），再决定用它。
-
-120. **收起判据的权威信号 = 上游「展开控件是否在场」；`data-rightbar-collapsed` 是常量，不可作状态（0.14.0 四次踩坑后固化）**：
+120. **收起判据的权威信号 = 上游「展开控件是否在场」（0.14.0 固化）**：
    本判据连错三版，每版都造成用户可见缺陷，故把**全部错误候选**与**唯一正确判据**一起钉在这里。
    正确判据：`document.querySelector('[data-sidebar-right-expand]') !== null` **等价于「已收起」**。
    依据 = 上游 ExpandButton 源码注释原文「The expand control while the panel is collapsed; nothing while
