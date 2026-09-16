@@ -27,54 +27,17 @@ jobs:
             exit 1
           fi
           echo "无敏感信息 ✓"
-      # 镜像对端（协调仓 = 补丁权威源）：FX-208.2 去掉自包含比对开关——它跳过跨仓比对，
-      # 单边演进的补丁 PR 会照绿。改为显式检出协调仓并做逐字节跨仓比对。
-      #
-      # review C7 修正（0.14.0 CI/CD 修复 C-2）：协调仓是私有库，必须用 PAT；但此前写的是
-      # `COORD_REPO_TOKEN`，本仓 secrets 里**并不存在**该名（只有 `GH_PAT`）——结果检出步骤
-      # 直接报 `##[error]Input required and not supplied: token`，整个 static job 在检出即失败，
-      # 其后 14 道门禁**全部 skipped**（不是"跑了但没过"，是"从未执行"）。
-      # 现改用本仓既有的 `GH_PAT`（build-snapshot.yml 已用它跨仓检出协调仓，实测有效），
-      # 并加显式非空断言：密名再被改坏时硬失败且给出可操作错误，不再静默消失。
-      #
-      # ref 解析策略：迭代分支在场则用、缺席回退 main（与协调仓 CI 同一约定）——迭代期为
-      # 配对分支、三仓合并删分支后自动回退 main，两种状态都正确且不需要复位提交。
-      # 检出步骤禁止 continue-on-error（软化 = 防线静默消失）；--require-peer 让对端缺席直接判红。
-      - name: 检出镜像对端（协调仓，私有库经 PAT）
-        env:
-          COORD_PAT: ${{ secrets.GH_PAT }}
-          ITERATION_BRANCH_COORD: feat/0140-preview-engine
+      # 补丁镜像面（自我一致性，不引用协调仓）：本仓是公开的自包含构建宿主，**不得**依赖
+      # 私有协调仓——此前用 `GH_PAT` 跨仓检出私有 dsh-mobile，PAT 失效即在检出步骤硬失败，
+      # 该 job 的门禁全部 skipped（0.14.0 实测：PAT 已无法读取协调仓）。
+      # 跨仓逐字节一致性由**能同时看到两仓的那一侧**保证：协调仓 CI 的
+      # 「检出镜像对端三面」步骤会把本仓 + 两个子仓检出，跑 check-patch-mirror --require-peer。
+      # 这里只做本仓自包含面的守门（补丁自洽 + 引擎树补丁行为回归），不跨仓。
+      - name: 补丁自洽与引擎树补丁回归
         run: |
-          set -e
-          if [ -z "${COORD_PAT}" ]; then
-            echo "::error::缺 GH_PAT secret——协调仓是私有库，无 PAT 无法跨仓检出；镜像防线会静默消失，故硬失败"
-            exit 1
-          fi
-          url="https://x-access-token:${COORD_PAT}@github.com/kelai141/dsh-mobile.git"
-          # 先证鉴权可用（否则一切"找不到分支"的结论都不可信）。
-          if ! git ls-remote --heads "${url}" >/dev/null 2>&1; then
-            echo "::error::GH_PAT 无法读取协调仓——PAT 缺失/过期/权限不足。镜像防线不能用回退掩盖，硬失败"
-            exit 1
-          fi
-          ref="${ITERATION_BRANCH_COORD}"
-          # 精确区分两种"非 0"：exit 2 = 确实没有该分支（迭代结束、分支已删）→ 合法回退 main；
-          # 其余（网络/鉴权/其他）不得回退——否则会**静默**拿 main 去比对迭代分支，得到一片假红。
-          git ls-remote --exit-code --heads "${url}" "${ref}" >/dev/null 2>&1
-          probe=$?
-          if [ "$probe" -eq 2 ]; then
-            echo "提示: 迭代分支 ${ref} 不存在（已合并/已删）——回退 main"
-            ref="main"
-          elif [ "$probe" -ne 0 ]; then
-            echo "::error::探测分支 ${ref} 失败（exit=${probe}，非分支不存在语义）——不回退，硬失败以免假红"
-            exit 1
-          fi
-          git clone --quiet --depth 1 --branch "${ref}" "${url}" peer-coord
-          echo "镜像对端: kelai141/dsh-mobile -> peer-coord（ref=${ref}）"
-          [ -f peer-coord/scripts/patches/registry.json ] || { echo "::error::对端检出内容不完整（缺 registry.json）"; exit 1; }
-      # 补丁镜像面跨仓一致性 + 引擎树补丁行为回归
-      - name: 补丁一致性门禁与回归
-        run: |
-          node scripts/check-patch-mirror.mjs --peer peer-coord --require-peer
+          # --self：只跑本仓自包含面（registry/IMPLS 集合一致、补丁文件在场、tests 清单自洽），
+          # 不读对端树；跨仓逐字节一致性由协调仓 CI 的 --require-peer 那一侧守。
+          node scripts/check-patch-mirror.mjs --self
           node scripts/patches/tests/spj-migration-link-f5.test.mjs
           node scripts/patches/tests/atomic-stale-lock.test.mjs
           node scripts/patches/tests/publish-exclusive-reclaim.test.mjs
