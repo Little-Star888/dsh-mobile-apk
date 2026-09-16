@@ -387,7 +387,21 @@
    fullscreen 视图）下 `data-rightbar-col` 宽为 0、祖先 `collapsed` 仍为 `true`，但面板**确实可见**、
    舞台有正常矩形。实测一次真实命中：`fullscreen:true` + `collapsed:true` + 舞台 225x650 +
    `data-sidebar-right-open=true` —— 只按坑 119 判会算出 `visible:false`，把用户正在看的页面**隐藏掉**。
-   正确判据 = `!fullscreen && closest(collapsed)`；其中 `fullscreen` 用
-   `stage.closest('[data-rightbar-fullscreen="true"]') !== null` 判定。**改可见性判据后必须两端都验**：
-   收起（应隐藏）与全屏（应可见），只验一边会把另一边改成回归。
+   教训：**给「可见性/收起」这类判据换字段前，必须先在设备上把该字段在 {收起, 展开, 全屏} 三态下的取值
+   实测出来**（一条 evaluate 就能同时打印三态），再决定用它。
+
+120. **收起判据的权威信号 = 上游「展开控件是否在场」；`data-rightbar-collapsed` 是常量，不可作状态（0.14.0 四次踩坑后固化）**：
+   本判据连错三版，每版都造成用户可见缺陷，故把**全部错误候选**与**唯一正确判据**一起钉在这里。
+   正确判据：`document.querySelector('[data-sidebar-right-expand]') !== null` **等价于「已收起」**。
+   依据 = 上游 ExpandButton 源码注释原文「The expand control while the panel is collapsed; nothing while
+   it is shown」。设备三态实测吻合：收起→在场、展开→不在场、全屏→不在场。
+   **错误候选一 `data-sidebar-right-open`**：收起态该属性**仍为 true**、舞台仍有 450x650 矩形
+   → 恒判可见，原生覆盖层压在聊天上（用户报「收起后网页没消失」）。
+   **错误候选二 `[data-rightbar-col]` 上的 collapsed 属性**：该元素身上**根本没有**此属性（恒 null）。
+   **错误候选三 祖先 frame 上的 `data-rightbar-collapsed`**：它在**展开/收起/全屏三态下恒为 true**，
+   是常量而非状态。用它当判据 → 恒判「已收起」→ **页面几乎永远不可见**；且浏览器/虚拟屏的自动落位
+   永远走「收起时只记 pending」分支 → **永不落位**。这版一度被误判为「修好了缺陷 A」，实际只是把页面
+   永久隐藏（假修），并直接导致 verify-vdisplay-viewer 回归。
+   另注：全屏下 `[data-rightbar-col]` 宽为 0、`data-rightbar-collapsed` 为 true，但面板**确实可见**、
+   舞台有 225x650 矩形——任何只依赖列宽或该常量的判据在此态都会算错。
 
