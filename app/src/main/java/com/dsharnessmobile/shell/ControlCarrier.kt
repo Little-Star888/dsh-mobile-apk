@@ -19,10 +19,18 @@ import org.json.JSONObject
 internal object ControlCarrier {
   private const val TAG = "dsh-control-carrier"
 
-  /** neverA11y 的壳桥 op 组（与 scripts/control-ops-pending.json 的 browser/vdisplay 两族逐字对应）。 */
+  /**
+   * neverA11y 的壳桥 op 组（与 scripts/control-ops-pending.json 的 browser/vdisplay 两族逐字对应）。
+   *
+   * 雷点（0.14.0 设备实测）：本集合**必须与契约逐条对齐**——漏一条的后果不是「拒绝」，
+   * 而是该 op 落进 a11y 分支后报**误导性错误**。实测 browserTabs（= browser_list_tabs）漏登记
+   * 时，模型拿到的是「需要无障碍服务支持」，于是去开无障碍——而它与无障碍毫无关系。
+   */
   private val BROWSER_OPS = setOf(
-    "browserCaps", "browserShow", "browserHide", "browserOpen", "browserJs",
+    "browserCaps", "browserShow", "browserHide", "browserClose", "browserOpen", "browserJs",
     "browserInput", "browserShot", "browserState", "browserSetUa", "browserViewport",
+    // 多页签（0.14.0）：AI 同时控制多个网页
+    "browserTabs", "browserFollowTab", "browserCloseTab",
   )
   private val VD_OPS = setOf("vdCreate", "vdDestroy", "vdLaunch", "vdMoveTask", "vdInfo")
   /** 特权 shell 通道（0.14.0 §6：替换内置 adb；同样 neverA11y）。 */
