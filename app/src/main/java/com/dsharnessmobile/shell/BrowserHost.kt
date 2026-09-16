@@ -733,8 +733,10 @@ a{display:inline-block;margin-top:16px;padding:10px 20px;border-radius:8px;backg
         val created = ensureTab(candidate)
         activeTabId = created.id
         val browser = ensureViewFor(created)
+        val before = created.generation.get()
         browser.loadUrl(target)
         applyVisibility()
+        awaitNavigation(created, before)
         return@onMain status().put("ok", true).put("tabId", created.id)
       }
       val newTab = requestedTabId != null && !tabs.containsKey(requestedTabId)
@@ -753,10 +755,30 @@ a{display:inline-block;margin-top:16px;padding:10px 20px;border-radius:8px;backg
       }
       val browser = ensureViewFor(tab)
       // 0.14.0：模型只导航、不置可见——可见性由侧栏呈现面决定（收起状态下的工作空间语义）。
+      val before = tab.generation.get()
       browser.loadUrl(target)
       applyVisibility()
+      awaitNavigation(tab, before)
       status().put("ok", true).put("tabId", tab.id)
     } ?: controlTimeout()
+  }
+
+  /**
+   * 等一次导航「开始」（页代次前进），供 browser_open 返回**导航后**的状态。
+   *
+   * 为什么必须有：loadUrl() 立即返回，而 onPageStarted/onPageFinished 是异步回调——紧接着调
+   * status() 读到的还是上一页（新页则是 about:blank + 代次 0）。设备实测：模型因此以为
+   * 「导航还没完成」，甚至去猜「工具默认先开空白页」（Agent 原话），可能触发重复导航。
+   *
+   * 只等「代次前进」，**不等整页加载完**：慢站点不应拖住控制队列；上限 2.5s，超时按当前状态
+   * 如实返回（loadState 仍为 loading，模型可自行决定要不要继续 browser_wait）。
+   */
+  private fun awaitNavigation(tab: Tab, before: Long) {
+    val deadline = SystemClock.elapsedRealtime() + 2_500L
+    while (SystemClock.elapsedRealtime() < deadline) {
+      if (tab.generation.get() > before) return
+      try { Thread.sleep(40) } catch (_: InterruptedException) { return }
+    }
   }
 
   private fun viewportOp(args: JSONObject): JSONObject {
