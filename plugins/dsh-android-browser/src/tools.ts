@@ -603,77 +603,85 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
     }),
     defineTool({
       name: BROWSER_TOOLS.listTabs,
-      description: '列出浏览器工位的标签页。当前工位只有一个标签页（单 WebView），如实返回；不假装多标签。',
+      description: '列出当前打开的全部网页（多页签）。返回每页的 tabId / url / title / 是否活动页。'
+        + 'AI 可以同时控制多个网页：用 tabId 指定目标页做 snapshot/click/type 等动作。',
       parameters: {},
       output: {
         schema: objectSchema({
           tabs: { type: 'array', items: { type: 'object', additionalProperties: true } },
           activeTabId: { type: 'string' },
+          tabCount: { type: 'number' },
         }),
-        render: (_args, v: Record<string, unknown>) => [{ type: 'text', text: String((v.tabs as unknown[]).length) + ' 个标签页（活动 ' + String(v.activeTabId) + '）' }],
+        render: (_args, v: Record<string, unknown>) => [{
+          type: 'text',
+          text: String(v.tabCount ?? (v.tabs as unknown[] | undefined)?.length ?? 0) + ' 个网页（活动 ' + String(v.activeTabId) + '）',
+        }],
       },
       execute: async (_args, exec) => {
         const session = gate(exec)
-        if (!session.ok) return { ok: false, error: 'session-not-full-access', guidance: session.guidance } as never
-        const state = await stateOf()
-        const tabs = Array.isArray(state.tabs) ? (state.tabs as Payload[]) : [{
-          tabId: typeof state.tabId === 'string' ? state.tabId : 'tab-1',
-          url: typeof state.url === 'string' ? state.url : 'about:blank',
-          title: typeof state.title === 'string' ? state.title : '',
-          active: true,
-        }]
-        const activeTabId = typeof state.tabId === 'string' ? state.tabId : 'tab-1'
-        return { ok: true, tabs, activeTabId } as never
+        if (!session.ok) return { ok: false, error: 'browser-not-authorized', guidance: session.guidance } as never
+        const result = await call(BROWSER_OPS.tabs, {}, 8_000)
+        if (!result.ok) return denied(result) as never
+        const tabs = Array.isArray(result.data.tabs) ? (result.data.tabs as Payload[]) : []
+        return {
+          ok: true,
+          tabs,
+          activeTabId: typeof result.data.activeTabId === 'string' ? result.data.activeTabId : '',
+          tabCount: tabs.length,
+        } as never
       },
     }),
     defineTool({
       name: BROWSER_TOOLS.followTab,
-      description: '切换到指定标签页。单工位实现只接受当前活动标签；其它 tabId 明确失败，不静默改投。',
-      parameters: { tabId: { type: 'string', required: true, description: '标签 id（当前实现只有 tab-1）' } },
+      description: '把指定网页设为活动页（不新建、不销毁）。目标页的后续动作与快照都作用于它。',
+      parameters: { tabId: { type: 'string', required: true, description: '要切换到的网页 tabId（见 browser_list_tabs）' } },
       output: {
         schema: objectSchema({
           activeTabId: { type: 'string' },
           url: { type: 'string' },
+          tabs: { type: 'array', items: { type: 'object', additionalProperties: true } },
         }),
         render: (_args: unknown, v: Record<string, unknown>) => [{ type: 'text', text: '已切到 ' + String(v.activeTabId) }],
       },
       execute: async ({ tabId }: { tabId: string }, exec: unknown) => {
         const session = gate(exec)
-        if (!session.ok) return { ok: false, error: 'session-not-full-access', guidance: session.guidance } as never
-        const state = await stateOf()
-        const activeTabId = typeof state.tabId === 'string' ? state.tabId : 'tab-1'
-        if (tabId !== activeTabId) {
-          return { ok: false, error: 'tab-not-found', guidance: '当前工位只有 ' + activeTabId + '；多标签能力未实现，不静默改投。' } as never
-        }
-        const shown = await call(BROWSER_OPS.show, {}, 8_000)
-        if (!shown.ok) return denied(shown) as never
-        return { ok: true, activeTabId, url: typeof state.url === 'string' ? state.url : '' } as never
+        if (!session.ok) return { ok: false, error: 'browser-not-authorized', guidance: session.guidance } as never
+        const result = await call(BROWSER_OPS.followTab, { tabId }, 8_000)
+        if (!result.ok) return denied(result) as never
+        resetBrowserMemory()
+        return {
+          ok: true,
+          activeTabId: typeof result.data.activeTabId === 'string' ? result.data.activeTabId : tabId,
+          url: typeof result.data.url === 'string' ? result.data.url : '',
+          tabs: Array.isArray(result.data.tabs) ? result.data.tabs : [],
+        } as never
       },
     }),
     defineTool({
       name: BROWSER_TOOLS.closeTab,
-      description: '关闭浏览器工作台：销毁当前页面（不保留页面状态；再次打开是空白工作台）。'
-        + '单工位实现只有 tab-1；AI 需要时重新 browser_open 即可。',
-      parameters: { tabId: { type: 'string', required: true, description: '标签 id（当前实现只有 tab-1）' } },
+      description: '关闭指定网页并销毁它的页面进程（不保留状态；其它页不受影响）。'
+        + '省略 tabId 时关闭当前活动页；关闭最后一页等价于关闭整个浏览器工作台。',
+      parameters: { tabId: { type: 'string', description: '要关闭的 tabId（省略 = 当前活动页）' } },
       output: {
         schema: objectSchema({
-          closed: { type: 'boolean' },
-          retained: { type: 'boolean' },
+          closedTabId: { type: 'string' },
+          activeTabId: { type: 'string' },
+          tabs: { type: 'array', items: { type: 'object', additionalProperties: true } },
         }),
-        render: (_args: unknown) => [{ type: 'text', text: '浏览器页面已关闭（已销毁）' }],
+        render: (_args: unknown, v: Record<string, unknown>) => [{ type: 'text', text: '已关闭 ' + String(v.closedTabId) + '（剩 ' + String((v.tabs as unknown[] | undefined)?.length ?? 0) + ' 个网页）' }],
       },
-      execute: async ({ tabId }: { tabId: string }, exec: unknown) => {
+      execute: async ({ tabId }: { tabId?: string }, exec: unknown) => {
         const session = gate(exec)
-        if (!session.ok) return { ok: false, error: 'session-not-full-access', guidance: session.guidance } as never
-        const state = await stateOf()
-        const activeTabId = typeof state.tabId === 'string' ? state.tabId : 'tab-1'
-        if (tabId !== activeTabId) {
-          return { ok: false, error: 'tab-not-found', guidance: '当前工位只有 ' + activeTabId + '。' } as never
-        }
-        const closed = await call(BROWSER_OPS.close, {}, 8_000)
-        if (!closed.ok) return denied(closed) as never
+        if (!session.ok) return { ok: false, error: 'browser-not-authorized', guidance: session.guidance } as never
+        const result = await call(BROWSER_OPS.closeTab, tabId === undefined ? {} : { tabId }, 8_000)
+        if (!result.ok) return denied(result) as never
         resetBrowserMemory()
-        return { ok: true, closed: true, retained: false } as never
+        return {
+          ok: true,
+          closedTabId: typeof result.data.closedTabId === 'string' ? result.data.closedTabId : '',
+          activeTabId: typeof result.data.activeTabId === 'string' ? result.data.activeTabId : '',
+          tabs: Array.isArray(result.data.tabs) ? result.data.tabs : [],
+        } as never
       },
     }),
     defineTool({

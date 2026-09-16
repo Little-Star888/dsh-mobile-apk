@@ -79,6 +79,27 @@
       "reason": "browser* 是壳桥 op（侧栏 AI 浏览器宿主半），不经无障碍通道——插件契约 plugins/dsh-android-browser/src/contract.ts 明确「browser* 不进 A11Y_OPS」（方案 §4.5）。永久豁免，非临时缺口。"
     },
     {
+      "op": "browserTabs",
+      "faces": [
+        "A11Y_OPS"
+      ],
+      "reason": "browser* 是壳桥 op（侧栏 AI 浏览器宿主半），不经无障碍通道——插件契约 plugins/dsh-android-browser/src/contract.ts 明确「browser* 不进 A11Y_OPS」（方案 §4.5）。永久豁免，非临时缺口。"
+    },
+    {
+      "op": "browserFollowTab",
+      "faces": [
+        "A11Y_OPS"
+      ],
+      "reason": "browser* 是壳桥 op（侧栏 AI 浏览器宿主半），不经无障碍通道——插件契约 plugins/dsh-android-browser/src/contract.ts 明确「browser* 不进 A11Y_OPS」（方案 §4.5）。永久豁免，非临时缺口。"
+    },
+    {
+      "op": "browserCloseTab",
+      "faces": [
+        "A11Y_OPS"
+      ],
+      "reason": "browser* 是壳桥 op（侧栏 AI 浏览器宿主半），不经无障碍通道——插件契约 plugins/dsh-android-browser/src/contract.ts 明确「browser* 不进 A11Y_OPS」（方案 §4.5）。永久豁免，非临时缺口。"
+    },
+    {
       "op": "vdCreate",
       "faces": [
         "A11Y_OPS"

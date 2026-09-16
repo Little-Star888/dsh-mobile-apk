@@ -512,6 +512,10 @@ class DeviceControlService : AccessibilityService() {
       "browserState" -> BrowserHostHolder.control(op, args)
       "browserSetUa" -> BrowserHostHolder.control(op, args)
       "browserViewport" -> BrowserHostHolder.control(op, args)
+      // 0.14.0 多页签（AI 同时控制多个网页；UI 只是给人看的视图）
+      "browserTabs" -> BrowserHostHolder.control(op, args)
+      "browserFollowTab" -> BrowserHostHolder.control(op, args)
+      "browserCloseTab" -> BrowserHostHolder.control(op, args)
       // Virtual-display lifecycle is native/privileged rather than an accessibility action; the
       // dispatch lives in VdisplayOps so ControlCarrier can serve vd* with a11y off. Branches stay
       // here verbatim for the six-face registration gate (scripts/check-control-ops.mjs, A 项).

@@ -28,7 +28,10 @@
         "browserShot",
         "browserState",
         "browserSetUa",
-        "browserViewport"
+        "browserViewport",
+        "browserTabs",
+        "browserFollowTab",
+        "browserCloseTab"
       ],
       "toolSurface": {
         "file": "plugins/dsh-android-browser/src/contract.ts",

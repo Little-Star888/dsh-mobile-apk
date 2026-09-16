@@ -50,6 +50,12 @@ export const BROWSER_OPS = {
   state: 'browserState',
   setUa: 'browserSetUa',
   viewport: 'browserViewport',
+  // 0.14.0 多页签（用户语义：AI 用工具直接管多网页，UI 只是给人看的视图）：
+  // 此前只注册了 browserOpen，但BrowserHost 是单 WebView —— 工具承诺了做不到的事
+  // （用户实测开三个站点只有一个生效）。这三条把「多页」补齐为真。
+  tabs: 'browserTabs',
+  followTab: 'browserFollowTab',
+  closeTab: 'browserCloseTab',
 } as const
 
 /** 面板数据面路由（引擎侧 webserver；**本轮不注册**，避免 exact 路由绕过 /api 前缀鉴权的老问题）。 */

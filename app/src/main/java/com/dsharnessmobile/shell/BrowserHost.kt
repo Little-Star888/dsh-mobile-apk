@@ -64,21 +64,84 @@ internal class BrowserHost(
   private data class RequestedViewport(val id: String, val width: Int, val height: Int)
 
   companion object {
+    /** 锚点标签页 id（首个页面恒定用它，保证旧调用与设备脚本的期望值不变）。 */
     const val TAB_ID = "tab-1"
+    private const val ROOT_TAB_ID = TAB_ID
+    private const val MAX_TABS = 8
     private const val SNAPSHOT_MAX_NODES = 400
+    /** 无活动标签页时的只读占位（避免把“没有页面”误判成“有页面”） */
+    private val ORPHAN_GENERATION = AtomicLong(0)
+    private val ORPHAN_REFS = HashSet<String>()
+  }
+
+  /** 任取一个已存在标签页的排序快照，供 status()/listTabs 复用。 */
+  private fun tabSummaries(): JSONArray {
+    val out = JSONArray()
+    for (tab in tabs.values) {
+      out.put(JSONObject()
+        .put("tabId", tab.id)
+        .put("url", tab.url)
+        .put("title", tab.title)
+        .put("loadState", tab.loadState)
+        .put("active", tab.id == activeTabId))
+    }
+    return out
+  }
+
+  /** 取用或新建一个标签页；id 为空时落在锚点页（单页签调用语义与改造前一致）。 */
+  private fun ensureTab(id: String?): Tab {
+    val wanted = id?.takeIf { it.isNotBlank() } ?: activeTabId ?: ROOT_TAB_ID
+    tabs[wanted]?.let { return it }
+    val created = Tab(wanted)
+    tabs[wanted] = created
+    if (activeTabId == null) activeTabId = wanted
+    return created
   }
 
   private val main = Handler(Looper.getMainLooper())
-  private val generation = AtomicLong(0)
-  private var view: WebView? = null
+
+  /**
+   * 一个浏览器标签页的**全部页面级状态**（0.14.0 多页签）。
+   *
+   * 为什么要把这些字段从宿主搬进来：此前宿主只有一份 url/title/loadState/generation/refs，
+   * 结构上只能有一个页面——但工具面早就承诺了 browser_list_tabs / browser_follow_tab /
+   * browser_close_tab，模型因此「以为」能同时控多个网页（用户实测：开三个站点只有一页生效）。
+   * 每个 tab 一份状态后，工具承诺与原生能力才对齐。
+   */
+  private inner class Tab(val id: String) {
+    var view: WebView? = null
+    var url = "about:blank"
+    var title = ""
+    var loadState = "idle"
+    val generation = AtomicLong(0)
+    /** 最近一次被接受的 snapshot 的 ref 集；动作只接受这些。 */
+    val refs = HashSet<String>()
+    var snapshotGeneration = -1L
+    var scrollY = 0
+    var scrollDirection = 0
+    var pageWidth = 0
+    var pageHeight = 0
+    var pageDevicePixelRatio = 0.0
+    var errorPageUrl: String? = null
+  }
+
+  /** 全部标签页，插入序即 UI 顺序；锚点固定为 [ROOT_TAB_ID]。 */
+  private val tabs = LinkedHashMap<String, Tab>()
+  private var activeTabId: String? = null
+  private var nextTabSeq = 1
+  private fun activeTab(): Tab? = activeTabId?.let { tabs[it] }
+  private fun tabOrNull(id: String?): Tab? = id?.let { tabs[it] }
+
+  /** 页面级字段一律代理到**活动标签页**：单页签时代码路径与改造前逐字等价。 */
+  private var view: WebView?
+    get() = activeTab()?.view
+    set(value) { activeTab()?.view = value }
+
   private var requestedVisible = false
   private var stageVisible = false
   private var stageBounds: StageBounds? = null
   /** Device viewport is default; named presets letterbox inside the trusted stage without transforms. */
   private var requestedViewport: RequestedViewport? = null
-  private var title = ""
-  private var url = "about:blank"
-  private var loadState = "idle"
   private var lastError = ""
   /** Identity profile currently applied to the untrusted WebView ('android-real' = real device UA). */
   private var identityId = "android-real"
@@ -92,22 +155,37 @@ internal class BrowserHost(
   private var recycling = false
   /** 当前已注入脚本的预设；预设变化需要重建脚本并重载页面。 */
   private var appliedViewport: RequestedViewport? = null
-  /** 最近一次加载完成后页面自报的视口（诊断 + 设备断言，不参与控制）。 */
-  private var pageWidth = 0
-  private var pageHeight = 0
-  private var pageDevicePixelRatio = 0.0
-  /** Scroll observation for the trusted panel's chrome avoidance (never injected into the page). */
-  private var scrollY = 0
-  private var scrollDirection = 0
-  /** Non-null while the built-in error page is displayed for this failed URL. */
-  private var errorPageUrl: String? = null
   /** 会话归属（0.14.0）：打开/导航时绑定发起会话；非归属会话的呈现与操作一律拒绝。 */
   private var ownerSessionId: String? = null
   /** 当前呈现面（侧栏）声明的会话；与归属不一致时原生层不显示（占用态由面板渲染）。 */
   private var viewerSessionId: String? = null
-  /** Refs from the most recent accepted snapshot; actions only accept these. */
-  private val lastRefs = HashSet<String>()
-  private var lastSnapshotGeneration = -1L
+
+  private val title: String get() = activeTab()?.title ?: ""
+  private val url: String get() = activeTab()?.url ?: "about:blank"
+  private val loadState: String get() = activeTab()?.loadState ?: "idle"
+  private val generation: AtomicLong get() = activeTab()?.generation ?: ORPHAN_GENERATION
+  private val lastRefs: HashSet<String> get() = activeTab()?.refs ?: ORPHAN_REFS
+  private var lastSnapshotGeneration: Long
+    get() = activeTab()?.snapshotGeneration ?: -1L
+    set(value) { activeTab()?.snapshotGeneration = value }
+  private var pageWidth: Int
+    get() = activeTab()?.pageWidth ?: 0
+    set(value) { activeTab()?.pageWidth = value }
+  private var pageHeight: Int
+    get() = activeTab()?.pageHeight ?: 0
+    set(value) { activeTab()?.pageHeight = value }
+  private var pageDevicePixelRatio: Double
+    get() = activeTab()?.pageDevicePixelRatio ?: 0.0
+    set(value) { activeTab()?.pageDevicePixelRatio = value }
+  private var scrollY: Int
+    get() = activeTab()?.scrollY ?: 0
+    set(value) { activeTab()?.scrollY = value }
+  private var scrollDirection: Int
+    get() = activeTab()?.scrollDirection ?: 0
+    set(value) { activeTab()?.scrollDirection = value }
+  private var errorPageUrl: String?
+    get() = activeTab()?.errorPageUrl
+    set(value) { activeTab()?.errorPageUrl = value }
   private val rootLayoutListener = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
     applyStageBounds()
   }
@@ -263,19 +341,24 @@ internal class BrowserHost(
     } else {
       requireOwner(op, session)?.let { return it }
     }
-    return when (op) {
-    "browserCaps" -> onMain { caps() } ?: controlTimeout()
-    "browserState" -> onMain { status() } ?: controlTimeout()
-    "browserShow" -> controlJson(show(args.optString("url", null).takeIf { it.isNotBlank() }))
-    "browserHide" -> controlJson(hide())
-    "browserClose" -> controlJson(close())
-    "browserOpen" -> navigateOp(args)
-    "browserViewport" -> viewportOp(args)
-    "browserSetUa" -> identityOp(args)
-    "browserJs" -> browserJsOp(args)
-    "browserInput" -> inputOp(args)
-    "browserShot" -> shotOp(args)
-    else -> JSONObject().put("__error", "未知浏览器操作 $op").put("reason", "unknown-op")
+    // 多页签：browserOpen/list/follow/closeTab 都带可选 tabId；缺省落在当前活动页。
+    // 兼容旧单页调用——不传 tabId 时行为与改造前逐字一致（锚点 tab-1）。
+    when (op) {
+    "browserCaps" -> return onMain { caps() } ?: controlTimeout()
+    "browserState" -> return onMain { status() } ?: controlTimeout()
+    "browserTabs" -> return onMain { listTabsOp() } ?: controlTimeout()
+    "browserFollowTab" -> return onMain { followTabOp(args) } ?: controlTimeout()
+    "browserCloseTab" -> return onMain { closeTabOp(args) } ?: controlTimeout()
+    "browserShow" -> return controlJson(show(args.optString("url", null).takeIf { it.isNotBlank() }))
+    "browserHide" -> return controlJson(hide())
+    "browserClose" -> return controlJson(close())
+    "browserOpen" -> return navigateOp(args)
+    "browserViewport" -> return viewportOp(args)
+    "browserSetUa" -> return identityOp(args)
+    "browserJs" -> return browserJsOp(args)
+    "browserInput" -> return inputOp(args)
+    "browserShot" -> return shotOp(args)
+    else -> return JSONObject().put("__error", "未知浏览器操作 $op").put("reason", "unknown-op")
     }
   }
 
@@ -314,34 +397,36 @@ internal class BrowserHost(
   private fun disposeView() {
     requestedVisible = false
     stageVisible = false
-    synchronized(lastRefs) { lastRefs.clear() }
-    lastSnapshotGeneration = -1L
-    view?.let { browser ->
-      root.removeView(browser)
-      browser.destroy()
+    // 多页签：销毁**全部**页面与它们的 renderer（browserClose 的语义 = 关闭整个工作台）。
+    for (tab in tabs.values) {
+      synchronized(tab.refs) { tab.refs.clear() }
+      tab.view?.let { browser ->
+        root.removeView(browser)
+        browser.destroy()
+      }
+      tab.view = null
+      tab.snapshotGeneration = -1L
     }
-    view = null
-    url = "about:blank"
-    title = ""
-    loadState = "idle"
+    tabs.clear()
+    activeTabId = null
+    nextTabSeq = 1
     identityId = "android-real"
     identityUa = ""
     identityScriptHandler = null
     appliedViewport = null
-    pageWidth = 0
-    pageHeight = 0
-    pageDevicePixelRatio = 0.0
-    scrollY = 0
-    scrollDirection = 0
-    errorPageUrl = null
     ownerSessionId = null
     viewerSessionId = null
     lastError = ""
   }
 
   @SuppressLint("SetJavaScriptEnabled")
-  private fun ensureView(): WebView {
-    val existing = view
+  private fun ensureView(): WebView = ensureViewFor(ensureTab(null))
+
+  /** 为指定标签页创建（或取用）它自己的隔离 WebView；一个 tab 一个 renderer。 */
+  @SuppressLint("SetJavaScriptEnabled")
+  private fun ensureViewFor(tab: Tab): WebView {
+    activeTabId = tab.id
+    val existing = tab.view
     if (existing != null) return existing
     val created = WebView(activity).apply {
       id = View.generateViewId()
@@ -372,10 +457,12 @@ internal class BrowserHost(
         }
       }
       // 滚动观察（页面真实滚动位置，不注入任何脚本）：驱动可信面板的控件避让与横屏锁定。
+      // 回调一律写**本 tab** 的状态（闭包捕获 tab），绝不写「当前活动页」——否则后台页的
+      // 加载/滚动事件会把前台页的状态覆盖掉（多页签下的典型错乱）。
       setOnScrollChangeListener { _, _, y, _, oldY ->
-        scrollY = y
+        tab.scrollY = y
         val delta = y - oldY
-        if (delta > 0) scrollDirection = 1 else if (delta < 0) scrollDirection = -1
+        if (delta > 0) tab.scrollDirection = 1 else if (delta < 0) tab.scrollDirection = -1
       }
       webViewClient = object : WebViewClient() {
         override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
@@ -385,22 +472,22 @@ internal class BrowserHost(
         }
 
         override fun onPageStarted(view: WebView, startedUrl: String, favicon: android.graphics.Bitmap?) {
-          generation.incrementAndGet()
-          synchronized(lastRefs) { lastRefs.clear() }
+          tab.generation.incrementAndGet()
+          synchronized(tab.refs) { tab.refs.clear() }
           // 内置错误页（data:）不是新页面：保留失败 URL 与 loadState=error，供重试链接使用。
           if (startedUrl.startsWith("data:")) return
-          errorPageUrl = null
-          this@BrowserHost.url = startedUrl
-          this@BrowserHost.title = ""
-          this@BrowserHost.loadState = "loading"
+          tab.errorPageUrl = null
+          tab.url = startedUrl
+          tab.title = ""
+          tab.loadState = "loading"
           lastError = ""
         }
 
         override fun onPageFinished(view: WebView, finishedUrl: String) {
           if (finishedUrl.startsWith("data:")) return
-          this@BrowserHost.url = finishedUrl
-          if (this@BrowserHost.loadState == "loading") this@BrowserHost.loadState = "loaded"
-          measurePage(view)
+          tab.url = finishedUrl
+          if (tab.loadState == "loading") tab.loadState = "loaded"
+          measurePage(view, tab)
         }
 
         /**
@@ -410,9 +497,9 @@ internal class BrowserHost(
         override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
           if (!request.isForMainFrame) return
           val failing = request.url.toString()
-          errorPageUrl = failing
-          this@BrowserHost.url = failing
-          this@BrowserHost.loadState = "error"
+          tab.errorPageUrl = failing
+          tab.url = failing
+          tab.loadState = "error"
           lastError = "load-error:" + error.errorCode
           val html = errorPageHtml(failing, error.errorCode, error.description?.toString() ?: "")
           view.loadDataWithBaseURL(null, html, "text/html", "utf-8", null)
@@ -422,19 +509,19 @@ internal class BrowserHost(
           lastError = if (detail.didCrash()) "renderer-crashed" else "renderer-killed"
           root.removeView(view)
           view.destroy()
-          if (this@BrowserHost.view === view) this@BrowserHost.view = null
-          synchronized(lastRefs) { lastRefs.clear() }
+          if (tab.view === view) tab.view = null
+          synchronized(tab.refs) { tab.refs.clear() }
           return true
         }
       }
       webChromeClient = object : WebChromeClient() {
         override fun onReceivedTitle(view: WebView, pageTitle: String?) {
-          this@BrowserHost.title = pageTitle ?: ""
+          tab.title = pageTitle ?: ""
         }
       }
     }
     root.addView(created, FrameLayout.LayoutParams(1, 1))
-    view = created
+    tab.view = created
     applyIdentityToView(created)
     appliedViewport = requestedViewport
     applyStageBounds()
@@ -489,14 +576,14 @@ internal class BrowserHost(
   }
 
   /** 读取页面自报视口（诊断 + 设备断言）；失败保留上一次值。 */
-  private fun measurePage(browser: WebView) {
+  private fun measurePage(browser: WebView, tab: Tab) {
     browser.evaluateJavascript(
       "(function(){return JSON.stringify({w:window.innerWidth||0,h:window.innerHeight||0,dpr:window.devicePixelRatio||0})})()",
     ) { raw ->
       val value = decodeJsObject(raw) ?: return@evaluateJavascript
-      pageWidth = value.optInt("w", pageWidth)
-      pageHeight = value.optInt("h", pageHeight)
-      pageDevicePixelRatio = value.optDouble("dpr", pageDevicePixelRatio)
+      tab.pageWidth = value.optInt("w", tab.pageWidth)
+      tab.pageHeight = value.optInt("h", tab.pageHeight)
+      tab.pageDevicePixelRatio = value.optDouble("dpr", tab.pageDevicePixelRatio)
     }
   }
 
@@ -529,12 +616,9 @@ internal class BrowserHost(
       .put("pageWidth", pageWidth)
       .put("pageHeight", pageHeight)
       .put("pageDevicePixelRatio", pageDevicePixelRatio)
-      .put("tabId", TAB_ID)
-      .put("tabs", JSONArray(listOf(JSONObject()
-        .put("tabId", TAB_ID)
-        .put("url", url)
-        .put("title", title)
-        .put("active", true))))
+      .put("tabId", activeTabId ?: "")
+      .put("tabs", tabSummaries())
+      .put("tabCount", tabs.size)
       .put("reason", lastError)
   }
 
@@ -631,12 +715,29 @@ a{display:inline-block;margin-top:16px;padding:10px 20px;border-radius:8px;backg
     val target = normalizeUrl(raw)
       ?: return JSONObject().put("ok", false).put("reason", "unsupported-url")
         .put("guidance", "BrowserHost 只接受 http(s) 顶层导航；本机回环、file/content/data/javascript 一律拒绝。")
+    val requestedTabId = args.optString("tabId", "").takeIf { it.isNotBlank() }
     return onMain {
-      val browser = ensureView()
+      // 0.14.0 多页签：model 可以直接"开一个新页"——传 tabId 且该页尚未存在时新建之。
+      // 不传 tabId 时沿用当前活动页（旧单页调用语义不变）。
+      val newTab = requestedTabId != null && !tabs.containsKey(requestedTabId)
+      if (newTab && tabs.size >= MAX_TABS) {
+        return@onMain JSONObject().put("ok", false).put("reason", "tab-limit")
+          .put("guidance", "同时打开的页面已达上限（$MAX_TABS）；先 browser_close_tab 关掉不再需要的页。")
+          .put("tabs", tabSummaries())
+      }
+      // 传了 tabId 但该页已存在 → 切过去再导航（不静默写到别的页）。
+      val tab = if (requestedTabId != null) {
+        val t = ensureTab(requestedTabId)
+        activeTabId = t.id
+        t
+      } else {
+        ensureTab(null)
+      }
+      val browser = ensureViewFor(tab)
       // 0.14.0：模型只导航、不置可见——可见性由侧栏呈现面决定（收起状态下的工作空间语义）。
       browser.loadUrl(target)
       applyVisibility()
-      status().put("ok", true)
+      status().put("ok", true).put("tabId", tab.id)
     } ?: controlTimeout()
   }
 
@@ -736,14 +837,18 @@ a{display:inline-block;margin-top:16px;padding:10px 20px;border-radius:8px;backg
     val reloadTarget = url.takeIf { it != "about:blank" }
     recycling = true
     try {
+      // 重建当前**活动**标签页自己的 WebView；其它页不受影响（多页签）。
+      val tab = activeTab()
       root.removeView(browser)
       browser.destroy()
-      view = null
-      synchronized(lastRefs) { lastRefs.clear() }
-      lastSnapshotGeneration = -1L
-      loadState = "idle"
-      val next = ensureView()
-      if (reloadTarget != null) next.loadUrl(reloadTarget)
+      tab?.view = null
+      tab?.let {
+        synchronized(it.refs) { it.refs.clear() }
+        it.snapshotGeneration = -1L
+        it.loadState = "idle"
+        val next = ensureViewFor(it)
+        if (reloadTarget != null) next.loadUrl(reloadTarget)
+      }
     } finally {
       recycling = false
     }
@@ -816,6 +921,65 @@ a{display:inline-block;margin-top:16px;padding:10px 20px;border-radius:8px;backg
     } catch (_: Throwable) {
       false
     }
+  }
+
+  // ── 多页签 ops（0.14.0：AI 用工具直接管多网页，UI 只是给人看的视图）────────
+
+  /** 列出全部标签页 + 当前活动页。 */
+  private fun listTabsOp(): JSONObject = JSONObject()
+    .put("ok", true)
+    .put("tabs", tabSummaries())
+    .put("activeTabId", activeTabId ?: "")
+    .put("tabCount", tabs.size)
+
+  /** 切换活动标签页（不新建、不销毁）。 */
+  private fun followTabOp(args: JSONObject): JSONObject {
+    val id = args.optString("tabId", "")
+    val tab = tabOrNull(id)
+      ?: return JSONObject().put("ok", false).put("reason", "tab-not-found")
+        .put("tabId", id)
+        .put("tabs", tabSummaries())
+    activeTabId = tab.id
+    applyStageBounds()
+    applyVisibility()
+    return JSONObject().put("ok", true)
+      .put("activeTabId", tab.id)
+      .put("url", tab.url)
+      .put("tabs", tabSummaries())
+  }
+
+  /**
+   * 关闭指定标签页并同步销毁它的 WebView（一个 tab 一个 renderer —— 不关就是不销毁，
+   * 这是「多页共存」与「省资源」的取舍点）。关掉活动页时自动切到相邻页。
+   */
+  private fun closeTabOp(args: JSONObject): JSONObject {
+    val id = args.optString("tabId", "").ifBlank { activeTabId ?: "" }
+    val tab = tabOrNull(id)
+      ?: return JSONObject().put("ok", false).put("reason", "tab-not-found").put("tabId", id)
+    // 最后一个页面：与 browserClose 等价（清空并保持宿主可复用），不残留半个状态。
+    tab.view?.let { browser ->
+      root.removeView(browser)
+      browser.destroy()
+    }
+    tab.view = null
+    tabs.remove(tab.id)
+    if (tabs.isEmpty()) {
+      nextTabSeq = 1
+      activeTabId = null
+      requestedVisible = false
+      applyVisibility()
+      return JSONObject().put("ok", true).put("closedTabId", tab.id)
+        .put("activeTabId", "").put("tabs", JSONArray())
+    }
+    if (activeTabId == tab.id) {
+      activeTabId = tabs.keys.firstOrNull()
+      applyStageBounds()
+    }
+    applyVisibility()
+    return JSONObject().put("ok", true)
+      .put("closedTabId", tab.id)
+      .put("activeTabId", activeTabId ?: "")
+      .put("tabs", tabSummaries())
   }
 
   // ── DOM snapshot ref discipline ───────────────────────────────────────────

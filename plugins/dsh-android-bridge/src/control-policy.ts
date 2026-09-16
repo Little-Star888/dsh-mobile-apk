@@ -34,10 +34,15 @@ import { SHELL_OPS } from './shell-ops.js'
 // 与「该操作请用 ADB 通道」这类**错误指引**（而它们既不进 A11Y_OPS 也不走 ADB）。
 // 若将来要让它们出现在诊断面，先解开这个语义矛盾（要么承认它们是 a11y 承载、要么给出独立后端），
 // 再同批改 ROUTE_OPS；ROUTE_OPS ⊂ ControlOp 的约束在两种做法下都成立，门禁不会替你做这个判断。
+// 0.14.0 多页签：browserTabs / browserFollowTab / browserCloseTab（AI 同时控制多个网页）。
+// 注意：本联合**必须保持连续行**——scripts/check-control-ops.mjs 的 unionBlock() 从声明行起
+// 逐行累积，遇到不以 ' 或 | 结尾的行即停止；在联合内部插注释会把后续 op（含 vd*/sh*）整段截掉，
+// 门禁会以「族未落地」形式集体报红（本批实测）。
 export type ControlOp = 'snapshot' | 'click' | 'longClick' | 'setText' | 'scroll' | 'global' | 'screenshot' | 'state'
   | 'nodeText' | 'webSnapshot' | 'webAction'
   | 'browserCaps' | 'browserShow' | 'browserHide' | 'browserClose' | 'browserOpen' | 'browserJs'
   | 'browserInput' | 'browserShot' | 'browserState' | 'browserSetUa' | 'browserViewport'
+  | 'browserTabs' | 'browserFollowTab' | 'browserCloseTab'
   | 'vdCreate' | 'vdDestroy' | 'vdLaunch' | 'vdMoveTask' | 'vdInfo'
   | 'shExec' | 'shPull' | 'shPush' | 'shRemove'
 
