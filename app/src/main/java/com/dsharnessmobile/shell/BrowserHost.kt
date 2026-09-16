@@ -716,9 +716,27 @@ a{display:inline-block;margin-top:16px;padding:10px 20px;border-radius:8px;backg
       ?: return JSONObject().put("ok", false).put("reason", "unsupported-url")
         .put("guidance", "BrowserHost 只接受 http(s) 顶层导航；本机回环、file/content/data/javascript 一律拒绝。")
     val requestedTabId = args.optString("tabId", "").takeIf { it.isNotBlank() }
+    val wantsNewTab = args.optBoolean("newTab", false)
     return onMain {
-      // 0.14.0 多页签：model 可以直接"开一个新页"——传 tabId 且该页尚未存在时新建之。
-      // 不传 tabId 时沿用当前活动页（旧单页调用语义不变）。
+      // 0.14.0 多页签：tabId = **一次「任务」的标识**（见 notes）。三种落法：
+      //   ① 传了 tabId 且该页不存在 → 新建并沿用该 id；已存在 → 切过去再导航（不静默改投）；
+      //   ② 不带 tabId 但 newTab=true → 自动分配新页（browser_open 的默认语义：开一个网页）；
+      //   ③ 都不带 → 当前活动页（旧单页调用逐字兼容）。
+      if (wantsNewTab && requestedTabId == null) {
+        if (tabs.size >= MAX_TABS) {
+          return@onMain JSONObject().put("ok", false).put("reason", "tab-limit")
+            .put("guidance", "同时打开的页面已达上限（$MAX_TABS）；先 browser_close_tab 关掉不再需要的页。")
+            .put("tabs", tabSummaries())
+        }
+        var candidate: String
+        do { candidate = "tab-" + nextTabSeq++ } while (tabs.containsKey(candidate))
+        val created = ensureTab(candidate)
+        activeTabId = created.id
+        val browser = ensureViewFor(created)
+        browser.loadUrl(target)
+        applyVisibility()
+        return@onMain status().put("ok", true).put("tabId", created.id)
+      }
       val newTab = requestedTabId != null && !tabs.containsKey(requestedTabId)
       if (newTab && tabs.size >= MAX_TABS) {
         return@onMain JSONObject().put("ok", false).put("reason", "tab-limit")

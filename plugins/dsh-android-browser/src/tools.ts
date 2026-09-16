@@ -212,6 +212,7 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
         url: { type: 'string', required: true, description: '要打开的 http(s) 地址' },
         viewport: { type: 'string', description: '视口档 id（见 browser_set_viewport 的预设表）' },
         identity: { type: 'string', description: '身份档 id：android-real | linux-desktop | windows-desktop' },
+        tabId: { type: 'string', description: '（可选）任务标识：给定时复用/新建该标识的网页，便于把后续动作收敛到同一页' },
       },
       output: {
         schema: objectSchema({
@@ -221,12 +222,13 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
           pageGeneration: { type: 'number' },
           appliedViewport: { type: 'string' },
           appliedIdentity: { type: 'string' },
+          tabId: { type: 'string' },
         }),
-        render: (_args, v: Record<string, unknown>) => [{ type: 'text', text: '浏览器已打开 ' + String(v.url) + '（代次 ' + String(v.pageGeneration) + '）' }],
+        render: (_args, v: Record<string, unknown>) => [{ type: 'text', text: '已打开 ' + String(v.url) + '（页 ' + String(v.tabId) + '，代次 ' + String(v.pageGeneration) + '）' }],
       },
-      execute: async ({ url, viewport, identity }: { url: string; viewport?: string; identity?: string }, exec) => {
+      execute: async ({ url, viewport, identity, tabId }: { url: string; viewport?: string; identity?: string; tabId?: string }, exec) => {
         const session = gate(exec)
-        if (!session.ok) return { ok: false, error: 'session-not-full-access', guidance: session.guidance } as never
+        if (!session.ok) return { ok: false, error: 'browser-not-authorized', guidance: session.guidance } as never
         audit(BROWSER_TOOLS.open, { url, viewport, identity }, true)
         let appliedViewport: string | undefined
         if (typeof viewport === 'string' && viewport !== '') {
@@ -243,12 +245,17 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
           if (!result.ok) return denied(result) as never
           appliedIdentity = profile.id
         }
-        const opened = await call(BROWSER_OPS.open, { url }, 20_000)
+        // tabId = 任务标识：给了就用它（存在则复用、不存在则新建），不给就**开一个新页**。
+        // 这是「AI 可以同时控制多网页」的入口语义：每次 browser_open 默认得到独立一页。
+        const route = typeof tabId === 'string' && tabId !== '' ? { tabId } : { newTab: true }
+        const opened = await call(BROWSER_OPS.open, { url, ...route }, 20_000)
         if (!opened.ok) return denied(opened) as never
         resetBrowserMemory()
         const state = await stateOf()
+        const openedTabId = typeof opened.data.tabId === 'string' ? opened.data.tabId : ''
         return {
           ok: true,
+          tabId: openedTabId,
           url: typeof state.url === 'string' ? state.url : url,
           title: typeof state.title === 'string' ? state.title : '',
           loadState: typeof state.loadState === 'string' ? state.loadState : 'navigating',
