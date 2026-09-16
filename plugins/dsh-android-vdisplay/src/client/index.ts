@@ -244,8 +244,8 @@ export function apply(ctx: ClientContext): void {
     let seenActive = false
     /** 收起期间出现过、等待用户展开后补落位。 */
     let pending = false
-    // 同浏览器侧：收起信号在祖先元素上，用属性选择器查全文档。
-    const collapsedNow = (): boolean => document.querySelector('[data-rightbar-collapsed="true"]') !== null
+    // 同浏览器侧：权威收起信号 = 上游展开控件是否在场（`data-rightbar-collapsed` 是常量，不可用）。
+    const collapsedNow = (): boolean => document.querySelector('[data-sidebar-right-expand]') !== null
     const reveal = () => {
       const active = decodeNative('vdisplayStatus')?.state === 'active'
       if (!active) { seenActive = false; return }
