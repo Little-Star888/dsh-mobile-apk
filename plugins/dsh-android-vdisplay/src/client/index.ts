@@ -234,11 +234,23 @@ export function apply(ctx: ClientContext): void {
     // 的 revealIfOpened 语义是「右侧栏**已展开**时才切换过去」——侧栏关着时该调用是静默 no-op，
     // 于是建屏后舞台永不挂载（前一轮「自动露出失效」的真因）。修法 = 先确保右侧栏展开：
     // 页内原生开关（会话头部 corner 按钮）在闭态下点一次，下一拍 openTab 再切到本 Tab。
+    // 与「AI 浏览器自动落位」互斥（0.14.0 P0-2 用户语义）：两侧共用 localStorage 里的
+    // 最近声索记录（id + 时间戳），**最近一次模型驱动的能力动作赢**。浏览器的机制见
+    // dsh-client-ui-responsive 的 'ui-responsive: AI browser auto-place'。
+    const CLAIM_KEY = 'dsh.capabilityReveal'
     const reveal = () => {
       const active = decodeNative('vdisplayStatus')?.state === 'active'
       if (!active) return
       if (document.querySelector('[data-testid=vdisplay-stage]') !== null) return
       try {
+        // 浏览器在近 60s 内声明过落位 → 本次不抢（用户刚让 AI 开了浏览器）。
+        const raw = window.localStorage?.getItem(CLAIM_KEY)
+        if (raw !== null && raw !== undefined) {
+          const claim = JSON.parse(raw) as { id?: unknown; at?: unknown }
+          const claimedByBrowser = typeof claim.id === 'string' && !claim.id.includes('vdisplay')
+          if (claimedByBrowser && typeof claim.at === 'number' && Date.now() - claim.at < 60_000) return
+        }
+        window.localStorage?.setItem(CLAIM_KEY, JSON.stringify({ id: VD_TAB_KIND, at: Date.now() }))
         if (document.querySelector('[data-sidebar-right-open]') === null) {
           const toggle = document.querySelector('[data-conversation-header-corner] button') as HTMLElement | null
           toggle?.click()
