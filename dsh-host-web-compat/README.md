@@ -63,8 +63,6 @@ one must end on a complete statement (see Development constraints).
 - theme bridge (`__dshThemeBridge`: system light/dark into page theme variables);
 - agent tool-row path recognition — 0.14 keys on DOM facts (not CSS-module class names) when
   clicking an absolute path in a tool row hands it to the shell chooser;
-- export-dialog fallback — when the upstream export result UI is absent, the plugin surfaces the
-  shell's `__dshExportResult` payload instead of failing silently;
 - boot watchdog (diagnostics plus one automatic reload when "Loading plugins" persists past 40s).
 
 ## Development constraints

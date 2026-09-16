@@ -57,7 +57,6 @@
 - 打开路径（`window.__dshOpenPath`：聊天 mention 与工具行路径 → 壳侧系统选择器）；0.14 起解析按**会话作用域**（相对路径对活跃会话 cwd 解析）；
 - 主题桥（`__dshThemeBridge`：系统深浅色 → 页面主题变量）；
 - Agent 工具行文件路径识别；0.14 起按 **DOM 事实**（不再靠 CSS-Module 类名）识别工具行，点击绝对路径 → 交给壳侧选择器打开；
-- 导出弹窗兜底：上游导出结果 UI 缺席时，把壳侧 `__dshExportResult` 载荷显式呈现，而不是静默失败；
 - boot 看门狗（40s 仍停在 Loading plugins 时收集诊断 + 一次性自动重载）。
 
 0.1.13（2026-09-10，0.13.7fx-1）退役：注入 composer 菜单的「引用本机文件」项（`data-dsh-file-pick`）
