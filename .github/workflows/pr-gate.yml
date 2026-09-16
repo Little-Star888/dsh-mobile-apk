@@ -29,14 +29,35 @@ jobs:
           echo "无敏感信息 ✓"
       # 镜像对端（协调仓 = 补丁权威源）：FX-208.2 去掉自包含比对开关——它跳过跨仓比对，
       # 单边演进的补丁 PR 会照绿。改为显式检出协调仓并做逐字节跨仓比对。
-      # review C7：协调仓是私有库，必须用 PAT（repo 读权限）——默认 GITHUB_TOKEN 无跨仓读权限，
-      # 该步骤会 404 且整个 job 在检出即失败（14 道门禁从未真正执行）。secret 名 = COORD_REPO_TOKEN。
+      #
+      # review C7 修正（0.14.0 CI/CD 修复 C-2）：协调仓是私有库，必须用 PAT；但此前写的是
+      # `COORD_REPO_TOKEN`，本仓 secrets 里**并不存在**该名（只有 `GH_PAT`）——结果检出步骤
+      # 直接报 `##[error]Input required and not supplied: token`，整个 static job 在检出即失败，
+      # 其后 14 道门禁**全部 skipped**（不是"跑了但没过"，是"从未执行"）。
+      # 现改用本仓既有的 `GH_PAT`（build-snapshot.yml 已用它跨仓检出协调仓，实测有效），
+      # 并加显式非空断言：密名再被改坏时硬失败且给出可操作错误，不再静默消失。
+      #
+      # ref 解析策略：迭代分支在场则用、缺席回退 main（与协调仓 CI 同一约定）——迭代期为
+      # 配对分支、三仓合并删分支后自动回退 main，两种状态都正确且不需要复位提交。
       # 检出步骤禁止 continue-on-error（软化 = 防线静默消失）；--require-peer 让对端缺席直接判红。
-      - uses: actions/checkout@v4
-        with:
-          repository: kelai141/dsh-mobile
-          path: peer-coord
-          token: ${{ secrets.COORD_REPO_TOKEN }}
+      - name: 检出镜像对端（协调仓，私有库经 PAT）
+        env:
+          COORD_PAT: ${{ secrets.GH_PAT }}
+          ITERATION_BRANCH_COORD: feat/0140-preview-engine
+        run: |
+          set -e
+          if [ -z "${COORD_PAT}" ]; then
+            echo "::error::缺 GH_PAT secret——协调仓是私有库，无 PAT 无法跨仓检出；镜像防线会静默消失，故硬失败"
+            exit 1
+          fi
+          url="https://x-access-token:${COORD_PAT}@github.com/kelai141/dsh-mobile.git"
+          ref="${ITERATION_BRANCH_COORD}"
+          if ! git ls-remote --exit-code --heads "${url}" "${ref}" >/dev/null 2>&1; then
+            ref="main"
+          fi
+          git clone --quiet --depth 1 --branch "${ref}" "${url}" peer-coord
+          echo "镜像对端: kelai141/dsh-mobile -> peer-coord（ref=${ref}）"
+          [ -f peer-coord/scripts/patches/registry.json ] || { echo "::error::对端检出内容不完整（缺 registry.json）"; exit 1; }
       # 补丁镜像面跨仓一致性 + 引擎树补丁行为回归
       - name: 补丁一致性门禁与回归
         run: |
