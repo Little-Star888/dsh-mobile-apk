@@ -112,6 +112,18 @@ function tools(ctx: Context, priv: PrivilegeFace) {
     return a
   }
 
+  /** 目标屏幕参数（SPEC §2.2 / §4.2）：real 默认，virtual-N 走虚拟屏；语义树需无障碍。 */
+  const SCREEN_PARAM = {
+    type: 'string',
+    description: '目标屏幕别名：real（默认）或 virtual-N（见 android_screen_list）。虚拟屏语义树/ref 动作需开启无障碍；纯 Shizuku 下虚拟屏只能坐标操作（返回 actionMode=coordinate）。',
+  } as const
+
+  /** 把 args 里的 screenId 转成壳侧控制参数（缺省不发键，保持真实屏语义）。 */
+  const screenArgs = (args: unknown): Record<string, unknown> => {
+    const screenId = (args as { screenId?: unknown } | undefined)?.screenId
+    return typeof screenId === 'string' && screenId !== '' ? { screenId } : {}
+  }
+
   const screenList = defineTool({
     name: 'android_screen_list',
     description: '列出稳定屏幕别名及当前用户开放范围。此工具只返回 capability 元数据，不读取页面内容；屏幕读写仍要求 danger-full-access。',
@@ -904,6 +916,7 @@ function tools(ctx: Context, priv: PrivilegeFace) {
       + '注意：需要原始 uiautomator XML 时才用 android_ui_tree。',
     parameters: {
       fresh: { type: 'boolean', description: 'true = 跳过「界面未变」快路径，强制完整重抓（默认 false）' },
+      screenId: SCREEN_PARAM,
     },
     output: {
       schema: {

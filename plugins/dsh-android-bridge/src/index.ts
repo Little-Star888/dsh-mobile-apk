@@ -28,6 +28,7 @@ import {
 } from './screen-scope.js'
 import { negotiateProtocol } from './control-queue.js'
 import { translateAdbLine } from './shell-ops.js'
+import { installCapabilityGate } from './capability-gate.js'
 import {
   ControlQueue,
   controlTokenFrom,
@@ -1245,6 +1246,12 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
     } catch { /* 探针失败忽略 */ }
   }
   for (const t of tools(svc, shellFace, () => controlToken() !== undefined)) ctx.tools.register(t)
+  // 渐进披露（0.14.0 §4.1）：设备工具默认对每个 agent 掩蔽，模型经 skill 目录发现能力后调用
+  // android_capabilities 解锁；facade 之外的工具不再常驻系统提示词。
+  installCapabilityGate(
+    ctx as unknown as Parameters<typeof installCapabilityGate>[0],
+    () => ({ a11y: svc.a11yEnabled(), shizuku: svc.shizukuReady() }),
+  )
   // 状态端点（浏览端面/设置页查询与展示）。**只读**：无任何写面——授权变更经
   // window.androidBridge.setAdbAllow/setAdbPair/revokeAdbPair 由壳侧原生 AdbState 执行
   // （Shizuku 对照：被提权方不得自改授权；引擎侧不设 POST 写端点）。
