@@ -94,8 +94,46 @@ try {
   if (typeof virtual !== 'string') fail('找不到 virtual 别名: ' + JSON.stringify(status))
   results.create = { displayId: status.displayId, alias: virtual, state: status.state }
 
-  // C. 自动露出：stage 挂载 + 原生 viewers[] presenting=true
-  await waitFor('自动露出查看器（stage 挂载）', async () => {
+  // C. 自动露出（0.14.0 用户语义：**收起态建窗但不强制展开**；人手动展开即可见）。
+  //
+  // 因此本条分两相断言，而不是无条件等 stage 挂载：
+  //   C1 收起态：**必须不强制展开**（展开控件仍在场）+ stage 可以尚未挂载；
+  //   C2 手动展开后：pending 兑现 → stage 挂载 + viewers presenting=true。
+  //
+  // 历史注记：本脚本早期版本无条件等 C1 挂载，那等价于要求「强制展开」——与用户语义相反，
+  // 且会把正确实现判成回归（0.14.0 实测踩到）。判据必须按「用户是否已展开」分支。
+  const expandControlPresent = async () =>
+    (await evaluate(wsUrl, 'document.querySelector(\'[data-sidebar-right-expand]\') !== null')) === true
+  // 先确保处于收起态（若已展开，点统一开关收起）——C1 的前提。
+  if (!(await expandControlPresent())) {
+    await evaluate(wsUrl, 'document.querySelector(\'[data-sidebar-right-toggle]\')?.click()')
+    await sleep(600)
+  }
+  if (!(await expandControlPresent())) {
+    fail('C1 前提不成立：未能把右侧栏置于收起态（展开控件应存在）')
+  }
+  // 收起态的正确契约 = 面板**仍在 DOM（保活）但不可见**（上游以 visibility:hidden 隐藏），
+  // 而不是「必须卸载」。同时不得被程序自动展开（展开控件必须仍在场）。
+  await sleep(900)
+  if (!(await expandControlPresent())) {
+    fail('C1 违反用户语义：收起态下不应被程序自动展开（展开控件应仍在场）')
+  }
+  const collapsedProbe = JSON.parse(String(await evaluate(wsUrl, `(() => {
+    const st = document.querySelector('[data-testid="vdisplay-stage"]');
+    return JSON.stringify({
+      inDom: st !== null,
+      hidden: st === null ? null : (getComputedStyle(st).visibility === 'hidden' || getComputedStyle(st).display === 'none'),
+      expandCtl: document.querySelector('[data-sidebar-right-expand]') !== null,
+    });
+  })()`)))
+  if (collapsedProbe.expandCtl !== true) fail('C1 前提失效：应收起（展开控件在场）')
+  if (collapsedProbe.inDom === true && collapsedProbe.hidden !== true) {
+    fail('C1 违反用户语义：收起态下虚拟屏舞台必须不可见（实测仍可见）: ' + JSON.stringify(collapsedProbe))
+  }
+  results.collapsedNoForceExpand = collapsedProbe
+  // C2：用户手动展开 → 延迟落位兑现。
+  await evaluate(wsUrl, 'document.querySelector(\'[data-sidebar-right-toggle]\')?.click()')
+  await waitFor('C2 手动展开后查看器落位（stage 挂载）', async () => {
     const mounted = await evaluate(wsUrl, 'document.querySelectorAll(\'[data-testid="vdisplay-stage"]\').length > 0')
     return { ok: mounted === true }
   }, 15_000)
