@@ -68,7 +68,7 @@ if (gen.status !== 0) {
 }
 console.log('PASS  跨语言 fixture 与生成器同源')
 
-const run = spawnSync(process.execPath, ['--test', TEST], { cwd: ROOT, encoding: 'utf8' })
+const run = spawnSync(process.execPath, ['--test', '--test-reporter=spec', TEST], { cwd: ROOT, encoding: 'utf8' })
 const out = (run.stdout ?? '') + (run.stderr ?? '')
 const summary = out.split('\n').filter((l) => /^ℹ (tests|pass|fail)/.test(l)).join('  ')
 if (run.status !== 0) {
@@ -76,7 +76,9 @@ if (run.status !== 0) {
   fail(`协议 V2 测试未通过（${summary || 'no summary'}）`)
 }
 // review §2.3：node --test 全 .skip 时 exit 0——必须要求有效通过数 > 0（全 skip = 假绿）。
-const passN = Number(/^ℹ pass (\d+)/m.exec(out)?.[1] ?? '0')
+// 报告器无关：Node 21+ 默认 spec（"ℹ pass N"），Node 20 默认 TAP（"# pass N"）。
+// 上面的 spawn 已显式钉 spec，这里再兼容 TAP 形态——任一默认变更都不会把通过数静默读成 0（假红）。
+const passN = Number((/^ℹ pass (\d+)/m.exec(out) ?? /^# pass (\d+)/m.exec(out))?.[1] ?? '0')
 if (passN <= 0) fail(`协议 V2 测试未产生有效通过数（全 skip = 假绿，pass=${passN}）`)
 console.log('PASS  协议 V2 往返 + 体积门禁' + (summary ? `（${summary}）` : ''))
 console.log('CHECK-PROTOCOL-V2 PASSED')

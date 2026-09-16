@@ -331,12 +331,15 @@ for (const entry of OVERLAY.keepUnpublished ?? []) {
     process.exit(1)
   }
   log('引擎树补丁行为回归 arkweb-resource-protocol-H1: PASS')
-  const externalDraftOut = execSync(`node --test "${join(ROOT, 'scripts', 'patches', 'tests', 'external-draft-conversation-seam.test.mjs')}"`, {
+  // Node 21+ 默认 spec 报告器（"ℹ pass N"），Node 20 默认 TAP（"# pass N"）——显式钉 spec，
+  // 否则报告器随 runner 版本漂移会把"通过数"读成 0，在 CI 上表现成假红（0.14.0 实测）。
+  const externalDraftOut = execSync(`node --test --test-reporter=spec "${join(ROOT, 'scripts', 'patches', 'tests', 'external-draft-conversation-seam.test.mjs')}"`, {
     encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
   })
   // review §2.3：node --test 全 .skip 时 exit 0——要求 fail 0 **且** 有效通过数 > 0。
-  const edPass = Number(/ℹ pass (\d+)/.exec(externalDraftOut)?.[1] ?? '0')
-  if (!/ℹ fail 0/.test(externalDraftOut) || edPass <= 0) {
+  // 解析对报告器不敏感（spec / TAP 两形态都认），任一默认变更都不会静默读成 0。
+  const edPass = Number((/ℹ pass (\d+)/.exec(externalDraftOut) ?? /# pass (\d+)/.exec(externalDraftOut))?.[1] ?? '0')
+  if ((!/ℹ fail 0/.test(externalDraftOut) && !/# fail 0/.test(externalDraftOut)) || edPass <= 0) {
     console.error('[引擎树补丁行为回归失败] external-draft-conversation-seam-J1: ' + externalDraftOut.slice(-1000))
     process.exit(1)
   }
@@ -817,102 +820,3 @@ const ptyPre = join(STAGE, 'root', npmDshRoot, 'node-pty', 'prebuilds')
 `)
 }
 log('瘦身完成（win32/darwin prebuilds + .map 已剔除）')
-
-// ── 8a2. 瘦身扩展（2026-08-25，issue apk#86 相关体积审计）：pnpm 跨平台 reflink .node ──
-// pnpm standalone 自带的 win32/darwin reflink 原生二进制在 Android/pnpm 运行时永不加载——
-// 纯死重剔除，保留 linux-arm64/x64。
-// 注意：glob 在双引号内不被 shell 展开，rm -f "path/*.node" 是字面量匹配（静默 no-op）——
-// 必须用 find -name（find 自身做模式匹配，不依赖 shell 展开）。清单外置 slim.json。
-log('瘦身扩展：pnpm 跨平台 reflink .node…')
-const pnpmDist = join(U, 'lib', 'node_modules', 'pnpm', 'dist')
-{
-  const findCmds = SLIM.reflinkGlobs
-    .map((g) => `find "${wslPath(pnpmDist)}" -maxdepth 1 -name '${g}' -delete 2>/dev/null || true`)
-    .join('\n  ')
-  wsl(`\n  ${findCmds}\n`)
-}
-log('瘦身扩展完成（pnpm reflink.win32/darwin .node 已剔除）')
-
-// ── 8a2b. 全局 Node 重复包：引擎内副本保留，孤儿 global 副本删除 ───────────
-// @img/sharp-wasm32 在 global node_modules 没有消费者（global 无 sharp 本体），
-// 而 dsh 引擎树内有解析副本；仅当引擎内副本在场时才删 global，否则保留（它可能
-// 是唯一可解析的副本，删了会让 sharp 的 wasm 兜底失效）。@emnapi/runtime 不删：
-// 引擎内无副本，global 那份可能正是引擎树的解析目标。
-log('瘦身扩展：global node_modules 孤儿重复包…')
-{
-  const globalNodeModules = join(U, 'lib', 'node_modules')
-  for (const pkg of SLIM.orphanGlobalNodePackages ?? []) {
-    const globalDir = overlayPkgDir(pkg, globalNodeModules)
-    const engineDir = overlayPkgDir(pkg)
-    if (!existsSync(join(globalDir, 'package.json'))) continue
-    if (!existsSync(join(engineDir, 'package.json'))) {
-      log(`  保留 global ${pkg}：引擎内解析副本不在场（可能是唯一副本）`)
-      continue
-    }
-    wsl(`rm -rf "${wslPath(globalDir)}"`)
-    log(`  删除 global 重复包 ${pkg}（引擎内副本在场）`)
-  }
-}
-log('瘦身扩展完成（global 孤儿重复包已剔除）')
-
-// ── 8a3. 权限归一化：不在本步做 ───────────────────────────────────────────
-// 实测（2026-09-08）：WSL 的 /mnt/d 9p 挂载未启用 metadata，chmod 恒被忽略（stat 仍 777），
-// 因此「归档前 chmod 整棵树」在 Windows 侧是无效步骤，只会白走 6 万文件。归档权限的唯一
-// 权威落点是 inject-all.py 重打包时按内容判定（ELF/shebang=0700，数据文件=0600，目录=0700），
-// 门禁 scripts/check-snapshot-file-modes.mjs 校验的正是注入后快照（APK 内嵌 + 发布资产同源）。
-
-// ── 8. 归档 ────────────────────────────────────────────────────────────
-log('归档 snapshot.tar.xz…')
-const archive = join(OUT_DIR, 'snapshot.tar.xz')
-rmSync(archive, { force: true })
-// 输出结构对齐既有快照：usr/ + home/.dsh/ + home/.gitconfig（home 其余目录不随快照）
-// 2c 提速（2026-09-05 实测）：tar -cJf 单线程 xz → tar -c | xz -T0 -6 多线程（同 preset 档，
-// 743MB tar 380s 级 → 48s；产物字节因分块并行而不同，sha256 由下游重算，一致性门禁不受影响）。
-// 可复现性（2026-09-08）：tar 记录的是 stage 树的 mtime（= 每次构建的解压时刻），会让**内容
-// 完全相同的两次构建**产出不同 sha256 → 设备每次都判定「快照变了」并重解压（模拟器实测每次
-// 多花 3-5 分钟）。统一 `--mtime=@<固定纪元>`（GNU tar）后，同一输入的产物字节稳定；inject-all.py
-// 新增文件同样取固定 mtime（SOURCE_DATE_EPOCH 可覆写）。
-const SOURCE_DATE_EPOCH = process.env.SOURCE_DATE_EPOCH ?? '1704067200'
-wsl(`
-  cd "${wslPath(join(STAGE, 'root'))}" && \
-  tar -c --mtime=@${SOURCE_DATE_EPOCH} usr home/.dsh home/.gitconfig 2>/dev/null | xz -T0 -6 > "${wslPath(archive)}" && \
-  ls -lh "${wslPath(archive)}"
-`)
-const sha = createHash('sha256').update(readFileSync(archive)).digest('hex')
-writeFileSync(join(OUT_DIR, 'snapshot.sha256'), sha)
-// 归档后自检（2026-08-23：x86 曾出现「stage 有、归档无」的 LICENSES 目录怪癖——防再犯）。
-// 2026-08-24 修复（两次实锤，三个错误方案依次排除）：
-//   1) wsl tar -tf | grep -c 经 execSync 捕获时：localhost 代理噪音行混入 → Number(整串) NaN；
-//   2) 正则 /(\d+)/ 提取 → WSL 输出经 execSync 的编码畸变（UTF-16 字节穿插）→ 匹配为 0/null；
-//   3) 直接读归档字节匹配路径 → xz 为压缩流，路径名非明文 → 0。
-// 结论：必须**流式解压 tar** 再数条目——构建环境已有 Python（inject-snapshot.py 用 lzma/tarfile
-// 流式处理快照），自检改用 Python 一行（无 WSL、无编码畸变、无压缩明文问题）。
-let licCount = 0
-try {
-  // 结论：必须**流式解压 tar** 再数条目——用构建环境的 Python（Windows 本地 python / WSL 内 python3；
-  // 0.13.5 W5 起整个构建在 WSL 内跑，命令名必须按平台选择，否则 exit 127）直接开归档流式统计。
-  const archiveWin = archive.replace(/\\/g, '/')
-  const py = `import lzma,tarfile; t=tarfile.open(${JSON.stringify(archiveWin)},'r'); n=[x for x in t.getnames() if x.startswith('usr/share/LICENSES/') and x.endswith('.txt')]; print(len(n))`
-  licCount = Number(execSync(PYTHON + ' -c ' + JSON.stringify(py), { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 }).trim())
-} catch (e) {
-  console.error(`  [LICENSES 归档自检执行失败] ${String(e)}`)
-}
-if (!(licCount >= 4)) {
-  console.error(`归档内缺 GNU 标准许可文本（LICENSES/*.txt 仅 ${licCount} 个）——快照不可发布`)
-  process.exit(1)
-}
-log(`归档内 LICENSES 自检通过（${licCount} 个标准文本）`)
-// A1 出厂声明值对账（P-AC-01，--require 严格档）：归档内 profiles/{web,headless}/package.json 必须带
-// patchReload=出厂值。seed 步在归档之前（本文件 0 段），此处是对**产物**的复核——stage 正确而归档缺件
-// 的同型缺陷此前在 LICENSES 上实锤过一次。
-const perfGate = spawnSync(process.execPath,
-  [join(ROOT, 'scripts', 'check-perf-instrumentation.mjs'), '--require', '--snapshot', archive, '--abi', ABI],
-  { encoding: 'utf8' })
-if (perfGate.status !== 0) {
-  console.error('A1 出厂声明值对账失败（归档内 profile 清单缺 patchReload 出厂值）——拒绝出快照')
-  console.error((perfGate.stdout + perfGate.stderr).split('\n').filter((l) => l.startsWith('FAIL')).join('\n'))
-  process.exit(1)
-}
-log('A1 出厂声明值对账通过（归档内 profiles/{web,headless} patchReload=出厂值）')
-log(`完成: ${archive} (${(statSync(archive).size / 1024 / 1024).toFixed(1)} MB, sha256=${sha.slice(0, 12)}…)`)
-log('后续步骤：注入插件（inject-snapshot.py）→ 门禁（elf-check/ci-verify-snapshot 语义）→ 打包装入 APK')
