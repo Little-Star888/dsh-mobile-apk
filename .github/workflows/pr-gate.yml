@@ -51,9 +51,22 @@ jobs:
             exit 1
           fi
           url="https://x-access-token:${COORD_PAT}@github.com/kelai141/dsh-mobile.git"
+          # 先证鉴权可用（否则一切"找不到分支"的结论都不可信）。
+          if ! git ls-remote --heads "${url}" >/dev/null 2>&1; then
+            echo "::error::GH_PAT 无法读取协调仓——PAT 缺失/过期/权限不足。镜像防线不能用回退掩盖，硬失败"
+            exit 1
+          fi
           ref="${ITERATION_BRANCH_COORD}"
-          if ! git ls-remote --exit-code --heads "${url}" "${ref}" >/dev/null 2>&1; then
+          # 精确区分两种"非 0"：exit 2 = 确实没有该分支（迭代结束、分支已删）→ 合法回退 main；
+          # 其余（网络/鉴权/其他）不得回退——否则会**静默**拿 main 去比对迭代分支，得到一片假红。
+          git ls-remote --exit-code --heads "${url}" "${ref}" >/dev/null 2>&1
+          probe=$?
+          if [ "$probe" -eq 2 ]; then
+            echo "提示: 迭代分支 ${ref} 不存在（已合并/已删）——回退 main"
             ref="main"
+          elif [ "$probe" -ne 0 ]; then
+            echo "::error::探测分支 ${ref} 失败（exit=${probe}，非分支不存在语义）——不回退，硬失败以免假红"
+            exit 1
           fi
           git clone --quiet --depth 1 --branch "${ref}" "${url}" peer-coord
           echo "镜像对端: kelai141/dsh-mobile -> peer-coord（ref=${ref}）"
