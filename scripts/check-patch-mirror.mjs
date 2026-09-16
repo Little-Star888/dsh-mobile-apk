@@ -188,6 +188,11 @@ if (peer) {
     // robocopy src + package.json + lib 产物）。**目录级**比对（递归，排除 node_modules）——只点
     // package.json + lib/index.js 会在单边改 lib/facts.js、test/*.test.mjs、新导出面时假绿
     // （本轮实测：browser 副本曾落后 4 文件 / 5 文件内容不同；file-open 曾落后 test/auth.test.mjs）。
+    // **CI 面提醒（0.14.0 CI/CD 修复 C-1）**：dsh-host-web-compat / dsh-client-ui-responsive 是
+    // **独立 git 仓库**，在协调仓 .gitignore 里（净检出永远缺席）。因此 CI 必须在跑本门禁前把它们
+    // 检出到这两个路径（见 .github/workflows/pr-gate.yml 的「检出镜像对端三面」步骤）——否则首条
+    // 「镜像面源文件在场」即 FAIL，协调仓 main 自 2026-09-13 起一直红。本地工作树天然在场，无需处理。
+    // apk 仓那一侧同理（同名副本随 apk 仓提交，故 CI 检出 apk 仓即得）。
     'dsh-host-web-compat',
     'dsh-client-ui-responsive',
     'plugins/dsh-android-bridge',
