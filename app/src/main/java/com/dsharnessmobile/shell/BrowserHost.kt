@@ -472,10 +472,17 @@ internal class BrowserHost(
         }
 
         override fun onPageStarted(view: WebView, startedUrl: String, favicon: android.graphics.Bitmap?) {
+          // 内置错误页守卫（0.14.0 设备实锤的真缺陷）：错误页用 loadDataWithBaseURL(null, ...) 载入，
+          // 其文档 URL 是 **about:blank**，**不是** data: ——所以只判 data: 的旧守卫会漏掉它：
+          // 错误页的 started/finished 事件随即把 loadState 从 error 覆盖成 loaded、把 url 改成
+          // about:blank、并清空 lastError，只剩 title 还留着 ERR_*。
+          // 后果：模型拿到 {loadState:loaded, url:about:blank, reason:""}，**无法判断页面已失败**。
+          // 判据改为「本 tab 正处于内置错误页」：错误页自身及其 about:blank 事件一律不改状态；
+          // 只有真正的新导航（http(s)）才清掉错误标记并推进状态。
+          if (tab.errorPageUrl != null && !startedUrl.startsWith("http")) return
+          if (startedUrl.startsWith("data:")) return
           tab.generation.incrementAndGet()
           synchronized(tab.refs) { tab.refs.clear() }
-          // 内置错误页（data:）不是新页面：保留失败 URL 与 loadState=error，供重试链接使用。
-          if (startedUrl.startsWith("data:")) return
           tab.errorPageUrl = null
           tab.url = startedUrl
           tab.title = ""
@@ -484,6 +491,8 @@ internal class BrowserHost(
         }
 
         override fun onPageFinished(view: WebView, finishedUrl: String) {
+          // 同 onPageStarted：内置错误页的完成事件不得覆盖 error 态（其 URL 是 about:blank）。
+          if (tab.errorPageUrl != null && !finishedUrl.startsWith("http")) return
           if (finishedUrl.startsWith("data:")) return
           tab.url = finishedUrl
           if (tab.loadState == "loading") tab.loadState = "loaded"
