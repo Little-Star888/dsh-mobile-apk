@@ -161,8 +161,18 @@ export function apply(ctx: Context): void {
    * 失败一律结构化（ok:false + 稳定 code/guidance），从不静默，也不在工具层猜测壳侧状态。
    */
   const callVdOp = async (op: VdOp, timeoutMs: number, session?: string): Promise<Record<string, unknown>> => {
-    const controlExec = faceOf()?.controlExec
-    if (controlExec === undefined) {
+    // **必须以服务对象为接收者调用**（0.14.0 设备实锤：Agent 全工具扫描揪出）。
+    //
+    // 错误写法（曾存在）：先 const controlExec = faceOf()?.controlExec，再 controlExec(op, ...)。
+    // 把方法从服务对象上摘下来原地调用会丢 this，于是 AndroidPrivilegeService.controlExec 内部的
+    // this.controlQueue 变成 undefined.controlQueue，抛
+    //   Cannot read properties of undefined (reading 'controlQueue')
+    // 并被下面的 catch 包成 vdisplay-control-exception。现象：android_vdisplay_create/destroy 恒失败，
+    // 而**壳侧桥直接调用同一 op 完全正常**——这正是区分「工具层缺陷」与「壳侧缺陷」的关键证据。
+    //
+    // 与客户端侧坑 108（@JavascriptInterface 方法不得裸调）同源：凡方法依赖 this，就不得摘出来裸调。
+    const service = faceOf()
+    if (service?.controlExec === undefined) {
       return {
         ok: false,
         code: 'vdisplay-control-unavailable',
@@ -170,7 +180,7 @@ export function apply(ctx: Context): void {
       }
     }
     try {
-      const reply = await controlExec(op, session === undefined ? {} : { session }, timeoutMs)
+      const reply = await service.controlExec(op, session === undefined ? {} : { session }, timeoutMs)
       if (reply === null || typeof reply !== 'object' || reply.ok !== true) {
         const message = typeof reply?.error === 'string' && reply.error !== ''
           ? reply.error
