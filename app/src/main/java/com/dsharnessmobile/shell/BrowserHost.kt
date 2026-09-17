@@ -67,6 +67,8 @@ internal class BrowserHost(
     /** 锚点标签页 id（首个页面恒定用它，保证旧调用与设备脚本的期望值不变）。 */
     const val TAB_ID = "tab-1"
     private const val ROOT_TAB_ID = TAB_ID
+    /** 非会话调用（旧调用/设备脚本）的工作台键：与任何真实会话隔离，保持改造前的可用性。 */
+    private const val ANONYMOUS_SESSION = "__anonymous__"
     private const val MAX_TABS = 8
     private const val SNAPSHOT_MAX_NODES = 400
     /** 无活动标签页时的只读占位（避免把“没有页面”误判成“有页面”） */
@@ -125,21 +127,119 @@ internal class BrowserHost(
     var errorPageUrl: String? = null
   }
 
-  /** 全部标签页，插入序即 UI 顺序；锚点固定为 [ROOT_TAB_ID]。 */
-  private val tabs = LinkedHashMap<String, Tab>()
-  private var activeTabId: String? = null
-  private var nextTabSeq = 1
-  private fun activeTab(): Tab? = activeTabId?.let { tabs[it] }
-  private fun tabOrNull(id: String?): Tab? = id?.let { tabs[it] }
+  /**
+   * 一个会话的浏览器工作台（0.14.0 用户口径：**按会话隔离，互不占用**）。
+   *
+   * 为什么必须是「每会话一份」：上游侧栏面板是**每会话**的（`openTab(kind)` 落在当前会话），
+   * 而此前壳侧只有**全局单实例** tabs + 一把单向归属锁（`ownerSessionId`）。两者模型不匹配，
+   * 直接后果就是用户实测到的：A 对话开过浏览器后，B 对话打开面板只能看到「由会话 A 使用中」，
+   * 而且**只有 A 能解锁**（会话 A 一旦被删除，工作台永久锁死、只能重启 App）。
+   *
+   * 正确模型：切到别的对话就看不到、也碰不到别人的页面；各自独立开页、独立计代次、
+   * 独立可见性。成本是每个**有活动页面的**会话各持一个 WebView —— 这正是浏览器该有的语义。
+   */
+  private inner class Workspace(val sessionKey: String) {
+    /** 本会话的标签页，插入序即 UI 顺序；锚点固定为 [ROOT_TAB_ID]。 */
+    val tabs = LinkedHashMap<String, Tab>()
+    var activeTabId: String? = null
+    var nextTabSeq = 1
+    /** 本会话是否已向原生舞台下发过可见性（面板收起/未挂载时为 false）。 */
+    var requestedVisible = false
+    var stageVisible = false
+    var stageBounds: StageBounds? = null
+  }
+
+  /** 全部会话工作台（键 = 会话 id；[ANONYMOUS_SESSION] 为非会话调用）。 */
+  private val workspaces = LinkedHashMap<String, Workspace>()
+
+  /** 当前正在被操作/呈现的工作台。null = 尚无任何会话建立工作台。 */
+  private var currentWorkspace: Workspace? = null
+
+  /** 取用（必要时创建）某会话的工作台。 */
+  private fun workspaceFor(session: String?): Workspace {
+    val key = session?.takeIf { it.isNotBlank() } ?: ANONYMOUS_SESSION
+    workspaces[key]?.let { return it }
+    val created = Workspace(key)
+    workspaces[key] = created
+    return created
+  }
+
+  /** 切到某会话的工作台（不发可见性变更；可见性由该会话的 bounds 下推决定）。 */
+  private fun switchTo(workspace: Workspace) {
+    currentWorkspace = workspace
+    applyStageBounds()
+    applyVisibility()
+  }
+
+  /**
+   * 清空并移除某会话的工作台（销毁它自己的 WebView；不影响其它会话）。
+   * 匿名工作台例外：它永远保留在表里（旧调用/设备脚本会反复复用同一份状态，
+   * 若被移除则每次调用都会新建，页面凭空丢失）。
+   */
+  private fun dropWorkspace(workspace: Workspace) {
+    for (tab in workspace.tabs.values) {
+      synchronized(tab.refs) { tab.refs.clear() }
+      tab.view?.let { browser ->
+        root.removeView(browser)
+        browser.destroy()
+      }
+      tab.view = null
+      tab.snapshotGeneration = -1L
+    }
+    workspace.tabs.clear()
+    workspace.activeTabId = null
+    workspace.nextTabSeq = 1
+    workspace.requestedVisible = false
+    workspace.stageVisible = false
+    workspace.stageBounds = null
+    if (workspace.sessionKey != ANONYMOUS_SESSION) workspaces.remove(workspace.sessionKey)
+    if (currentWorkspace === workspace) currentWorkspace = workspaces.values.lastOrNull()
+    applyVisibility()
+  }
+
+  /**
+   * 取当前工作台；若尚未选定（旧调用/设备脚本先到），落到匿名工作台并**设为当前**。
+   *
+   * 为什么要保证「读到就一定被设为当前」：早先写成 `workspaceFor(key)` 的读侧副作用会在 map 里
+   * 新建一个工作台却不切换 currentWorkspace，于是「tab 建在 A、activeTabId 读自 null」——
+   * 状态分裂、页面永远不显示。读侧不得产生「半生效」的写。
+   */
+  private fun requireWorkspace(): Workspace {
+    currentWorkspace?.let { return it }
+    val anon = workspaces[ANONYMOUS_SESSION] ?: Workspace(ANONYMOUS_SESSION).also { workspaces[ANONYMOUS_SESSION] = it }
+    currentWorkspace = anon
+    return anon
+  }
+
+  /** 当前工作台的标签页表（页面级状态代理的目标）。 */
+  private val tabs: LinkedHashMap<String, Tab>
+    get() = requireWorkspace().tabs
+
+  private var activeTabId: String?
+    get() = currentWorkspace?.activeTabId
+    set(value) { currentWorkspace?.activeTabId = value }
+  /** 页 id 序号按会话独立递增（各会话的 tab-N 互不干扰）。 */
+  private var nextTabSeq: Int
+    get() = currentWorkspace?.nextTabSeq ?: 1
+    set(value) { currentWorkspace?.nextTabSeq = value }
+  private fun activeTab(): Tab? = currentWorkspace?.activeTabId?.let { currentWorkspace?.tabs?.get(it) }
+  private fun tabOrNull(id: String?): Tab? = id?.let { currentWorkspace?.tabs?.get(it) }
 
   /** 页面级字段一律代理到**活动标签页**：单页签时代码路径与改造前逐字等价。 */
   private var view: WebView?
     get() = activeTab()?.view
     set(value) { activeTab()?.view = value }
 
-  private var requestedVisible = false
-  private var stageVisible = false
-  private var stageBounds: StageBounds? = null
+  // 可见性三件套按会话隔离：A 对话把面板收起来，不该影响 B 对话的显示状态。
+  private var requestedVisible: Boolean
+    get() = currentWorkspace?.requestedVisible ?: false
+    set(value) { currentWorkspace?.requestedVisible = value }
+  private var stageVisible: Boolean
+    get() = currentWorkspace?.stageVisible ?: false
+    set(value) { currentWorkspace?.stageVisible = value }
+  private var stageBounds: StageBounds?
+    get() = currentWorkspace?.stageBounds
+    set(value) { currentWorkspace?.stageBounds = value }
   /** Device viewport is default; named presets letterbox inside the trusted stage without transforms. */
   private var requestedViewport: RequestedViewport? = null
   private var lastError = ""
@@ -155,9 +255,13 @@ internal class BrowserHost(
   private var recycling = false
   /** 当前已注入脚本的预设；预设变化需要重建脚本并重载页面。 */
   private var appliedViewport: RequestedViewport? = null
-  /** 会话归属（0.14.0）：打开/导航时绑定发起会话；非归属会话的呈现与操作一律拒绝。 */
-  private var ownerSessionId: String? = null
-  /** 当前呈现面（侧栏）声明的会话；与归属不一致时原生层不显示（占用态由面板渲染）。 */
+  /**
+   * 当前**呈现面**（侧栏）声明的会话。
+   *
+   * 只用于「这次 bounds 下推属于谁」——决定哪个 Workstation 的页面该显示、以及不带 session 的
+   * 旧调用该落到哪个工作台。**不再是归属锁**：0.14.0 改为按会话隔离后，没有任何会话能「占用」
+   * 或「锁死」别人的工作台。
+   */
   private var viewerSessionId: String? = null
 
   private val title: String get() = activeTab()?.title ?: ""
@@ -208,7 +312,8 @@ internal class BrowserHost(
       lastError = "unsupported-url"
       return@onMain rejected(lastError)
     }
-    bindOwner(payload.second ?: viewerSessionId)?.let { return@onMain it.toString() }
+    // 切到调用方的工作台（每会话隔离：不再有归属校验，也不会被别的会话占用）。
+    switchTo(workspaceFor(payload.second ?: viewerSessionId))
     val browser = ensureView()
     requestedVisible = true
     if (target != null && target != url) browser.loadUrl(target)
@@ -229,29 +334,9 @@ internal class BrowserHost(
     }
   }
 
-  /** 绑定或校验会话归属；null = 放行，否则是结构化拒绝。 */
-  private fun bindOwner(session: String?): JSONObject? {
-    val incoming = session?.takeIf { it.isNotBlank() } ?: return null
-    val current = ownerSessionId
-    if (current == null) {
-      ownerSessionId = incoming
-      return null
-    }
-    if (current == incoming) return null
-    return JSONObject().put("ok", false).put("reason", "browser-session-busy")
-      .put("ownerSessionId", current)
-      .put("guidance", "浏览器工作台正由另一个会话使用；请回到该会话，或由它关闭后重试。")
-  }
-
-  /** 归属校验（不含绑定）：非归属会话的操作一律拒绝；无归属或旧调用（不带会话）放行。 */
-  private fun requireOwner(op: String, session: String?): JSONObject? {
-    if (op == "browserCaps") return null
-    val current = ownerSessionId ?: return null
-    if (session == null || session == current) return null
-    return JSONObject().put("ok", false).put("reason", "browser-session-busy").put("op", op)
-      .put("ownerSessionId", current)
-      .put("guidance", "浏览器工作台正由另一个会话使用；请回到该会话，或由它关闭后重试。")
-  }
+  // 归属锁（bindOwner/requireOwner）已在 0.14.0 移除：按会话隔离后不再存在「工作台被某会话占用」
+  // 这种状态。历史原因（用户实测「切到别的对话只能看到『由会话 A 使用中』且只有 A 能解锁、
+  // A 被删就永久锁死）见 Workspace 的注释。
 
   /** Hide the browser surface without destroying its tab state. */
   fun hide(): String = onMain {
@@ -292,7 +377,17 @@ internal class BrowserHost(
   fun setStageBounds(raw: String): String = onMain {
     try {
       val value = JSONObject(raw)
-      value.optString("session", "").takeIf { it.isNotBlank() }?.let { viewerSessionId = it }
+      // 面板每次下发 bounds 都带自己的会话：**用它切换当前工作台**。
+      //
+      // 这是「按会话隔离」的落点：用户切到对话 B，B 的面板组件挂载并下发自己的 bounds，
+      // 这里就把当前工作台切到 B —— B 看到的是 B 自己的页面（B 没开过则空白，不显示 A 的），
+      // A 的 WebView 同时被 applyVisibility() 置为 GONE。
+      val speaking = value.optString("session", "").takeIf { it.isNotBlank() }
+      if (speaking != null) {
+        viewerSessionId = speaking
+        val target = workspaceFor(speaking)
+        if (currentWorkspace !== target) switchTo(target)
+      }
       stageBounds = StageBounds(
         left = value.optDouble("left", 0.0),
         top = value.optDouble("top", 0.0),
@@ -335,12 +430,14 @@ internal class BrowserHost(
    * touch/JS call is marshalled to the main thread with a bounded wait.
    */
   fun controlOp(op: String, args: JSONObject): JSONObject {
+    // 0.14.0 用户口径：**按会话隔离，互不占用**。
+    //
+    // 这里不再做归属校验（原先 bindOwner/requireOwner 的单向锁已被移除）：那套模型把「工作台」
+    // 当成全局单实例，于是 A 对话开过浏览器后 B 对话只能看到「由会话 A 使用中」，且**只有 A 能解锁**——
+    // A 被删除就永久锁死。现在的做法是每个会话各自一个 Workspace（各自 tabs/可见性/代次），
+    // 切到别的对话天然看不到、也碰不到别人的页面，从结构上消除了「占用」这个概念。
     val session = args.optString("session", "").takeIf { it.isNotBlank() } ?: viewerSessionId
-    if (op == "browserShow" || op == "browserOpen") {
-      bindOwner(session)?.let { return it }
-    } else {
-      requireOwner(op, session)?.let { return it }
-    }
+    switchTo(workspaceFor(session))
     // 多页签：browserOpen/list/follow/closeTab 都带可选 tabId；缺省落在当前活动页。
     // 兼容旧单页调用——不传 tabId 时行为与改造前逐字一致（锚点 tab-1）。
     when (op) {
@@ -395,26 +492,15 @@ internal class BrowserHost(
   }
 
   private fun disposeView() {
-    requestedVisible = false
-    stageVisible = false
-    // 多页签：销毁**全部**页面与它们的 renderer（browserClose 的语义 = 关闭整个工作台）。
-    for (tab in tabs.values) {
-      synchronized(tab.refs) { tab.refs.clear() }
-      tab.view?.let { browser ->
-        root.removeView(browser)
-        browser.destroy()
-      }
-      tab.view = null
-      tab.snapshotGeneration = -1L
-    }
-    tabs.clear()
-    activeTabId = null
-    nextTabSeq = 1
+    // browserClose 的语义 = 关闭**当前会话**的工作台（销毁它的全部页面与 renderer）。
+    // 复用 dropWorkspace，避免「同一件事两份实现」——早先这里是 dropWorkspace 的重复副本，
+    // 改一处漏一处是这类状态的经典回归源。
+    // 若此刻还没有任何工作台（从未开过页面），直接返回即可——没有东西需要销毁。
+    currentWorkspace?.let { dropWorkspace(it) }
     identityId = "android-real"
     identityUa = ""
     identityScriptHandler = null
     appliedViewport = null
-    ownerSessionId = null
     viewerSessionId = null
     lastError = ""
   }
@@ -596,9 +682,23 @@ internal class BrowserHost(
     }
   }
 
+  /**
+   * 原生覆盖层可见性：**只看当前工作台自己的意愿与舞台是否在场**。
+   *
+   * 原先还有一条 foreignViewer 判定（「呈现面会话 ≠ 归属会话就不显示」）——那是归属锁的配套，
+   * 随按会话隔离一并移除：现在切到哪个会话就显示哪个会话的工作台，别的会话的页面根本不在场上。
+   */
   private fun applyVisibility() {
-    val foreignViewer = ownerSessionId != null && viewerSessionId != null && viewerSessionId != ownerSessionId
-    view?.visibility = if (requestedVisible && stageVisible && !foreignViewer) View.VISIBLE else View.GONE
+    // **关键**：必须遍历**全部工作台**，把非当前会话的页面一律 GONE。
+    // 只处理当前工作台的 `view` 是不够的——别的会话的 WebView 仍然 attach 在 root 上且可见，
+    // 那正是用户要求消除的「跨对话互相看见」。切到哪个会话，就只有那个会话的页面在场。
+    val current = currentWorkspace
+    for (workspace in workspaces.values) {
+      val visible = workspace === current && workspace.requestedVisible && workspace.stageVisible
+      for (tab in workspace.tabs.values) {
+        tab.view?.visibility = if (visible) View.VISIBLE else View.GONE
+      }
+    }
   }
 
   private fun status(): JSONObject {
@@ -615,7 +715,8 @@ internal class BrowserHost(
       .put("canGoBack", view?.canGoBack() == true)
       .put("canGoForward", view?.canGoForward() == true)
       .put("identityId", identityId)
-      .put("ownerSessionId", ownerSessionId ?: "")
+      // 会话标识改为「当前工作台的会话」：每个会话各有自己的页面与代次，不再是全局归属。
+      .put("ownerSessionId", currentWorkspace?.sessionKey ?: "")
       .put("scrollY", scrollY)
       .put("scrollDirection", scrollDirection)
       .put("atTop", scrollY <= 0)

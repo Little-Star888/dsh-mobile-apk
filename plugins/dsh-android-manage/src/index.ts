@@ -115,7 +115,9 @@ function tools(ctx: Context, priv: PrivilegeFace) {
   /** 目标屏幕参数（SPEC §2.2 / §4.2）：real 默认，virtual-N 走虚拟屏；语义树需无障碍。 */
   const SCREEN_PARAM = {
     type: 'string',
-    description: '目标屏幕别名：real（默认）或 virtual-N（见 android_screen_list）。虚拟屏语义树/ref 动作需开启无障碍；纯 Shizuku 下虚拟屏只能坐标操作（返回 actionMode=coordinate）。',
+    // 无 description（wire 预算敏感：本参数内联进 5 个工具，每个字 ×5）。
+    // 语义的唯一归属地 = android_screen_list 的工具描述（列出别名/范围 + 虚拟屏无障碍/坐标模式）。
+    // 参数名 screenId 自明，模型从 android_screen_list 得到取值与限制。
   } as const
 
   /** 把 args 里的 screenId 转成壳侧控制参数（缺省不发键，保持真实屏语义）。 */
@@ -124,9 +126,33 @@ function tools(ctx: Context, priv: PrivilegeFace) {
     return typeof screenId === 'string' && screenId !== '' ? { screenId } : {}
   }
 
+  /**
+   * 动作模式（SPEC §4.2）：壳侧对每个真实屏 op 回填 `actionMode`。
+   *
+   * 两类取值（与壳侧 DeviceControlService.REAL_SCREEN_OPS 回填同源）：
+   *   - `a11y`        语义树 / ref 动作可用（无障碍通道在线）；
+   *   - `coordinate`  该屏只能坐标操作（典型：纯 Shizuku、或虚拟屏尚无窗口）。
+   *
+   * 为什么必须逐条进 output schema：引擎在 `additionalProperties:false` 下做整值校验，
+   * 返回体里出现 schema 未声明的键 → 整条 ToolOutputError，模型**拿不到任何数据**
+   * （0.13.8 #204 的实测教训）。故凡透传 actionMode 的工具都必须先声明它。
+   */
+  // 唯一需要说明的字段（模型据此决定下一步），其余三件套靠类型自明。
+  const ACTION_MODE_PROP = { type: 'string' } as const
+
+  /** 通道受限时的可执行下一步（与 actionMode 成对出现；schema 漏声明会被整值拒绝）。 */
+  const GUIDANCE_PROP = { type: 'string' } as const
+
+  /** 屏幕三件套（screenId / displayId / scope）：壳侧对真实屏 op 逐条回填，故同样要声明。 */
+  // 这三个字段的语义由工具描述与 SCREEN_PARAM 承载；此处 description 极简（wire 预算敏感：
+  // 它们要重复出现在 5 个工具的 schema 里，每个字都要乘 5，见 check-tool-surface-budget）。
+  const SCREEN_ID_PROP = { type: 'string' } as const
+  const DISPLAY_ID_PROP = { type: 'number' } as const
+  const SCOPE_PROP = { type: 'string' } as const
+
   const screenList = defineTool({
     name: 'android_screen_list',
-    description: '列出稳定屏幕别名及当前用户开放范围。此工具只返回 capability 元数据，不读取页面内容；屏幕读写仍要求 danger-full-access。',
+    description: '列出稳定屏幕别名及当前用户开放范围。只返回 capability 元数据，不读取页面内容；屏幕读写仍要求 danger-full-access。虚拟屏（virtual-N）的语义树/ref 动作需无障碍通道；纯 Shizuku 下只能坐标操作（返回 actionMode=coordinate，用 android_ui_click 的 nx/ny 或 x/y）。',
     parameters: {},
     output: {
       schema: {
@@ -354,6 +380,7 @@ function tools(ctx: Context, priv: PrivilegeFace) {
       '可传 textRedact: true 获得文本脱敏摘要（避免敏感屏幕内容进入上下文）。',
     parameters: {
       textRedact: { type: 'boolean', description: '文本脱敏摘要模式（默认 false 返回图像/路径）' },
+      screenId: SCREEN_PARAM,
     },
     output: {
       schema: {
@@ -363,6 +390,10 @@ function tools(ctx: Context, priv: PrivilegeFace) {
           imagePath: { type: 'string', required: true },
           width: { type: 'number', description: '设备物理分辨率宽（截图像素坐标换算锚点）' },
           height: { type: 'number', description: '设备物理分辨率高' },
+          screenId: SCREEN_ID_PROP,
+          displayId: DISPLAY_ID_PROP,
+          scope: SCOPE_PROP,
+          actionMode: ACTION_MODE_PROP,
           image: {
             type: 'object',
             additionalProperties: false,
@@ -834,6 +865,62 @@ function tools(ctx: Context, priv: PrivilegeFace) {
     }
   }
 
+  /**
+   * 语义 op 失败时的统一出口（SPEC §4.2②）：
+   *   - 若失败属于「通道受限、可改坐标」（bridge 回填 actionMode='coordinate'），
+   *     则把它**结构化**带出（actionMode / screenId / guidance 三个字段），而不只是拼一句话；
+   *   - 否则维持原有的「一句话 + denied:false」形态（不改变既有语义）。
+   *
+   * 为什么必须把 guidance 单独带出：模型按字段决定下一步。塞进 text 里它可能只当描述读过去，
+   * 单独成字段 + schema 声明后，它在结构上就是「可执行的下一步」。
+   */
+  const semanticFail = (
+    r: { error?: string; actionMode?: unknown; screenId?: unknown; guidance?: unknown },
+    prefix: string,
+  ): { ok: boolean; denied: boolean; text: string; actionMode?: string; screenId?: string; guidance?: string } => {
+    const actionMode = typeof r.actionMode === 'string' ? r.actionMode : undefined
+    const out: Record<string, unknown> = { ok: false, denied: false, text: prefix + (r.error ?? '未知失败') }
+    if (actionMode !== undefined) out.actionMode = actionMode
+    if (typeof r.screenId === 'string' && r.screenId !== '') out.screenId = r.screenId
+    if (typeof r.guidance === 'string' && r.guidance !== '') out.guidance = r.guidance
+    return out as { ok: boolean; denied: boolean; text: string; actionMode?: string; screenId?: string; guidance?: string }
+  }
+
+  /**
+   * 从壳侧返回里取出屏幕三件套 + actionMode，**原样**附到工具返回值上（SPEC §4.2）。
+   *
+   * 为什么是「原样透传」而不是引擎推断：后端选择发生在壳侧（它才知道无障碍是否在线、
+   * 目标屏是否有窗口），引擎侧再推断一遍就会出现两处真源、互相打架。壳侧 DeviceControlService
+   * 对 REAL_SCREEN_OPS 逐条回填 screenId/displayId/scope/actionMode，这里只负责搬运。
+   *
+   * 缺省策略：壳侧未回填 actionMode 时**不编造**（不发键），让模型按「未知」处理；
+   * 编一个 a11y 会让模型以为语义树可用而实际不可用（错误引导比缺失更糟）。
+   */
+  const screenOut = (data: unknown): Record<string, unknown> => {
+    const d = (data ?? {}) as { screenId?: unknown; displayId?: unknown; scope?: unknown; actionMode?: unknown }
+    const out: Record<string, unknown> = {}
+    if (typeof d.screenId === 'string' && d.screenId !== '') out.screenId = d.screenId
+    if (typeof d.displayId === 'number') out.displayId = d.displayId
+    if (typeof d.scope === 'string' && d.scope !== '') out.scope = d.scope
+    if (typeof d.actionMode === 'string' && d.actionMode !== '') out.actionMode = d.actionMode
+    return out
+  }
+
+  /**
+   * 纯 Shizuku（无障碍关）下虚拟屏的**坐标模式**结构化响应（SPEC §4.2）。
+   *
+   * 语义树只有无障碍通道可达；无障碍关时不该把「通道不可用」当硬错误抛给模型，
+   * 而应给出 actionMode=coordinate + 可直接照做的引导（改用坐标操作），
+   * 让模型在**同一轮**里继续推进任务，而不是停下来问用户。
+   */
+  const coordinateMode = (screenId: string, reason: string, guidance: string): Record<string, unknown> => ({
+    ok: false,
+    actionMode: 'coordinate',
+    screenId,
+    reason,
+    guidance,
+  })
+
   /** 0.13.5 W4：无障碍通道往返封装（统一错误文案，超时 8s）。 */
   const a11yExec = async (op: string, args: Record<string, unknown>, timeoutMs = 8000) => {
     if (!priv.controlExec) return { ok: false as const, error: '无障碍执行面未接通（bridge 未提供 controlExec）' }
@@ -939,6 +1026,12 @@ function tools(ctx: Context, priv: PrivilegeFace) {
           note: { type: 'string' },
           text: { type: 'string' },
           denied: { type: 'boolean' },
+          // SPEC §4.2：屏幕三件套 + 动作模式（壳侧对真实屏 op 逐条回填）。
+          screenId: SCREEN_ID_PROP,
+          displayId: DISPLAY_ID_PROP,
+          scope: SCOPE_PROP,
+          actionMode: ACTION_MODE_PROP,
+          guidance: GUIDANCE_PROP,
         },
       },
       // 0.13.5 W4：把节点清单**完整结构化**渲染进模型可见文本——模型看到的是 render 输出，
@@ -1005,17 +1098,25 @@ function tools(ctx: Context, priv: PrivilegeFace) {
     },
     execute: async (args, exec) => {
       const forceFresh = (args as { fresh?: boolean } | undefined)?.fresh === true
+      // SPEC §4.2：screenId 透传进控制队列（缺省不发键 = 真实屏语义，与改造前一致）。
+      const scoped = screenArgs(args)
+      const targetScreen = typeof (args as { screenId?: unknown }).screenId === 'string'
+        ? String((args as { screenId?: string }).screenId)
+        : 'real'
       const a = guard('ui_dump', {}, exec as { agent?: { session?: unknown } })
       if (!a.ok) return { ok: false, denied: true, screen: { w: 0, h: 0 }, rotation: 0, count: 0, rawCount: 0, nodes: [], text: a.guidance }
       // 0.13.5 W4：无障碍通道优先（一次系统开关即用；不经 uiautomator，故不受 F1 idle 阻塞影响）
       if (controlDecision('snapshot', exec as { agent?: { session?: unknown } }).backend === 'a11y') {
         // 现场实测（2026-09-10 真机，B 站播放页）：重 UI/常驻动画页面建树慢，8s 默认超时频繁失败——
         // 这里给到 15s；仍失败则明确指引「先 android_ui_global back 退出重页面再 dump」。
-        const r = await a11yExec('snapshot', {}, 15_000)
+        const r = await a11yExec('snapshot', { ...scoped }, 15_000)
         if (!r.ok) {
+          // 通道受限（纯 Shizuku / 虚拟屏无窗口）时，壳侧会带 actionMode=coordinate + guidance：
+          // 原样带出，让模型在同一轮改用坐标路径，而不是停在「取树失败」。
           return {
             ok: false, denied: false, screen: { w: 0, h: 0 }, rotation: 0, count: 0, rawCount: 0, nodes: [],
-            text: `无障碍取树失败：${r.error}——重 UI/播放页常见；建议：① android_ui_global back 退回上一级再 dump；`
+            ...screenOut(r),
+            text: `无障碍取树失败：${r.error ?? '未知'}——重 UI/播放页常见；建议：① android_ui_global back 退回上一级再 dump；`
               + '② 或 android_screenshot 直接看画面；③ ADB 已配对时用 android_ui_tree（uiautomator）。',
           }
         }
@@ -1206,6 +1307,7 @@ function tools(ctx: Context, priv: PrivilegeFace) {
       nx: { type: 'number', description: '归一化 X（0-1，相对物理屏宽；= 截图内像素 x ÷ 截图宽）——无 ref 时使用' },
       ny: { type: 'number', description: '归一化 Y（0-1，相对物理屏高；= 截图内像素 y ÷ 截图高）——无 ref 时使用' },
       longClick: { type: 'boolean', description: 'true = 长按（ACTION_LONG_CLICK 优先，手势按住 600ms 兜底）' },
+      screenId: SCREEN_PARAM,
     },
     output: {
       schema: {
@@ -1220,6 +1322,10 @@ function tools(ctx: Context, priv: PrivilegeFace) {
           y: { type: 'number' },
           text: { type: 'string' },
           denied: { type: 'boolean' },
+          screenId: SCREEN_ID_PROP,
+          displayId: DISPLAY_ID_PROP,
+          scope: SCOPE_PROP,
+          actionMode: ACTION_MODE_PROP,
         },
       },
       render: (_args, v: Record<string, unknown>) => [
@@ -1290,7 +1396,7 @@ function tools(ctx: Context, priv: PrivilegeFace) {
             return { ok: false, denied: false, text: '无障碍通道需要节点行句柄/原始路径——请重新 android_ui_dump' }
           }
           const r = await a11yExec(clickOp, payload)
-          if (!r.ok) return { ok: false, denied: false, text: '无障碍点击失败：' + r.error }
+          if (!r.ok) return semanticFail(r, '无障碍点击失败：')
           const clicked = (r.data ?? {}) as { x?: number; y?: number; via?: string }
           const verdict = await verifyClick(uiCache?.gen, exec as ExecLike)
           return {
@@ -1304,7 +1410,7 @@ function tools(ctx: Context, priv: PrivilegeFace) {
         payload.nx = nx
         payload.ny = ny
         const r = await a11yExec(clickOp, payload)
-        if (!r.ok) return { ok: false, denied: false, text: '无障碍点击失败：' + r.error }
+        if (!r.ok) return semanticFail(r, '无障碍点击失败：')
         const clicked = (r.data ?? {}) as { x?: number; y?: number; via?: string }
         const verdict = await verifyClick(uiCache?.gen, exec as ExecLike)
         return {
@@ -1349,7 +1455,7 @@ function tools(ctx: Context, priv: PrivilegeFace) {
           payload.ny = ny
         }
         const r = await a11yExec(clickOp, payload)
-        if (!r.ok) return { ok: false, denied: false, text: '无障碍点击失败：' + r.error }
+        if (!r.ok) return semanticFail(r, '无障碍点击失败：')
         return {
           ok: true,
           denied: false,
@@ -1390,6 +1496,7 @@ function tools(ctx: Context, priv: PrivilegeFace) {
       ref: { type: 'string', description: '控件引用（滚动容器；可选）' },
       direction: { type: 'string', required: true, enum: ['up', 'down', 'left', 'right'] },
       fraction: { type: 'number', description: '滑动比例（0.1-1.0，默认 0.6）' },
+      screenId: SCREEN_PARAM,
     },
     output: {
       schema: {
@@ -1401,13 +1508,18 @@ function tools(ctx: Context, priv: PrivilegeFace) {
           to: { type: 'array', items: { type: 'number' } },
           text: { type: 'string' },
           denied: { type: 'boolean' },
+          screenId: SCREEN_ID_PROP,
+          displayId: DISPLAY_ID_PROP,
+          scope: SCOPE_PROP,
+          actionMode: ACTION_MODE_PROP,
+          guidance: GUIDANCE_PROP,
         },
       },
       render: (_args, v: Record<string, unknown>) => [
-        { type: 'text', text: String(v.text ?? '') },
+        { type: 'text', text: String(v.text ?? (v.guidance as string | undefined) ?? '') },
       ],
     },
-    execute: async (args: { ref?: string; direction?: string; fraction?: number }, exec) => {
+    execute: async (args: { ref?: string; direction?: string; fraction?: number; screenId?: string }, exec) => {
       const a = guard('ui_scroll', args as Record<string, unknown>, exec as { agent?: { session?: unknown } })
       if (!a.ok) return { ok: false, denied: true, text: a.guidance }
       const dir = args.direction === 'left' || args.direction === 'right' ? args.direction : args.direction === 'up' || args.direction === 'down' ? args.direction : ''
@@ -1424,7 +1536,7 @@ function tools(ctx: Context, priv: PrivilegeFace) {
           if (!putTargetRef(payload, hit.node)) return { ok: false, denied: false, from: [], to: [], text: '无障碍通道需要节点行句柄/原始路径——请重新 android_ui_dump' }
         }
         const r = await a11yExec('scroll', payload)
-        if (!r.ok) return { ok: false, denied: false, from: [], to: [], text: '无障碍滚动失败：' + r.error }
+        if (!r.ok) return { ...semanticFail(r, '无障碍滚动失败：'), from: [], to: [] } as never
         return { ok: true, denied: false, from: [], to: [], text: `已向 ${dir} 滚动（无障碍通道，fraction=${frac}）——建议重新 dump 验证` }
       }
       // D7：ADB 面检查必须在 a11y 分支**之后**——a11y 分支的所有路径都已 return，而它在只开无障碍、
@@ -1485,6 +1597,7 @@ function tools(ctx: Context, priv: PrivilegeFace) {
       clear: { type: 'boolean', description: '先清空当前聚焦输入框（ADBKeyboard ADB_CLEAR_TEXT 广播；可单独使用）' },
       channel: { type: 'string', enum: ['auto', 'adbkeyboard', 'input'], description: '输入通道（默认 auto=ADBKeyboard 优先）' },
       ref: { type: 'string', description: '无障碍通道的目标输入框引用（id:n3 / text:… / desc:…；缺省用当前聚焦框）' },
+      screenId: SCREEN_PARAM,
     },
     output: {
       schema: {
@@ -1495,13 +1608,18 @@ function tools(ctx: Context, priv: PrivilegeFace) {
           channel: { type: 'string' },
           text: { type: 'string' },
           denied: { type: 'boolean' },
+          screenId: SCREEN_ID_PROP,
+          displayId: DISPLAY_ID_PROP,
+          scope: SCOPE_PROP,
+          actionMode: ACTION_MODE_PROP,
+          guidance: GUIDANCE_PROP,
         },
       },
       render: (_args, v: Record<string, unknown>) => [
-        { type: 'text', text: String(v.text ?? '') },
+        { type: 'text', text: String(v.text ?? (v.guidance as string | undefined) ?? '') },
       ],
     },
-    execute: async ({ text, clear, channel, ref }: { text?: string; clear?: boolean; channel?: string; ref?: string }, exec) => {
+    execute: async ({ text, clear, channel, ref, screenId }: { text?: string; clear?: boolean; channel?: string; ref?: string; screenId?: string }, exec) => {
       const a = guard('ui_input', { text, clear, channel, ref }, exec as { agent?: { session?: unknown } })
       if (!a.ok) return { ok: false, denied: true, text: a.guidance }
       const raw = typeof text === 'string' ? text : ''
@@ -1539,7 +1657,7 @@ function tools(ctx: Context, priv: PrivilegeFace) {
           if (!putTargetRef(payload, hit.node)) return { ok: false, denied: false, channel: 'a11y', text: '无障碍通道需要节点行句柄/原始路径——请重新 android_ui_dump' }
         }
         const r = await a11yExec('setText', payload)
-        if (!r.ok) return { ok: false, denied: false, channel: 'a11y', text: '无障碍输入失败：' + r.error }
+        if (!r.ok) return { ...semanticFail(r, '无障碍输入失败：'), channel: 'a11y' } as never
         const act = [clear ? '已清空' : '', raw ? `已输入 ${raw.slice(0, 24)}${raw.length > 24 ? '…' : ''}` : ''].filter(Boolean).join(' + ')
         return { ok: true, denied: false, channel: 'a11y', text: `${act}（无障碍通道 setText）` }
       }

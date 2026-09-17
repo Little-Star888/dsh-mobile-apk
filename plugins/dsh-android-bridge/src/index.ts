@@ -643,7 +643,23 @@ export class AndroidPrivilegeService {
   async controlExec(op: ControlOp, args: Record<string, unknown>, timeoutMs?: number): Promise<ControlResult> {
     if (!this.controlQueue) return { ok: false, error: '控制队列未装配（插件未挂载 webServer？）' }
     if (A11Y_OPS.includes(op) && !this.a11yEnabled()) {
-      return { ok: false, error: '无障碍服务未开启——请先在系统设置里开启「DSH 设备控制」' }
+      // SPEC §4.2②：无障碍关（纯 Shizuku）不等于「这条路走不通」——语义树/ref 动作确实不可用，
+      // 但**坐标操作仍然可用**。此前这里返回硬错误，模型拿到一句「先去开无障碍」就停在原地；
+      // 现在改为**结构化坐标模式指引**：如实说明当前只能坐标操作、并给出可直接照做的下一步，
+      // 让模型在同一轮里继续推进任务（不静默失败、也不假装语义树可用）。
+      //
+      // 为什么坐标模式下这些 op 仍算失败：它们**本就是语义 op**（需要 ref/语义树）。
+      // 坐标路径由 android_ui_click 的 nx/ny（以及对虚拟屏的 x/y + screenId）承担，
+      // 那条路径不经 A11Y_OPS 门，故不受此处影响。
+      const screenId = typeof args.screenId === 'string' && args.screenId !== '' ? args.screenId : 'real'
+      return {
+        ok: false,
+        error: 'action-mode-coordinate: 无障碍未开启，' + op + ' 需要的语义树不可用；当前只能坐标操作。',
+        coordinate: true,
+        actionMode: 'coordinate',
+        screenId,
+        guidance: '改用坐标操作：android_screenshot（拿物理分辨率锚点）→ android_ui_click 传 nx/ny（0-1 归一化，相对物理屏）或对虚拟屏传 x/y + screenId。若确实需要语义树/ref 动作，请由用户在系统设置里开启「DSH 设备控制」无障碍服务。',
+      }
     }
     // review C11 范围复查下沉到执行点：manage 工具层之外（其它插件/直连调用）不得绕过——
     // a11y 承载的内容/输入 op 全部作用于真实屏前台窗口，范围不含 real 时在执行点拒绝。

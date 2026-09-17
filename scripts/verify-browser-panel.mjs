@@ -113,16 +113,26 @@ try {
   }
   ok('错误页：不可达主机 → loadState=error 且带可判定信号', 'reason=' + errState.reason + ' title=' + errState.title)
 
-  // 6) 跨会话占用（fail-closed）
+  // 6) 按会话隔离（0.14.0 用户口径：**互不占用**）
   //
-  // 语义（0.14.0 实测）：归属由**首次带 session 的调用**绑定（bindOwner）；绑定后其它会话对该工作台的
-  // 呈现/操作一律拒绝。因此必须先由 session-A 明确占位，再用 session-B 试探，才构成真正的「非归属」。
-  const claimA = await bridge('browserHostShow', { url: 'https://example.com/', session: 'session-A' })
-  if (claimA.ok !== true) fail('session-A 占位失败：' + JSON.stringify(claimA))
-  await sleep(500)
-  const foreign = await bridge('browserHostShow', { url: 'https://example.com/', session: 'session-B' })
-  if (foreign.ok !== false) fail('非归属会话的打开应被拒：' + JSON.stringify(foreign))
-  ok('跨会话占用 fail-closed', foreign.reason ?? foreign.code ?? 'rejected')
+  // 语义：每个会话各有自己的工作台（各自的页签集合/代次/可见性）。切到别的会话看不到、
+  // 也碰不到别人的页面，**不存在**「工作台被某会话占用」这种状态（旧的 browser-session-busy
+  // 与单向归属锁已随本批移除）。
+  //
+  // 判据：用两个不同 session 各开一页，两边都应成功且各自的页签集合独立。
+  const sessA = await bridge('browserHostShow', { url: 'https://example.com/', session: 'session-A', newTab: true })
+  if (sessA.ok !== true) fail('session-A 开页应成功（隔离模型下不再有占用拒绝）：' + JSON.stringify(sessA))
+  await sleep(600)
+  const sessB = await bridge('browserHostShow', { url: 'https://example.com/', session: 'session-B', newTab: true })
+  if (sessB.ok !== true) fail('session-B 开页应成功（与 A 互不占用）：' + JSON.stringify(sessB))
+  ok('按会话隔离：两个会话各自开页互不拒绝', 'A=' + sessA.tabId + ' B=' + sessB.tabId)
+
+  // 反向断言：B 此刻是当前工作台，读到的会话标识应是 B（而不是 A 的残留）。
+  const asB = await status()
+  if (asB.ownerSessionId !== 'session-B') {
+    fail('当前工作台应属于最后下推的会话 session-B：' + JSON.stringify({ owner: asB.ownerSessionId }))
+  }
+  ok('当前工作台随会话切换', 'owner=' + asB.ownerSessionId)
 
   console.log('')
   console.log('BROWSER-PANEL PASSED')
