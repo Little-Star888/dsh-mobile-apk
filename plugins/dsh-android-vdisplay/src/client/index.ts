@@ -69,17 +69,26 @@ const VD_STYLE = `
 .dsh-vdisplay-item{min-width:36px;min-height:32px;padding:0 10px;border:1px solid var(--dsw-alias-border-l4);border-radius:8px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);font:var(--dsw-font-markdown-small)}
 .dsh-vdisplay-item-selected{border-color:var(--dsw-specific-primary);color:var(--dsw-specific-primary)}
 .dsh-vdisplay-item:disabled{opacity:.45}
+/* 手动关机：与编号同排，用危险色区分「切换」与「关闭」两种动作。 */
+.dsh-vdisplay-shutdown{margin-left:auto;border-color:var(--dsw-alias-border-l4);color:var(--dsw-alias-label-secondary)}
+.dsh-vdisplay-shutdown:hover{border-color:#e5534b;color:#e5534b}
 .dsh-vdisplay-stage{position:relative;flex:1 1 180px;min-height:180px;overflow:hidden;border-radius:12px;background:var(--dsw-alias-bg-layer-2)}
 `
 
 type NativeVdisplayBridge = {
   vdisplayStatus?: () => string
   vdisplayCreate?: () => string
-  vdisplayDestroy?: () => string
+  /** 可传 target 别名；缺省销毁当前选中/本会话自己的屏。 */
+  vdisplayDestroy?: (target?: string) => string
   vdisplayLaunchSettingsProbe?: () => string
   vdisplayBackProbe?: () => string
   vdisplayBounds?: (bounds: string) => string
   vdisplaySelect?: (alias: string) => string
+  /**
+   * 手动关机（0.14.0）：销毁本机全部虚拟屏，与设置页「强制销毁」同口径。
+   * 声明在此以便类型检查；未声明时下方调用会静默 no-op（可选链），所以必须登记。
+   */
+  forceDestroyVdisplay?: () => string
 }
 
 /** Stable viewer identity for the Files-sidebar stage (independent bounds record + arbitration). */
@@ -200,6 +209,30 @@ function VdPanel(props: { sessionId?: unknown }): ReactElement {
     }
   }
 
+  /**
+   * 手动关机（0.14.0 用户要求）：与编号同一行，点一下销毁全部本机虚拟屏。
+   *
+   * 为什么必须有这个按钮：虚拟屏是**有上限的稀缺系统资源**，且现在会话间不再互相阻塞——
+   * 如果只能靠 AI 工具或设置页三连点来关，用户当面看着一块不需要的屏却关不掉，体验是断的。
+   * 「切换序号」与「关掉它」是同一个心理动作的两半，理应并排放。
+   *
+   * 语义 = 强制销毁本机全部虚拟屏（与设置页 forceDestroy 同口径）：用户按下的就是这个意思，
+   * 不做二次确认（误触成本低——重建只需一次工具调用），但按钮文案明确写「关闭全部」。
+   */
+  const shutdownAll = () => {
+    try {
+      nativeBridge()?.forceDestroyVdisplay?.()
+    } catch {
+      /* 旧壳没有该桥：退回逐个销毁 */
+      try {
+        for (const screen of snap.screens.filter((s) => s.kind === 'virtual')) {
+          nativeBridge()?.vdisplayDestroy?.(screen.alias)
+        }
+      } catch { /* 壳不可用 */ }
+    }
+    setTick((n) => n + 1)
+  }
+
   const screens = snap.screens.filter((screen) => screen.kind === 'virtual')
 
   if (occupied) {
@@ -219,7 +252,17 @@ function VdPanel(props: { sessionId?: unknown }): ReactElement {
           'data-alias': screen.alias,
           disabled: !screen.selectable || screen.alias === snap.selected,
           onClick: () => selectTarget(screen.alias),
-        }, String(screen.alias.replace('virtual-', ''))))),
+        }, String(screen.alias.replace('virtual-', '')))),
+        // 手动关机：与编号同一行（用户要求）。destructive 样式以区别于「切换」。
+        createElement('button', {
+          key: '__shutdown__',
+          type: 'button',
+          className: 'dsh-vdisplay-item dsh-vdisplay-shutdown',
+          'aria-label': '关闭全部虚拟屏',
+          title: '关闭全部虚拟屏（释放系统资源）',
+          'data-action': 'shutdown-all',
+          onClick: shutdownAll,
+        }, '关闭全部')),
     createElement('div', { ref: stageRef, className: 'dsh-vdisplay-stage', 'data-testid': 'vdisplay-stage' }),
   )
 }

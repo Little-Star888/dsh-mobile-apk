@@ -90,3 +90,60 @@ test('服务缺席时给结构化拒绝（不抛异常、不静默）', async ()
   assert.equal(value.code, 'vdisplay-control-unavailable')
   assert.equal(typeof value.guidance, 'string')
 })
+// ── 0.14.0 用户实报回归：序号复用 / 空闲回收 / 销毁权限 ──────────────────────
+
+test('序号复用：建→销毁→再建 的别名必须回到最小空闲号（不得单调递增）', async () => {
+  // 缺陷形态（实测复现）：旧实现每建一块就 nextAliasIndex += 1 且从不回收，
+  // 反复建/销毁得到 virtual-1 → virtual-2 → virtual-3 …，上限只有 1 块时界面显示
+  // 「虚拟屏 3」却切不回之前那块，用户无法理解。
+  //
+  // 这里用**源码级断言**守住分配形态（壳侧 Kotlin 无法在 node 侧执行）：
+  // 分配必须是「扫描最小空闲序号」，且不得再出现单调计数器。
+  const { readFileSync } = await import('node:fs')
+  const kotlin = readFileSync(
+    new URL('../../../dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt', import.meta.url),
+    'utf8',
+  )
+  // 用纯字符串包含判断：正则里的 `$` 在本模板里易被当成锚点/插值，写成 include 最不易错。
+  assert.ok(
+    kotlin.includes('while (records.containsKey("virtual-$candidate")) candidate += 1'),
+    '分配必须扫描最小空闲序号',
+  )
+  // 只看**代码**，不看注释：注释里会引用旧实现（`nextAliasIndex += 1`）作为背景说明，
+  // 直接对全文断言会被自己的说明文字判红（实测踩到）。
+  const codeOnly = kotlin
+    .split('\n')
+    .filter((line) => !line.trim().startsWith('//') && !line.trim().startsWith('*') && !line.trim().startsWith('/*'))
+    .join('\n')
+  assert.doesNotMatch(codeOnly, /nextAliasIndex \+= 1/, '不得保留单调递增计数器（序号永不回收）')
+})
+
+test('空闲回收：必须存在按「最后使用时间」判定的回收路径', async () => {
+  // 用户要求：「对话数分钟不运行且虚拟屏无操作则 kill 掉，否则会一直占用资源」。
+  // 虚拟屏持有 display + ImageReader + HandlerThread，是真实系统资源；此前**没有任何回收路径**。
+  const { readFileSync } = await import('node:fs')
+  const kotlin = readFileSync(
+    new URL('../../../dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt', import.meta.url),
+    'utf8',
+  )
+  assert.match(kotlin, /fun reclaimIdle\(/, '必须有 reclaimIdle 回收入口')
+  assert.match(kotlin, /IDLE_RECLAIM_MS/, '必须有空闲阈值常量')
+  assert.match(kotlin, /lastUsedAt/, '必须记录最后使用时间')
+  // 回收必须真的释放三种系统资源。
+  assert.match(kotlin, /display\.release\(\)/,'回收必须释放 display')
+  assert.match(kotlin, /reader\.close\(\)/,'回收必须关闭 reader')
+  assert.match(kotlin, /thread\.quitSafely\(\)/,'回收必须停掉 reader 线程')
+})
+
+test('销毁权限：任何会话都能销毁（不得因归属把资源锁死）', async () => {
+  // 用户明确要求：「别忘了给模型销毁权限，否则没人能关掉了」。
+  // 隔离的目的是「各会话看不到、不阻塞」，绝不是「把有上限的稀缺资源锁死」。
+  const { readFileSync } = await import('node:fs')
+  const kotlin = readFileSync(
+    new URL('../../../dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt', import.meta.url),
+    'utf8',
+  )
+  const destroyBody = kotlin.slice(kotlin.indexOf('fun destroy('), kotlin.indexOf('fun select('))
+  assert.doesNotMatch(destroyBody, /requireOwner\(/, 'destroy 不得按归属拒绝（否则创建者消失后没人能关）')
+  assert.match(destroyBody, /records\.keys\.firstOrNull\(\)/, '必须有「任意一块」兜底，保证只要存在就能关掉')
+})

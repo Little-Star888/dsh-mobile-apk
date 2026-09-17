@@ -53,15 +53,64 @@ object VdisplayController {
     val densityDpi: Int,
     var viewerId: String? = null,
     var viewerSurface: Surface? = null,
+    /** 归属会话（0.14.0 按会话隔离：每块屏只服务创建它的会话）。 */
+    val owner: String? = null,
+    /** 最近一次被本会话使用（创建/选择/启动/取树）的时间戳，供空闲回收判定。 */
+    var lastUsedAt: Long = android.os.SystemClock.elapsedRealtime(),
   )
 
   private val lock = Any()
   private val records = LinkedHashMap<String, Record>()
-  private var nextAliasIndex = 1
+  // 序号不再是单调计数器：分配时扫描最小空闲号（见 create 内的分配逻辑）。
   /** 会话归属（0.14.0）：建屏时绑定发起会话；非归属会话的生命周期操作一律拒绝。 */
   private var ownerSessionId: String? = null
   /** Controller-owned presentation target; only an owned virtual alias can be selected. */
   private var selectedAlias: String? = null
+
+  /**
+   * 空闲回收（0.14.0 用户要求：「对话数分钟不运行且虚拟屏无操作则 kill 掉，否则一直占用资源」）。
+   *
+   * 为什么必须有：虚拟屏是**真实系统资源**——一块 VirtualDisplay 会持有一个 display、一个
+   * ImageReader、一个 HandlerThread，并在系统里长期占位。此前**没有任何回收路径**：
+   * 只有显式 vdDestroy 或设置页强制销毁才会释放。对话被关闭/AI 不再操作后，它们会一直挂着。
+   *
+   * 判定口径：以「最后一次被本会话使用」为基准（创建/选择/启动/取树都会刷新）。
+   * 阈值取 10 分钟——足够长，不会打断正常的多轮操作；足够短，不会让废弃会话长期占资源。
+   */
+  private const val IDLE_RECLAIM_MS = 10 * 60 * 1000L
+
+  /** 刷新某块屏（或全部）的使用时间；由所有会「用到屏」的操作调用。 */
+  private fun touch(alias: String?) {
+    val now = android.os.SystemClock.elapsedRealtime()
+    if (alias == null) records.values.forEach { it.lastUsedAt = now }
+    else records[alias]?.lastUsedAt = now
+  }
+
+  /**
+   * 回收空闲虚拟屏。返回被回收的别名列表（供调用方记日志/回报）。
+   *
+   * 由宿主（MainActivity 的周期任务）调用；也可在每次控制 op 入口顺手调用（低成本）。
+   */
+  fun reclaimIdle(context: Context): List<String> = synchronized(lock) {
+    val now = android.os.SystemClock.elapsedRealtime()
+    val stale = records.values.filter { now - it.lastUsedAt >= IDLE_RECLAIM_MS }.map { it.alias }
+    for (alias in stale) {
+      val record = records.remove(alias) ?: continue
+      runCatching { record.display.release() }
+      runCatching { record.reader.close() }
+      runCatching { record.thread.quitSafely() }
+      record.viewerId?.let { viewerBounds.remove(it) }
+      Log.i(TAG, "reclaimed idle alias=$alias (idle ${(now - record.lastUsedAt) / 1000}s)")
+    }
+    if (stale.isNotEmpty()) {
+      if (selectedAlias != null && !records.containsKey(selectedAlias)) selectedAlias = records.keys.firstOrNull()
+      if (records.isEmpty()) ownerSessionId = null
+      generation += 1
+      lastCode = "vdisplay-reclaimed"
+      lastGuidance = "已回收空闲虚拟屏：${stale.joinToString(", ")}（${IDLE_RECLAIM_MS / 60000} 分钟未使用）。"
+    }
+    stale
+  }
   /** Independent bounds record per viewer id (no shared global geometry). */
   private val viewerBounds = LinkedHashMap<String, JSONObject>()
   private var generation = 0L
@@ -247,10 +296,14 @@ object VdisplayController {
   fun create(context: Context, args: JSONObject? = null): JSONObject {
     val appContext = context.applicationContext
     val session = args?.optString("session", "")?.takeIf { it.isNotBlank() }
-    requireOwner("vdCreate", session)?.let { return it }
-    // 幂等复用：归属会话再次 create 时直接返回现有屏（不报上限）。
-    val existing = synchronized(lock) { records.size }
-    if (existing > 0 && session != null && ownerSessionId == session) return status(appContext)
+    // 0.14.0 用户口径：**按会话隔离**（与浏览器侧同源修正）。
+    //
+    // 原先用一把全局 ownerSessionId + requireOwner 做归属锁，后果与浏览器侧一模一样：
+    // 别的会话建屏后就只能看到「正由另一个会话使用」，且只有那个会话能销毁——
+    // 会话一旦消失，那块屏永远收不回来。现在每块屏记自己的 owner，各会话互不阻塞。
+    // 幂等复用改为「本会话自己已有屏」时直接返回（不再看全局归属）。
+    val existing = synchronized(lock) { records.values.count { it.owner == session } }
+    if (existing > 0 && session != null) return status(appContext)
     val bound = ShizukuTransport.ensureBound(appContext)
     if (!bound.optBoolean("ok")) return status(appContext)
       .put("code", bound.optString("code", "shizuku-not-ready"))
@@ -286,7 +339,21 @@ object VdisplayController {
         val flags = FLAG_PUBLIC or FLAG_OWN_CONTENT_ONLY or FLAG_SUPPORTS_TOUCH or
           FLAG_DESTROY_CONTENT_ON_REMOVAL or FLAG_ROTATES_WITH_CONTENT
         val manager = appContext.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
-        val alias = "virtual-$nextAliasIndex"
+        // 序号分配（0.14.0 用户实报修正）：**复用已释放的序号**，而不是单调递增。
+        //
+        // 旧实现每建一块就 `nextAliasIndex += 1` 且从不回收，于是反复建/销毁会得到
+        // virtual-1 → virtual-2 → virtual-3 …（实测复现）。三步后果：
+        //   1) 序号无限膨胀，模型看到的别名与「本机有几块屏」脱节；
+        //   2) 上限只有 1 块时，界面显示「虚拟屏 3」却切不回之前那块，用户无法理解；
+        //   3) 与用户对「编号 = 当前屏幕的标识」的直觉冲突。
+        //
+        // 现在从 1 起找**最小的未占用序号**（被销毁的号立刻可复用），因此稳定表现为：
+        // 没有屏时新建恒为 virtual-1；有 1 块时第二块才是 virtual-2（但上限 1，见 MAX_）。
+        val alias = run {
+          var candidate = 1
+          while (records.containsKey("virtual-$candidate")) candidate += 1
+          "virtual-$candidate"
+        }
         val created = manager.createVirtualDisplay(
           "DSH $alias",
           width,
@@ -295,8 +362,7 @@ object VdisplayController {
           nextReader.surface,
           flags,
         ) ?: throw IllegalStateException("DisplayManager returned null VirtualDisplay")
-        records[alias] = Record(alias, created, nextReader, nextThread, width, height, dpi)
-        nextAliasIndex += 1
+        records[alias] = Record(alias, created, nextReader, nextThread, width, height, dpi, owner = session)
         if (selectedAlias == null) selectedAlias = alias
         if (ownerSessionId == null && session != null) ownerSessionId = session
         generation += 1
@@ -318,9 +384,16 @@ object VdisplayController {
   /** Explicitly remove one display; DESTROY_CONTENT_ON_REMOVAL prevents third-party task migration. */
   fun destroy(context: Context, args: JSONObject? = null): JSONObject = synchronized(lock) {
     val session = args?.optString("session", "")?.takeIf { it.isNotBlank() }
-    requireOwner("vdDestroy", session)?.let { return it }
+    // 销毁权限（用户明确要求）：**任何会话都能销毁**（模型与人都能关掉）。
+    //
+    // 为什么不能按归属收窄：虚拟屏是**有上限的稀缺系统资源**（当前上限 1 块）。若只允许创建者
+    // 销毁，那么「创建它的那个对话被关闭/切走」之后，这块屏就**永远没人能关**——只能靠用户去设置页
+    // 强制销毁。隔离的目的是「各会话看不到、不阻塞」，不是「把资源锁死」。
+    //
+    // 选择顺序：显式 target → 本会话自己的屏 → 当前选中 → 任意一块（保证只要存在就能关掉）。
     val requested = args?.optString("target", "").orEmpty().ifBlank { selectedAlias }
     val alias = requested?.takeIf { records.containsKey(it) }
+      ?: records.values.firstOrNull { it.owner == session }?.alias
       ?: records.keys.firstOrNull()
       ?: return status(context.applicationContext)
     val record = records.remove(alias) ?: return status(context.applicationContext)

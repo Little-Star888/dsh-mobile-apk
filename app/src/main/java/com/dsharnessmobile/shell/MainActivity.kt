@@ -52,6 +52,8 @@ class MainActivity : ComponentActivity() {
   private lateinit var browserHost: BrowserHost
   /** Native SurfaceView output for the VirtualDisplay Files-sidebar stage. */
   private lateinit var vdisplayHost: VdisplayHost
+  /** 虚拟屏空闲回收定时器（前台期间每 [VDISPLAY_REAP_INTERVAL_MS] 扫一次；退后台停掉）。 */
+  private var vdisplayReaper: android.os.Handler? = null
   /** 0.14.0：退后台时把虚拟屏画面以小窗浮在系统上（只读；回前台立即隐藏并交还侧栏）。 */
   private lateinit var vdisplayFloat: VdisplayFloat
   internal lateinit var guideView: LinearLayout
@@ -101,6 +103,8 @@ class MainActivity : ComponentActivity() {
 
   companion object {
     private const val TAG = "dsh-shell"
+    /** 虚拟屏空闲回收扫描间隔（判定阈值在 VdisplayController.IDLE_RECLAIM_MS = 10 分钟）。 */
+    private const val VDISPLAY_REAP_INTERVAL_MS = 2 * 60 * 1000L
     const val ACTION_UPDATE = "com.dsharnessmobile.shell.action.UPDATE"
 
     /** #120：显式拒绝哨兵路径前缀（引擎侧识别为拒绝而非取消，见 host-web-compat）。
@@ -346,9 +350,40 @@ class MainActivity : ComponentActivity() {
     // 回前台：浮窗让位，侧栏查看器重新接管虚拟屏 Surface。
     if (::vdisplayFloat.isInitialized) vdisplayFloat.hide()
     if (::vdisplayHost.isInitialized) vdisplayHost.reattach()
+    startVdisplayReaper()
+  }
+
+  /**
+   * 虚拟屏空闲回收兜底（0.14.0 用户要求：「对话数分钟不运行且虚拟屏无操作则 kill 掉，
+   * 否则会一直占用资源」）。
+   *
+   * 为什么需要周期任务而不是只在 vd op 入口回收：面板关掉、AI 也不再调用之后，
+   * 就没有任何 vd op 会进来了——那条路永远不触发，屏会一直挂着。这里每 2 分钟扫一次，
+   * 由 [VdisplayController.reclaimIdle] 判定（阈值 10 分钟未使用）。
+   *
+   * 成本：仅比较时间戳；无屏时是一次空列表遍历。
+   */
+  private fun startVdisplayReaper() {
+    if (vdisplayReaper != null) return
+    val handler = android.os.Handler(android.os.Looper.getMainLooper())
+    val task = object : Runnable {
+      override fun run() {
+        try {
+          VdisplayController.reclaimIdle(applicationContext)
+        } catch (_: Throwable) {
+          // 回收是尽力而为：任何异常都不得影响界面（资源会在下次回收窗口再试）。
+        }
+        handler.postDelayed(this, VDISPLAY_REAP_INTERVAL_MS)
+      }
+    }
+    handler.postDelayed(task, VDISPLAY_REAP_INTERVAL_MS)
+    vdisplayReaper = handler
   }
 
   override fun onStop() {
+    // 退后台：停止回收定时器（进程存活期间由 vd op 入口路径兜底，避免后台空转）。
+    vdisplayReaper?.removeCallbacksAndMessages(null)
+    vdisplayReaper = null
     // 退后台：侧栏 Surface 交还给浮窗（只读、小窗；开关/权限/无屏时 fail-closed 不显示）。
     if (::vdisplayFloat.isInitialized && ::vdisplayHost.isInitialized && VdisplayPrefs.floatEnabled(this)) {
       vdisplayHost.detachForBackground()

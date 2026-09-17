@@ -12,21 +12,28 @@ import org.json.JSONObject
  * - `ControlCarrier`：无障碍关闭时的承载者（队列由前台引擎服务持有）。
  */
 internal object VdisplayOps {
-  fun handle(context: Context, op: String, args: JSONObject): JSONObject = when (op) {
-    "vdCreate" -> VdisplayController.create(context, args)
-    "vdDestroy" -> VdisplayController.destroy(context, args)
-    "vdLaunch" -> VdisplayController.launchSettingsProbe(context, args)
-    "vdMoveTask" -> unsupported(op)
-    "vdInfo" -> VdisplayController.status(context)
-    else -> JSONObject()
-      .put("__error", "未知虚拟屏操作 $op")
-      .put("reason", "unknown-op")
-      .put("op", op)
+  fun handle(context: Context, op: String, args: JSONObject): JSONObject {
+    // 空闲回收（0.14.0 用户要求：对话数分钟不运行且虚拟屏无操作则 kill 掉，否则一直占资源）。
+    //
+    // 入口处顺手回收一次：成本只是「比较时间戳」，但保证只要还有 vd 活动，空闲屏就会被及时
+    // 释放。真正的兜底在 MainActivity 的周期任务（面板关掉、AI 不再调用时只有那条路走得到）。
+    VdisplayController.reclaimIdle(context.applicationContext)
+    return when (op) {
+      "vdCreate" -> VdisplayController.create(context, args)
+      "vdDestroy" -> VdisplayController.destroy(context, args)
+      "vdLaunch" -> VdisplayController.launchSettingsProbe(context, args)
+      "vdMoveTask" -> unsupported(op)
+      "vdInfo" -> VdisplayController.status(context)
+      else -> JSONObject()
+        .put("__error", "未知虚拟屏操作 $op")
+        .put("reason", "unknown-op")
+        .put("op", op)
+    }
   }
 
   /** 已登记但壳侧尚未实现：fail-closed 的结构化拒绝（键位与旧 handle 实现逐字一致）。 */
-  private fun unsupported(op: String): JSONObject = JSONObject()
-    .put("__error", "暂不支持：$op（壳侧已登记、实现未落地——fail-closed 拒绝）")
-    .put("reason", "unsupported")
-    .put("op", op)
+    private fun unsupported(op: String): JSONObject = JSONObject()
+      .put("__error", "暂不支持：$op（壳侧已登记、实现未落地——fail-closed 拒绝）")
+      .put("reason", "unsupported")
+      .put("op", op)
 }
