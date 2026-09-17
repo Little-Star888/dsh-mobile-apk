@@ -296,14 +296,21 @@ object VdisplayController {
   fun create(context: Context, args: JSONObject? = null): JSONObject {
     val appContext = context.applicationContext
     val session = args?.optString("session", "")?.takeIf { it.isNotBlank() }
-    // 0.14.0 用户口径：**按会话隔离**（与浏览器侧同源修正）。
+    // 0.14.0 用户口径修正：**隔离「可见性/操作」，但共享「物理资源」**。
     //
-    // 原先用一把全局 ownerSessionId + requireOwner 做归属锁，后果与浏览器侧一模一样：
-    // 别的会话建屏后就只能看到「正由另一个会话使用」，且只有那个会话能销毁——
-    // 会话一旦消失，那块屏永远收不回来。现在每块屏记自己的 owner，各会话互不阻塞。
-    // 幂等复用改为「本会话自己已有屏」时直接返回（不再看全局归属）。
-    val existing = synchronized(lock) { records.values.count { it.owner == session } }
-    if (existing > 0 && session != null) return status(appContext)
+    // 为什么不是「每会话一块屏」：虚拟屏是**全局稀缺资源**（本版上限 MAX_VIRTUAL_DISPLAYS = 1，
+    // 一块 VirtualDisplay 在系统里真实占位）。若按会话各持一块，第 2 个会话必然撞上限。
+    // 我自己上一版就犯了这个错：幂等判断写成「本会话是否已有屏」，于是
+    //   面板先建屏(owner=null) → 模型再建(owner=X) 被算作「本会话没有屏」→ 尝试建第 2 块 → 报上限。
+    //
+    // 正确的隔离边界：
+    //   - 资源：**全局唯一**（上限就是上限，谁建都算同一块）；
+    //   - 归属：只用于「呈现给谁看」（面板按会话显示），**不再用于拒绝操作**；
+    //   - 销毁：任何会话都能关（用户明确要求，否则创建者消失后没人能关）。
+    //
+    // 因此幂等判断回到「本机是否已有屏」——存在即复用，无论它当初由谁创建。
+    val existing = synchronized(lock) { records.size }
+    if (existing > 0) return status(appContext)
     val bound = ShizukuTransport.ensureBound(appContext)
     if (!bound.optBoolean("ok")) return status(appContext)
       .put("code", bound.optString("code", "shizuku-not-ready"))

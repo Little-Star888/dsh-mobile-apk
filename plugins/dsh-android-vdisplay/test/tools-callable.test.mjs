@@ -147,3 +147,23 @@ test('销毁权限：任何会话都能销毁（不得因归属把资源锁死�
   assert.doesNotMatch(destroyBody, /requireOwner\(/, 'destroy 不得按归属拒绝（否则创建者消失后没人能关）')
   assert.match(destroyBody, /records\.keys\.firstOrNull\(\)/, '必须有「任意一块」兜底，保证只要存在就能关掉')
 })
+test('资源全局唯一、归属只管呈现：幂等判断必须看「本机是否已有屏」而不是「本会话是否已有屏」', async () => {
+  // 我自己的真实回归：把幂等写成「本会话是否已有屏」后，
+  //   面板先建屏(owner=null) → 模型再建(owner=X) 被算作「本会话没有屏」→ 建第 2 块 → 撞上限。
+  // 教训：虚拟屏是**全局稀缺资源**（上限 1 块），隔离的是「看/操作」，不是「资源本身」。
+  const { readFileSync } = await import('node:fs')
+  const kotlin = readFileSync(
+    new URL('../../../dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt', import.meta.url),
+    'utf8',
+  )
+  const createBody = kotlin.slice(kotlin.indexOf('fun create('), kotlin.indexOf('/** Explicitly remove one display'))
+  assert.ok(
+    createBody.includes('records.size'),
+    '幂等判断必须基于本机屏总数（records.size），而不是按 owner 过滤',
+  )
+  assert.doesNotMatch(
+    createBody,
+    /count \{ it\.owner == session \}/,
+    '不得按会话过滤计数：那会把全局唯一资源当成每会话私有资源（第 2 个会话必撞上限）',
+  )
+})
