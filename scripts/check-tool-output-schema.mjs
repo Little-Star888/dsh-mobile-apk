@@ -113,6 +113,19 @@ console.log('运行时注册 ' + registered.length + ' 个工具：' + registere
 
 const problems = []
 
+/**
+ * 「接收者丢失」的运行时错误指纹。
+ *
+ * 覆盖 V8 的措辞形态：读属性与调方法两种（`Cannot read properties of undefined (reading 'x')`
+ * / `... is not a function`）。命中即说明某个服务方法被摘出服务对象后裸调，this 丢了。
+ */
+const LOST_RECEIVER_PATTERNS = [
+  /Cannot read propert(?:y|ies) of undefined \(reading '/,
+  /Cannot read propert(?:y|ies) of null \(reading '/,
+  /is not a function/,
+  /undefined is not an object/,
+]
+
 // ── 4. 源码级注册完整性（差集 = 0）──────────────────────────────────────────
 const srcText = readFileSync(SRC, 'utf8')
 const declared = new Set([...srcText.matchAll(/defineTool\(\{\s*\n?\s*name:\s*'([^']+)'/g)].map((m) => m[1]))
@@ -198,6 +211,21 @@ for (const tool of registered) {
     const undef = []
     hasUndefined(value, 'value', undef)
     if (undef.length > 0) problems.push(tool.name + ' 分支#' + i + '：返回值含 undefined 成员（' + undef.join(', ') + '）')
+
+    // ── 接收者绑定探针（0.14.0 设备实锤新增）───────────────────────────────
+    //
+    // 抓的缺陷类：工具把**服务方法从服务对象上摘下来裸调**（`const f = svc.m; f(...)`），
+    // 于是方法内的 `this.xxx` 变成 undefined.xxx。实测发生过：vdisplay 的 controlExec 被摘出后，
+    // 虚拟屏 create/destroy 恒报 `Cannot read properties of undefined (reading 'controlQueue')`，
+    // 而**壳侧直接调同一 op 完全正常**——只有把每个工具都真跑一遍才能发现。
+    //
+    // 判据：工具返回里不得出现「接收者丢失」这类运行时错误文本。夹具的服务方法都在 useStrictFace
+    // 下用 getter 记录 get/set 访问，`this` 丢失时访问会抛/记录，从而暴露。
+    const lost = LOST_RECEIVER_PATTERNS.find((re) => re.test(JSON.stringify(value ?? {})))
+    if (lost !== undefined) {
+      problems.push(tool.name + ' 分支#' + i + '：返回值含「服务方法接收者丢失」错误（' + lost + '）'
+        + '——多半是把方法从服务对象摘出来裸调了（应写成 svc.method(...)）')
+    }
   }
 }
 

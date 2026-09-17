@@ -168,6 +168,12 @@ export const BROWSER_OP_CONTRACTS: readonly ToolContract[] = [
   { name: BROWSER_OPS.state, params: '{}', returns: '{ok,url,title,pageGeneration,canGoBack,canGoForward,visible,tabId,tabs[]}', permission: 'read' },
   { name: BROWSER_OPS.setUa, params: '{profile:string, ua:string, platform:string, mobile:boolean}', returns: '{ok,profile,applied,uaChApplied:boolean,degraded?,reloaded}', permission: 'confirm' },
   { name: BROWSER_OPS.viewport, params: '{route:"S1"|"S2"|"S2b"|"S3", preset?:string, width:number, height:number, scale?:number}', returns: '{ok,route,width,height}', permission: 'approval' },
+  // 0.14.0 多页签：三条 op 与 BROWSER_OPS 同批登记。契约完备性由插件单测守
+  // （test/tier.test.mjs 的「契约完备」用例断言 BROWSER_OPS 每个键都有条目——
+  //  我加 op 时漏补这里，正是被该用例抓到的）。
+  { name: BROWSER_OPS.tabs, params: '{}', returns: '{ok,tabs[],activeTabId,tabCount}', permission: 'read' },
+  { name: BROWSER_OPS.followTab, params: '{tabId:string}', returns: '{ok,activeTabId,url,tabs[]}', permission: 'read' },
+  { name: BROWSER_OPS.closeTab, params: '{tabId?:string}', returns: '{ok,closedTabId,activeTabId,tabs[]}', permission: 'read' },
 ] as const
 
 /** 面板状态载荷（面板/设置页读；**只读、无副作用**）。字段全部为必填，避免 undefined 成员。 */

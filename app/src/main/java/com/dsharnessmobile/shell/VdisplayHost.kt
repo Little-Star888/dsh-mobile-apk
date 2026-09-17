@@ -169,13 +169,31 @@ internal class VdisplayHost(
     val surface = ensureView()
     val scaleX = dshWebView.width.toDouble() / cssWidth
     val scaleY = dshWebView.height.toDouble() / cssHeight
-    val left = (bounds.left * scaleX).toInt().coerceIn(0, (root.width - 1).coerceAtLeast(0))
-    val top = (bounds.top * scaleY).toInt().coerceIn(0, (root.height - 1).coerceAtLeast(0))
-    val width = (bounds.width * scaleX).toInt().coerceIn(1, (root.width - left).coerceAtLeast(1))
-    val height = (bounds.height * scaleY).toInt().coerceIn(1, (root.height - top).coerceAtLeast(1))
+    val stageLeft = (bounds.left * scaleX).toInt().coerceIn(0, (root.width - 1).coerceAtLeast(0))
+    val stageTop = (bounds.top * scaleY).toInt().coerceIn(0, (root.height - 1).coerceAtLeast(0))
+    val stageWidth = (bounds.width * scaleX).toInt().coerceIn(1, (root.width - stageLeft).coerceAtLeast(1))
+    val stageHeight = (bounds.height * scaleY).toInt().coerceIn(1, (root.height - stageTop).coerceAtLeast(1))
+    // 等比适配（0.14.0 设备实测修正）：虚拟屏内容有自己的宽高比（如 360x640 = 0.5625），
+    // 与侧栏舞台的宽高比（如 434x682 = 0.6363）通常不同。直接撑满舞台会让内容只渲染在
+    // 自己那部分、其余留黑边（用户报「未自动拉伸适配」+「黑边」）。
+    //
+    // 正确做法：按**内容宽高比**在舞台内尽力放大（用 scale 的最小值保证不溢出、不裁剪），
+    // 再在舞台内居中。这是 letterbox 的适配方向——宁可留对称的窄边，也绝不拉伸变形。
+    val content = VdisplayController.contentSizeForAlias(bounds.target)
+    val aspect = if (content != null && content.first > 0 && content.second > 0) {
+      content.first.toDouble() / content.second.toDouble()
+    } else {
+      stageWidth.toDouble() / stageHeight.toDouble()
+    }
+    val fit = minOf(stageWidth.toDouble() / aspect, stageHeight.toDouble())
+    val width = (fit * aspect).toInt().coerceIn(1, (root.width - stageLeft).coerceAtLeast(1))
+    val height = fit.toInt().coerceIn(1, (root.height - stageTop).coerceAtLeast(1))
+    // 居中：把等比后的内容摆在舞台中央（两侧/上下对称留边，而不是全部堆在左侧）。
+    val left = stageLeft + (stageWidth - width) / 2
+    val top = stageTop + (stageHeight - height) / 2
     surface.layoutParams = FrameLayout.LayoutParams(width, height).apply {
-      leftMargin = left
-      topMargin = top
+      leftMargin = left.coerceIn(0, (root.width - 1).coerceAtLeast(0))
+      topMargin = top.coerceIn(0, (root.height - 1).coerceAtLeast(0))
     }
     // Make the SurfaceView visible so its Surface is created; binding/arbitration happens in
     // surfaceCreated. An occupied target is hidden again by bindSurface with a structured reason.

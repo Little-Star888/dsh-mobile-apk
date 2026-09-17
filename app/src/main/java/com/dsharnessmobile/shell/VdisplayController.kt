@@ -94,6 +94,20 @@ object VdisplayController {
   /** Owned virtual aliases ordered by allocation (the model-facing `virtual-N` set). */
   fun activeAliases(): List<String> = synchronized(lock) { records.keys.toList() }
 
+  /**
+   * 某虚拟屏的**内容尺寸**（虚拟屏自己的像素宽高）。
+   *
+   * 为什么宿主侧需要它：虚拟屏按等比例缩放创建（默认 0.5 → 约为真实屏的一半），其宽高比与
+   * 侧栏舞台的宽高比**通常不同**（实测 360x640 对 434x682）。把 SurfaceView 直接撑满舞台会
+   * 让内容只渲染在自己那部分、右侧/下方留出黑边（用户报「未自动拉伸适配」+「黑边」）。
+   * 正确做法 = 按**内容宽高比**在舞台内等比放大并居中（letterbox 反向：能填满就填满，
+   * 不拉伸变形）。
+   */
+  fun contentSizeForAlias(alias: String?): Pair<Int, Int>? = synchronized(lock) {
+    val record = if (alias == null) null else records[alias]
+    if (record == null) null else record.width to record.height
+  }
+
   private fun selectedRecord(): Record? = synchronized(lock) { records[selectedAlias] }
 
   /**

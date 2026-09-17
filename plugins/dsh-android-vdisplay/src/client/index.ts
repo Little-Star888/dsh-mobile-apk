@@ -129,11 +129,19 @@ function VdPanel(props: { sessionId?: unknown }): ReactElement {
     if (stage === null) return
     const rect = stage.getBoundingClientRect()
     try {
+      // 可见性判据（0.14.0 设备实测修正，与浏览器侧同源）：**必须把「侧栏已收起」算进去**。
+      //
+      // 缺这一条的后果（用户报「强行遮盖上 UI」）：收起侧栏时上游只是把面板隐藏（组件仍在 DOM 里
+      // 保活），舞台矩形与 display 都不变，于是旧判据仍算出 visible:true → 原生 SurfaceView 保持
+      // 可见，**盖在聊天界面上**。权威收起信号 = 上游展开控件在场（ExpandButton 只在收起时渲染；
+      // data-rightbar-collapsed 是恒为 true 的常量，不可用——见坑 119/120）。
+      const collapsed = document.querySelector('[data-sidebar-right-expand]') !== null
+      const hidden = getComputedStyle(stage).display === 'none' || getComputedStyle(stage).visibility === 'hidden'
       nativeBridge()?.vdisplayBounds?.(JSON.stringify({
         left: rect.left, top: rect.top, width: rect.width, height: rect.height,
         viewportWidth: window.innerWidth, viewportHeight: window.innerHeight,
-        visible: !occupiedRef.current && snap.state === 'active' && rect.width > 1 && rect.height > 1 &&
-          getComputedStyle(stage).display !== 'none',
+        visible: !occupiedRef.current && !collapsed && !hidden && snap.state === 'active' &&
+          rect.width > 1 && rect.height > 1,
         viewerId: VIEWER_ID,
         target: snap.selected,
       }))
@@ -164,11 +172,22 @@ function VdPanel(props: { sessionId?: unknown }): ReactElement {
 
   useEffect(() => {
     let alive = true
-    const pull = () => { void pullPanelState().then((s) => { if (alive) setSnap(s) }) }
+    // 轮询里**同时重发 bounds**（0.14.0 用户实报修正）。
+    //
+    // 原先只 setSnap：状态变了但从不把新的可见性推给壳侧，于是原生 SurfaceView 的可见性
+    // 要等别的事件（切页签/切面板）才更新——用户原话「在人不查看但 AI 操控的时候状态不刷新，
+    // 必须切换上方状态栏才显示」。
+    //
+    // 收起/展开只改可见性、不改舞台尺寸，ResizeObserver 不触发，所以必须由轮询兜底同批下发。
+    // 与浏览器侧 300ms 轮询同口径（那里也是 refresh + publishBounds 同批）。
+    const pull = () => {
+      void pullPanelState().then((s) => { if (alive) setSnap(s) })
+      if (alive) publishBounds()
+    }
     pull()
     const timer = setInterval(pull, 1000)
     return () => { alive = false; clearInterval(timer) }
-  }, [tick])
+  }, [tick, publishBounds])
 
   const selectTarget = (alias: string) => {
     try {
