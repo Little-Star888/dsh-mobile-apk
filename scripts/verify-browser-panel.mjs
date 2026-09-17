@@ -103,10 +103,23 @@ try {
   const errDeadline = Date.now() + 25_000
   do { await sleep(600); errState = await status(); if (errState.loadState === 'error') break } while (Date.now() < errDeadline)
   if (errState.loadState !== 'error') fail('不可达主机应进入 error 态：' + JSON.stringify(errState))
-  if (!/ERR_/.test(String(errState.reason))) fail('错误态应带 ERR_* 原因：' + JSON.stringify(errState.reason))
-  ok('错误页：不可达主机 → loadState=error + ERR_*', errState.reason)
+  // 契约（0.14.0 实测）：壳侧 reason 是结构化的 `load-error:<code>`（如 load-error:-2 =
+  // ERR_NAME_NOT_RESOLVED），页面上是内置错误页（title 为 ERR_*）。两者都要能判定失败，
+  // 故这里两个信号至少一个在场即可，不绑定单一字段名。
+  const reasonIsStructured = /^load-error:-?\d+$/.test(String(errState.reason))
+  const titleIsErr = /ERR_/.test(String(errState.title))
+  if (!reasonIsStructured && !titleIsErr) {
+    fail('错误态既无结构化 reason（load-error:<code>）也无 ERR_* 标题：' + JSON.stringify({ reason: errState.reason, title: errState.title }))
+  }
+  ok('错误页：不可达主机 → loadState=error 且带可判定信号', 'reason=' + errState.reason + ' title=' + errState.title)
 
-  // 6) 跨会话占用
+  // 6) 跨会话占用（fail-closed）
+  //
+  // 语义（0.14.0 实测）：归属由**首次带 session 的调用**绑定（bindOwner）；绑定后其它会话对该工作台的
+  // 呈现/操作一律拒绝。因此必须先由 session-A 明确占位，再用 session-B 试探，才构成真正的「非归属」。
+  const claimA = await bridge('browserHostShow', { url: 'https://example.com/', session: 'session-A' })
+  if (claimA.ok !== true) fail('session-A 占位失败：' + JSON.stringify(claimA))
+  await sleep(500)
   const foreign = await bridge('browserHostShow', { url: 'https://example.com/', session: 'session-B' })
   if (foreign.ok !== false) fail('非归属会话的打开应被拒：' + JSON.stringify(foreign))
   ok('跨会话占用 fail-closed', foreign.reason ?? foreign.code ?? 'rejected')
