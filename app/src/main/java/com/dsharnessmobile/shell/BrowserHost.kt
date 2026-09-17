@@ -748,7 +748,10 @@ a{display:inline-block;margin-top:16px;padding:10px 20px;border-radius:8px;backg
         val before = created.generation.get()
         browser.loadUrl(target)
         applyVisibility()
-        return@onMain JSONObject().put("__go", true).put("tabId", created.id).put("__before", before)
+        // 冷启动预算：**首个页面**要等第二个 WebView 与 renderer 起来，2.5s 常不够（设备实测：
+        // 第一次 browser_open 返回 about:blank、第二次正常）。新页统一给宽松预算。
+        return@onMain JSONObject().put("__go", true).put("tabId", created.id)
+          .put("__before", before).put("__cold", true)
       }
       val newTab = requestedTabId != null && !tabs.containsKey(requestedTabId)
       if (newTab && tabs.size >= MAX_TABS) {
@@ -773,7 +776,8 @@ a{display:inline-block;margin-top:16px;padding:10px 20px;border-radius:8px;backg
     } ?: return controlTimeout()
     if (!started.optBoolean("__go", false)) return started
     val tab = tabOrNull(started.optString("tabId", "")) ?: return controlTimeout()
-    awaitNavigation(tab, started.optLong("__before", 0L))
+    // 新页（含首个页面）用更宽的等待预算：WebView/renderer 冷启动 + 首帧导航常超 2.5s。
+    awaitNavigation(tab, started.optLong("__before", 0L), if (started.optBoolean("__cold", false)) 10_000L else 2_500L)
     return onMain { status().put("ok", true).put("tabId", tab.id) } ?: controlTimeout()
   }
 
@@ -784,11 +788,11 @@ a{display:inline-block;margin-top:16px;padding:10px 20px;border-radius:8px;backg
    * status() 读到的还是上一页（新页则是 about:blank + 代次 0）。设备实测：模型因此以为
    * 「导航还没完成」，甚至去猜「工具默认先开空白页」（Agent 原话），可能触发重复导航。
    *
-   * 只等「代次前进」，**不等整页加载完**：慢站点不应拖住控制队列；上限 2.5s，超时按当前状态
+   * 只等「代次前进」，**不等整页加载完**：慢站点不应拖住控制队列；常规上限 2.5s、冷启动新页 10s，
    * 如实返回（loadState 仍为 loading，模型可自行决定要不要继续 browser_wait）。
    */
-  private fun awaitNavigation(tab: Tab, before: Long) {
-    val deadline = SystemClock.elapsedRealtime() + 2_500L
+  private fun awaitNavigation(tab: Tab, before: Long, budgetMs: Long = 2_500L) {
+    val deadline = SystemClock.elapsedRealtime() + budgetMs
     while (SystemClock.elapsedRealtime() < deadline) {
       if (tab.generation.get() > before) return
       try { Thread.sleep(40) } catch (_: InterruptedException) { return }
