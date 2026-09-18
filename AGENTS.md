@@ -1,86 +1,140 @@
-# AGENTS.md — dsh-mobile-apk 开发地图（索引主文件）
+# AGENTS.md — dsh-mobile-apk 项目地图
 
-> **AI 主动更新条款（必须最先执行）**：本文件是唯一权威入口，采用「主文件索引 + docs/AGENTS/ 详档」结构。**任何代码变更导致描述失真时：① 主文件对应行当轮更新；② 细节写入 docs/AGENTS/ 对应详档（坑→gotchas.md 追加递增编号；版本历史→更新记录表登记，3 条之前的行滚入 changelog-archive.md）。** 若发现文档与源码不一致，以源码为准并当场修正。**查询规范：优先用 grep 在 docs/AGENTS/ 详档内定位（见下方路由表），不要凭记忆猜细节。**
->
-> **过期风险声明**：代码演进可能快于文档更新；一切以源码为准。
+> **本文件是你进入壳侧的入口**：仓库地图 + 去哪查 + 更新协议。不堆历史记录。
+> 一切以源码为准；发现文档与源码不一致，**当场改文档**。
 
 ---
 
-## 1. 仓库概览
+## 1. 这是什么仓
 
-- **角色**：DeepSeek Harness 安卓壳应用（`com.dsharnessmobile.shell`）。职责边界 = 只保留安卓平台权能与桥（前台服务/看门狗/WebView（主 + 隔离 BrowserHost）/SAF 桥/快照解压/UndoGate/Shizuku 特权 transport 与虚拟屏/无障碍与 ADB 授权/通知中心与通知内应答/返回网关/审计/控制台/日志）；**AI 可见能力全部来自插件**。
-- **运行时形态**：内嵌 Termux 快照（`assets/snapshot.tar.xz` → files/usr + files/home）；引擎 `@deepseek-ai/dsh` **0.1.5-rc.1**（0.13.3 起构建期 overlay；0.13.7 追上游升版，快照本轮重建）；**/api 前缀**浏览器鉴权——壳侧 EngineAuth 带 Cookie）监听 127.0.0.1:3080；WebView 加载引擎 Web UI。**例外（坑 78）**：上游路由匹配是「exact 表先于 prefix 表」，插件用 `kind:'exact'` 注册在 `/api/...` 下会**绕过**该前缀的 cookie 鉴权与 Host 校验——「/api 全前缀鉴权」不成立，鉴权必须由插件自己带，并由 `scripts/check-api-route-auth.mjs` + `scripts/api-route-auth-policy.json` 枚举 mobile-owned route 源、受保护 guard 与窄公开白名单；新增路由未登记即拒构建（见坑 95）。
-- **构建链**：minSdk 26 / targetSdk 34 / compileSdk 36；Kotlin 2.0.21；AGP 8.8.2；Java 17。
-- **版本状态**：**0.14.0-preview 已发布（vc38，2026-09-13，9 资产，`prerelease=false`）**：缺陷收口（#204 ui_dump schema 族 / #205 来件路由鉴权 / #206 句柄寻址 / #210 半死状态机 / #211 IO 三处 / #214 启动死屏）＋ 门禁闭环（`check-release-gates` 聚合接进本地链 / 两仓 CI / 发布组装链，SKIP=0 强约束）＋ 特性接入（系统返回手势、通知分级与通知内应答、外部文件草稿）；**AI 浏览器与虚拟屏在本版是实验特性，默认不接产品路径**（壳侧 BrowserHost/browserCaps 桥当时未落地、虚拟屏仅 P0 探针），见 `release/v0.14.0-preview/notes.md` 与协调仓 `docs/0.14.0-preview-*.md`。**0.13.8 已发布（vc37，2026-09-12，16 资产）**：控制协议 V2 + E6 能力补齐 + P2 收口 + @ 菜单多选/键盘空白带/「打开配置文件」修复 + 悬浮球 M4-M8 动效。**当前工作区 = 0.14.0 正式版本轮（未提交 / 未验收，不得按已完成对外描述；规格 docs/SPEC-0.14.0-ROUND-2026-09-15.md）**：浏览器极简面板（地址+单按钮 / 分辨率+PC-手机 / 滚动避让 / 横屏锁定 / Edge 式错误页 / 关闭即销毁 / 跨会话占用态）、虚拟屏（编号 1..N / 档位缩放 / 随内容旋转 / 只读浮窗 / 设置页强制销毁三连点）、会话单实例归属（浏览器 + 虚拟屏）、设置页「手机控制」（移除 ADB 面板）、engine.log 当前代全量复制；**双通道与 Shizuku 替换 ADB**（AIDL v2 大输出落盘+分块取回、sh* 特权 shell 通道、AdbState.kt 删除、快照卸载 android-tools、工具改名 android_shell_exec、caps.shizuku 实时上报）。**0.13.7fx-1 修订构建（vc36，2026-09-11，发布资产同 tag 替换）**：发布后 issue 修复批=会话迁移 link(2) 回退（#154）+ 上传选择器统一 SAF（#160）+ 设置页「打开配置文件」接管（#152）+ 移动端 @ 菜单目录行下钻与多选（#163）；详见 §5 与坑 64-66。**0.13.7fx-1 已发布（vc35，Release v0.13.7fx-1，15 资产，2026-09-11）**：本版=**@ 文件回到上游原生**（退役注入的「引用本机文件」菜单项与整条 SAF 路径桥；`@` 只列会话工作区文件，官方语义）＋ **引擎启动目录改应用工作区根**（未分组会话不再把 `/` 当工作区，issue #150/#144）＋ **修复 0.1.5 起失效的移动端 Enter 换行守卫**＋ 退役空转的 `web-frontend-index.html` 运行时补丁 + 合入贡献者 PR #157（抽屉底部安全区）。**0.13.7 已发布（vc34，Release v0.13.7，15 资产，2026-09-10）**：本版=**追上游 dsh 0.1.5-rc.1**（上游 ui-layout 基线 + 移动适配层 0.2.0 + 原生「打开方式」PathOpen/openPathChooser + 引擎树补丁 F3/F4 + polyfill 装配与 Iterator 垫片修复 + UI 冗余清理）；认证台账 `docs/AGENTS/0.13.7-CERTIFICATION.md`（版本口径统一表在 §3）。0.13.6 已发布（vc33，Release v0.13.6，15 资产，2026-09-10）：本版=**附件持久化 Android 守卫（图片输入/read_image 全链修复，构建期+运行时补丁双写）** + 自有 WebView DOM 快速通道（`android_web_dump` + `ref=wN/css:/text:/role:`）+ `android_ui_global`（返回/主页/最近任务/通知栏）+ `android_env_prepare`/`android_app_launch`/前台真值/输入回读断言 + `phone-control` 预设 + 顶部系统 inset 通道 + 弹出面板几何守卫 + 悬浮球光环提亮；认证台账 `docs/AGENTS/0.13.6-CERTIFICATION.md`。0.13.5 已发布（vc32，Release v0.13.5，15 资产，2026-09-10 收官）：无障碍控制通道 v1（`DeviceControlService` + 控制队列 + 双通道门禁等价且无障碍优先 + 无障碍截屏 API 30+ + 完整语义树/同名消歧）+ 悬浮球跟随工作会话/新会话落临时工作区 + 授权面重构 + #126/#124 引擎补丁 + #125 能力自动补全 + 构建提速（WSL 内原生执行，172s vs ~29min）。0.13.3 已发布（vc30，Release v0.13.3 正式版，14 资产）。0.13.2 已发布（vc29，悬浮球 v2.1 全套）。0.13.6 已把 0.13.5 的残余项（#127/#128/#129/#130 主体/#133/#134/#135）全部落地；开放跟踪：#130 剩余（Android 13+ 无障碍输入法替代内嵌 IME 的自动就绪）、#115（市场 Phase2）、#108（数据备份）。arm64 真机（V2425A）链路验证已通过。
-- **兄弟仓库**（协调仓子目录，本仓内含自包含副本——**坑 36 同步铁律**：协调仓改子仓源码/bump 版本后必须 robocopy 镜像到本仓，lib/ 产物一并拷）：`dsh-shell-termux`（0.2.0，工具链单一表）、`dsh-client-ui-responsive`（0.3.3，移动适配层）、`dsh-host-web-compat`（0.1.13，polyfill/桥）、`plugins/`（bridge 0.2.4 / manage 0.3.0 / model-capability 0.2.1 / file-open 0.1.0 / browser 0.1.0 / linux-env 0.1.2 / vdisplay 0.1.0）、`vendor/`（marketplace、undo-savepoint、dsh-model-sync + PATCHES.md）。
-- **补丁镜像面（0.13.8 起）**：本仓 `scripts/patches/**`（registry.json / apply-patches.mjs / README.md / tests/**）与 `scripts/check-patch-mirror.mjs`、`scripts/build-apk-013.ps1` 是协调仓的**逐字节镜像**（云端自包含构建检出本仓）——改补丁必须双树同批；`check-patch-mirror.mjs` 在两仓 CI 与构建链强制比对，单边演进即拒（apk #171 教训；镜像纪律详见 `docs/AGENTS/RUNTIME-PATCHES.md` §7.1）。
-- **上游** deepseek-ai/deepseek-harness（协调仓 `dsh/` 只读 checkout）：**零改动**；一切适配走补丁/插件/壳侧。
-- **模拟器优先于 PR 与真机请求（2026-09-10 用户定例）**：改动落地顺序 = 本地构建 → **MuMu x86_64 模拟器实测** → 再谈 PR；**不得以「等真机验证」为由推迟模拟器实测、或把模拟器实测挂在 PR 之后**。真机（arm64）验证是**发布前**的补充门禁，不是开发循环的前置条件；模拟器上验不过的改动不允许开 PR，模拟器上验过的改动也不因缺真机而搁置（release notes 标注真机待验即可）。
-- **批量修改、最后验收（2026-09-14 用户定例）**：成组改动**先一次改完，再做统一最终验收**（一次构建 + 一次打包 + 一次装机 + 一次设备回归）；**不要「改一批、验一批」**，反复编译/打包/快照解压会把时间大量浪费在等待构建上。批次内允许随时跑主机侧廉价检查（Kotlin 单测、脚本门禁、CI 静态门禁），但昂贵步骤（全量门禁、打包、装机、模拟器回归）只在批次收口时执行一次。安全敏感或破坏性改动（快照事务、签名、门禁自身、桥协议面）例外，仍须即时验证。
-- **需求不延期铁律（2026-09-15 用户定例）**：**禁止在有明确需求且未明说要将功能拖延到后续版本之前，在任何文档中将任何东西列为「本轮不做」。** 有明确需求 = 本轮完成；技术阻塞只能在当轮给出替代实现并记录真因，不得以「实验特性/默认不接产品路径/下版本」为由降级或延期。
-- **PR 流程铁律（2026-09-10 用户定例）**：**任何代码/文档改动一律走 PR，禁止直接 push 到 `main`**（人类与 AI 开发助手同等适用）。流程：建分支（`<type>/<简短描述>`）→ 提交（`<type>: <描述>`，见 pr-guidelines）→ 推送分支 → 开 PR（标题/描述按模板，标签 1-3 个）→ CI Gate 绿 → 合并 → 删分支。**例外（不改仓库内容的外部动作，可直连 API）**：Release 资产上传/发布、issue 评论与开关、标签操作。协调仓 `dsh-mobile` 同规（见其 AGENTS.md §4）。
+DeepSeek Harness 的**安卓壳应用**（包名 `com.dsharnessmobile.shell`）。
 
-## 2. 构建命令速查（在协调仓根执行）
+**职责边界**：只保留安卓平台权能与桥——前台服务 / 看门狗 / WebView（主 + 隔离 BrowserHost）/ SAF 桥 / 快照解压 / UndoGate / Shizuku 特权 transport 与虚拟屏 / 无障碍与 ADB 授权 / 通知中心与通知内应答 / 返回网关 / 审计 / 控制台 / 日志。
+
+**关键约束：AI 可见的能力全部来自插件**，壳侧不直接注册工具。
+
+**运行时**：内嵌 Termux 快照（`assets/snapshot.tar.xz` → `files/usr` + `files/home`）；引擎 `@deepseek-ai/dsh` 0.1.5-rc.1 监听 `127.0.0.1:3080`；WebView 加载引擎 Web UI。
+
+**构建链**：minSdk 26 / targetSdk 34 / compileSdk 36；Kotlin 2.0.21；AGP 8.8.2；Java 17。
+
+**兄弟子仓**（本仓内含自包含副本，见 §4 同步铁律）：
+`dsh-shell-termux` 0.2.0 · `dsh-client-ui-responsive` 0.3.3 · `dsh-host-web-compat` 0.1.13 · `plugins/`（bridge 0.2.4 / manage 0.3.0 / model-capability 0.2.1 / file-open 0.1.0 / browser 0.1.0 / linux-env 0.1.2 / vdisplay 0.1.0）· `vendor/`（marketplace / undo-savepoint / dsh-model-sync）
+
+**上游** `deepseek-ai/deepseek-harness`（协调仓 `dsh/` 只读 checkout）：**零改动**，一切适配走补丁/插件/壳侧。
+
+**当前状态：以 `docs/AGENTS/changelog-archive.md` 最新一行为准**（本文件不维护版本号，避免双份漂移）。
+
+---
+
+## 2. 怎么建、怎么装、怎么验
 
 ```powershell
-pwsh -File scripts\build-apk-013.ps1 -Suffix ""   # 一键双 ABI（门禁失败即拒打包）
-pwsh -File scripts\build-apk-013.ps1 -Fast        # dev 快速档（单 ABI x86_64 + preset 1；产物禁发布）
-node scripts\build-snapshot-013.mjs <arm64|x86_64> # 快照构建（Windows 需 WSL）
-node scripts\smoke-bridge.mjs                      # bridge 冒烟
-adb -s <serial> install -r -t out\v<版本>\...apk    # 装机（同签名 debug keystore）
+# 在【协调仓根】执行（壳侧不单独构建）
+pwsh -File scripts\build-apk-013.ps1 -Suffix ""   # 双 ABI 全链，门禁失败即拒打包
+pwsh -File scripts\build-apk-013.ps1 -Fast         # dev 档：单 ABI x86_64 + preset 1（禁发布）
+
+# 装机（<serial> 用 adb devices 查；arm64 真机必须用 arm64 产物）
+adb -s <serial> install -r -t out\v<版本>\dsh-mobile-apk-v<版本>-arm64.apk
 ```
 
-门禁链：`scripts/check-release-gates.mjs` 为聚合入口（`--list` 现数，当前 17 项；接进本地链 `build-apk-013.ps1` / 云端 `build-apk.mjs` / 两仓 CI / 发布链 `build-release.ps1` 五处，发布链 `--run --require` 要求 SKIP=0）；内容 = vendor 统一补丁 → 引擎 overlay 抽验 → 引擎树补丁 marker 复查 → 单 pass 注入（补齐 + 修剪双向对齐）→ 注入产物完整性 → 挂载集 → 机密 → 第三方 → 运行时资产 → 快照指纹 → 协议 V2 / 工具 schema / 控制 op / 路由鉴权 / 状态登记 / 桥对称 / 门禁 SKIP / 性能插桩 / Kotlin 注释 / 构建链中止 / strip no-op → elf-check → gradle。云端自包含构建：`.github/workflows/build-apk.yml`（只 upload-artifact）。
+**设备**：
+- MuMu 模拟器 `127.0.0.1:16416`（竖屏）、`127.0.0.1:16384`（横屏，真 1600x900）——开发循环主用。
+- 真机 V2425A `10AF2B0GN0001F2`（arm64，1260x2800，SDK 36）——**发布前**补充门禁。
 
-## 3. 高频雷点 TOP（一行一条；**全量坑位以 `docs/AGENTS/gotchas.md` 为准**——坑号为**历史分配**、**允许空缺**（空缺号保留占位、一律不重编号，避免破坏既有引用），新增按递增号追加（现至 98）；本节的「全量 45 坑」类数字一律不写死，用 `grep -c '^[0-9]\+\. \*\*' docs/AGENTS/gotchas.md` 现数）
+**验证脚本**（`scripts/`，必须**逐个单独跑**，每个都重建 WebView target）：
 
-- **坑 37**：快照重解压中（~8-12 分钟）**禁 force-stop/杀进程**——唯一完成标志 = `.snapshot-fingerprint` 翻转 + `.snapshot-transaction` 消失（0.13.3 事务化后不再用 `.dsh-backup`）；中途杀 → 事务恢复会自动回滚，但仍建议等完成。
-- **坑 18/30**：debug 包默认 x86_64 快照装 arm64 必崩；真机安装只用 ps1 对应 ABI 命名产物。
-- **坑 19**：真机改 cordis.patch.yml 后必须冷启动 app（force-stop + start）才重装配。
-- **坑 33**：壳侧所有本地引擎调用一律 `Proxy.NO_PROXY`（系统代理劫持探针）。
-- **坑 38**：运行时补丁升级引擎时必须逐个核对（rc.2 锁定 asset 会抹掉新引擎代码——0.13.3 prompt 阻断实锤）。
-- **坑 44**：WSL 9p 挂载 chmod 无效——归档权限归一化只在 `inject-all.py` 重打包层做（门禁校验注入后快照）。
-- **坑 45**：快照含 9 个指向 `files/usr/...` 的绝对符号链接（vi/vim/nc/editor/pager 等 applet）——暂存解压必须传 `runtimeRoot=filesDir` 放行，否则静默丢链。
-- **坑 94**：某个 ABI 被门禁拒绝后构建链仍可能以 exit 0 交付单 ABI 产物——`check-build-chain-abort.mjs` 守「整链任一拒绝 = 非 0」。
-- **坑 95**：`/api` 前缀鉴权不覆盖 exact / 更长 prefix 路由——mobile-owned 路由必须自带 guard 并登记 `scripts/api-route-auth-policy.json`，未登记即拒构建。
-- **坑 96**：屏幕范围必须在执行点复查（ADB fallback 与直连控制队列都是绕开页面的执行面）——只改设置页 UI 或工具 schema 不算。
-
-## 4. 详档路由表（grep 形式查询）
-
-| 要查什么 | grep 建议 | 文档 |
+| 脚本 | 用途 | 参数约定 |
 |---|---|---|
-| 坑 N 详情/新坑登记 | `grep -n "^38\.\|^39\." docs/AGENTS/gotchas.md` 或按关键词（`borrowSession`/`store-rehome`/`MANAGE_EXTERNAL_STORAGE`/`run-as`/`overlay`） | docs/AGENTS/gotchas.md |
-| 某 .kt 文件职责/函数位置 | `grep -n "<文件名>.kt" docs/AGENTS/modules.md` | docs/AGENTS/modules.md |
-| 桥方法签名/通道语义 | `grep -n "<方法名>" docs/AGENTS/BRIDGE-API.md`；近期增量 grep `ScreenScope\|browserHost\|vdisplay\|BackGate` | docs/AGENTS/BRIDGE-API.md |
-| 构建失败/门禁/环境差异 | `grep -n "门禁\|WSL\|abi" docs/AGENTS/build-and-env.md` | docs/AGENTS/build-and-env.md |
-| 运行时补丁（assets/patched） | `grep -n "patched\|applyAssetPatch" docs/AGENTS/RUNTIME-PATCHES.md` | docs/AGENTS/RUNTIME-PATCHES.md |
-| 模块地图/依赖方向（.kt 现数用 ls 计） | `grep -n "模块\|依赖" docs/AGENTS/ARCHITECTURE.md` | docs/AGENTS/ARCHITECTURE.md |
-| android.* API 清单/守卫点 | `grep -n "API 等级\|android\." docs/AGENTS/ANDROID-API-USAGE.md` | docs/AGENTS/ANDROID-API-USAGE.md |
-| **无障碍 API/权限面全量参考** | `grep -n "CAPABILITY_\|takeScreenshot\|ACTION_SET_TEXT\|GLOBAL_ACTION" docs/AGENTS/ACCESSIBILITY-API.md` | docs/AGENTS/ACCESSIBILITY-API.md |
-| gradle 依赖与升级策略 | `grep -n "依赖\|升级" docs/AGENTS/DEPENDENCIES.md` | docs/AGENTS/DEPENDENCIES.md |
-| GPL 合规三形态 | `grep -n "copyright\|LICENSES" docs/AGENTS/gpl-compliance.md` | docs/AGENTS/gpl-compliance.md |
-| 待办与已知缺口 | `grep -n "F[0-9]\|未实现" docs/AGENTS/known-gaps.md` | docs/AGENTS/known-gaps.md |
-| 版本历史 | `grep -n "0.13.2" docs/AGENTS/changelog-archive.md` | docs/AGENTS/changelog-archive.md |
+| `verify-webview-015.mjs` | WebView / polyfill / 内联脚本 / 面板 | ws **positional**；`--wide` 横屏 |
+| `verify-state-sync.mjs` | 跨层状态同步真源用例集 | **不要传 `--ws`**（会禁用 target 重解析） |
+| `verify-browser-host.mjs` | 隔离浏览器视口/PC 身份 | ws **positional** |
+| `verify-vdisplay-viewer.mjs` | 虚拟屏 viewer 两阶段契约 | `--ws` |
+| `verify-browser-panel.mjs` / `verify-vdisplay-float.mjs` / `verify-engine-log-copy.mjs` | 面板/浮窗/日志 | 见脚本头注释 |
 
-## 5. 更新记录表（最近 3 条；完整历史 docs/AGENTS/changelog-archive.md）
+**CDP 调试**：`adb shell "cat /proc/net/unix | grep webview_devtools"` → `adb forward tcp:29225 localabstract:<socket>` → `ws://127.0.0.1:29225/devtools/page/<id>`。
 
-| 时间 | 版本 | 更新内容 | 更新者 |
-|---|---|---|---|
-| 2026-09-17 | **0.14.0 正式轮收尾：虚拟屏六项缺陷清底 + 浏览器多页签与会话隔离 + 双 ABI 打包（已设备复验，未发版）** |**虚拟屏**：SurfaceView 按**内容宽高比**等比适配并居中（内容 360x640 vs 舞台 434x682，此前直接撑满舞台 → 右侧 61 物理px 黑边）；可见性判据补「侧栏已收起」（修原生覆盖层强行遮盖聊天）；轮询同批 `publishBounds`（修「人不查看时状态不刷新，必须切状态栏才显示」）；**序号复用**（旧实现单调递增且从不回收，实测 `virtual-1→2→3`，上限 1 块时界面显示「虚拟屏 3」却切不回更早那块）；**按会话隔离**（资源全局唯一 + 归属只管呈现 + **销毁不设锁**——用户明确要求「别忘了给模型销毁权限，否则没人能关掉了」）；**空闲回收** `reclaimIdle()`（阈值 10min，vd op 入口 + 前台每 2min 扫描；此前零回收路径）；面板加**手动关机按钮**（与编号同排，用户要求）。**浏览器**：按会话隔离（每会话独立 Workspace，移除单向归属锁 `bindOwner`/`requireOwner`）；错误页状态不再被自身 about:blank 事件覆盖；`browser_open` 新页给冷启动预算；`ControlCarrier.BROWSER_OPS` 补全。**§4.2**：`actionMode`/`screenId` 透传 + 纯 Shizuku 坐标模式。**设备矩阵**：竖屏 16416 + 横屏 16384（真 1600x900）各四套件全绿。**双 ABI 打包**：arm64 159.8MB + x86_64 155.4MB，被拒 ABI 0。坑 111-124 登记（含「装机后必须等快照指纹翻转再跑设备套件」）。 | kelai141 |
-| 2026-09-15 | **0.14.0 正式轮续做：浏览器视口/PC 身份 + 虚拟屏露出真缺陷修复（已设备复验，未提交/未发版）** | **浏览器 `BrowserHost.kt`**：新增 `androidx.webkit:webkit:1.12.1`；`setInitialScale` 在 API 36 SDK stub 中不存在（javap 实证）→ 分辨率=CSS 视口改由 **document-start 注入 `width=<cssW>`**（`WebViewCompat.addDocumentStartJavaScript`）+ 物理矩形等比 letterbox 实现，`window.innerWidth` 精确等于请求值；PC 身份同脚本注入 `platform/maxTouchPoints/ontouchstart/screen.*`，UA-CH 走 `WebSettingsCompat` 能力门（WebView 110 degraded 如实上报）；document-start 脚本不可替换 → 身份/分辨率变化 `recycleView()` 重建（每实例只注册一次）。`verify-browser-host.mjs` 收紧为 `===±1` + PC 身份断言，**设备全绿**（390×843±1 / 1280×721±1）。**虚拟屏 `dsh-android-vdisplay` client**：`decodeNative` 裸调 Java 桥方法抛 `Java bridge method can't be invoked on a non-injected object` → 状态恒 blocked、自动露出恒不触发（真根因，更正上一轮「revealIfOpened no-op」判断）；改以桥对象为接收者调用后 `verify-vdisplay-viewer.mjs` **设备全绿**。`verify-webview-015` 竖 36/36。坑 108-110 登记。 | AI 开发助手 |
-| 2026-09-15 | **review 0.14.0 复核批（C1-C14）落地 + 双模拟器设备验收（未提交/未发版）** | **发布阻断**：F7 补丁收敛 v1 双占位形态（旧版本恒 EEXIST 恒 false，旧会话迁移永久失败）→ 快照重建 + `assets/patched` 从快照重出（attachment 47,321 B / SPJ 137,514 B，逐字节同源 + `--asset` 行为回归）；`attach-durable-F2` 扩为三件套（fsync 守卫 + 两处 link 回退 + ENOENT 容忍）与资产同源；`.gitattributes` 给 patched/*.js 加 `-text`。**启动/数据安全**：C4 profiles 备份原子化（先落 `.copying` 再原子 rename、终记 journal；回滚忽略残渣）、C13 `snapshotRefreshing` 改 CAS + 提交只认 SWAPPED、C8 profile 自愈限工厂 profile + 原子写 + 按 id 清 disabled、C5 诊断回退私有目录 + 实际路径文案 + 日志 5 代 + 死亡节流镜像、C9 userShutdown 持久化 + BootReceiver 尊重用户停机、C14 注释如实。**桥/路由**：`browserHostShow()` 补零参重载（WebView 桥按实参个数匹配，TS 可选参零参调用必炸——设备实锤）；公开状态路由加回环栅栏（bridge/vdisplay）+ mobile profile 禁 `client-hmr`。**设备验收（MuMu x86_64 双实例）**：快照指纹 `b7fda47a…` 两端翻转；verify-webview-015 竖屏 36/36、横屏（真横屏 1600×900）`--wide` 36/36；verify-browser-host 两端 PASS（隔离/视口字母箱/零参重开）；verify-state-sync 两端 10/10（脚本容忍偏好文件缺席）；C1 复验（老会话迁移正常、无 0 字节会话日志）；combo-cache 5 项（A3 hits=56 misses=0、cache 75 文件、暖启动 3.5–5.6s、N2 换树后新条目落盘、fail-open `state=absent misses=56` 引擎照常起）。**交还专员（未抢改）**：虚拟屏自动露出失效（`dsh-android-vdisplay/src/client/index.ts` 单次尝试 + 空 catch，create 后 stage 不挂载；手点侧栏可挂载）；核心仲裁语义已手动取证（select real 拒 / virtual 可选中 / destroy 后 display 消失）。坑 100-103 登记。 | AI 开发助手 |
-| 2026-09-15 | **0.14.0 正式版本轮（进行中，未提交/未验收）** | 规格 `docs/SPEC-0.14.0-ROUND-2026-09-15.md` 冻结（全部条目本轮完成，禁止延期）。**浏览器**：面板极简重写（地址+单按钮 / 分辨率+PC-手机切换 / 无其它控件）、分辨率=CSS 视口语义、滚动避让（原生 onScrollChanged + 200ms 轮询、到顶必现）、横屏锁定常驻、Edge 式错误页（标题+主机+ERR_*+刷新）、关闭即销毁（不恢复不持久化）、模型调用只导航不置可见、失败渲染兜底（ok:false 透 error/guidance）。**虚拟屏**：编号 1..N 壳侧分配持久化、上限 1 屏、档位缩放 0.5/0.75/1（densityDpi 同比）、随内容旋转 FLAG_ROTATES_WITH_CONTENT、只读浮窗（30%-50% 短边 / 角缩放 / 贴边内滑收起 / 叉=收起不销毁 / 退后台出现）、设置页强制销毁三连点、`android_vdisplay_create|destroy` 工具。**会话归属**：单实例 + ownerSessionId（呈现 / bounds / 模型调用三面 fail-closed，非归属结构化拒绝）。**设置页**：新「手机控制」分区（Shizuku 状态与引导 / 屏幕范围 / 虚拟屏档位 / 浮窗开关 / 无障碍入口 / 强制销毁），移除 ADB 面板。**双通道与 ADB 退役**：AIDL v2（execCapture 大输出落盘 + readChunk/writeChunk/removePath 分块，超时放宽 600s）、`shExec/shPull/shPush/shRemove` 特权 shell op 六面登记、引擎 `execAdbShell/execAdbLine` 经控制队列投递 + `translateAdbLine`（不做 adb 透传）、工具改名 `android_shell_exec`、**AdbState.kt 删除**（配对/NSD/端口发现/常驻 server 预热全下线）、appops 两处改 Shizuku shell、快照卸载 android-tools、caps.shizuku 实时上报（ControlCarrier 5s TTL）、状态登记 `shizuku-privileged-channel`。**修复**：启动页复制 engine.log 改当前代整文件（绝不拼 .1/.2）。坑 104-107 登记。验证：Kotlin compileDebugKotlin 绿；bridge 74/74、client 171/171；check-control-ops / check-bridge-symmetry / check-state-registry / check-api-route-auth / check-tool-output-schema / check-kotlin-comments 绿；四包 + scripts 镜像逐字节一致 | AI 开发助手 |
-| 2026-09-14 | **0.14.0-preview 已发布（vc38）；工作区续做 Shizuku/虚拟屏/BrowserHost（未提交）** | **发布内容**：缺陷收口（#204 ui_dump schema 族 + 行句柄 V2 / #205 来件五路由鉴权 / #206 句柄寻址 / #210 半死状态机 / #211 IO 三处 / #214 启动死屏）+ 门禁闭环（聚合入口、五处接线、SKIP=0）+ 特性（返回手势 BackGate / 通知分级与通知内应答 Notify* 六文件 / 外部文件草稿）；浏览器与虚拟屏为实验特性不接产品路径（壳侧 host 未落地）。**工作区续做（未提交/未验收，不得按完成对外描述）**：ShizukuTransport/ShizukuUserService（api+provider 13.1.5、AIDL v1、固定 argv、不向页面/引擎暴露原始 shell 面）、VdisplayController/VdisplayHost（PUBLIC\|OWN_CONTENT_ONLY\|SUPPORTS_TOUCH 建成、`input -d` 实测不回退真屏、viewer SurfaceView 待设备回归）、BrowserHost/BrowserHostNavigationPolicy（隔离第二 WebView、拒 loopback/file/content/data/javascript、视口预设 + letterbox rect）、ScreenScope（native prefs 真源 + 执行点复查，设置页在开发者选项「屏幕与 Shizuku 控制」）、#222 路由保护（`check-api-route-auth.mjs` + policy 锁登记面）。文档：坑 91-98、ARCHITECTURE/BRIDGE-API/modules 增 0.14 施工节。 | AI 开发助手 |
-| 2026-09-14 | **启动缓存审计 + 组合缓存/编译缓存补丁批（未提交/未验收）** | 审计（协调仓 `docs/HANDOFF-COMBO-CACHE-2026-09-14.md`）：快照指纹/`patchReload` 命中正常；`NODE_COMPILE_CACHE` 写盘自 09-12 冻结（Node 只在正常退出落盘 + 壳 3s 强杀截断上游 5s 排空 + 系统整进程回收）。**壳侧**：`EngineManager.killExistingEngine` SIGTERM 宽限 3s→6s。**补丁（镜像面）**：`perf-compile-cache-flush-N2`（bin.js 周期 flush 40s/5min+exit）、`combo-lazy-A4`（compose 延迟到首个图读者，启动期全表重算收敛为 1）、`combo-cache-A3`（sha256 查构建期 identity combo，fail-open+计数）；配套 `scripts/lib/combo-precompute.mjs`、`check-combo-cache.mjs` 覆盖门禁（两条链注入后调用）、`inject-all.py --combo-cache-delta`、`count-compose.mjs` 命中打印。文档：RUNTIME-PATCHES §7.1 登记、坑 99；设备验收待测试同学 | AI 开发助手 |
-| 2026-09-13 | **0.14.0 S0 #222 路由保护（进行中）** | `/api/undo` 长 prefix 补 U1（connection Host/Origin/browser-session；401 才可由壳实时 controlToken 补足；拒绝/成功 JSON `no-store`）+ marketplace exact U2（browser-session-only/no-store）；发现并修复 `android-linux-env` status/recipe exact 路由会泄漏 workspace/profile patch（桥统一 route auth，builder 前拒绝）。新增 `check-api-route-auth.mjs`/policy：扫描所有 mobile-owned route source、锁登记数/动态 path、受保护 guard 与窄公开白名单，接入两仓构建/CI/发布；桥、linux-env、file-open、browser 源/lib 同步，patch 行为回归与插件单测通过。MuMu 双实例整包回归通过（两端 3080 LISTEN/transaction clear；路由矩阵均 401/403/200；竖屏 WebView 36/36、横屏 DOM、ST-01/02/10/11/12 10/10）；坑 95、RUNTIME-PATCHES 同步。 | AI 开发助手 |
-| 2026-09-12 | **0.13.8-b 批 B2 制度性门禁 + 文档对账（进行中）** | **制度性防复发**：① 状态登记制（新建两份 `.github/PULL_REQUEST_TEMPLATE.md` 四栏：持有者/写路径/外部真源/同步路径 + 证据要求）与登记表 `scripts/state-registry.json`（8 条跨层状态，逐条带可核对的 evidence）；② 桥面对称性门禁 `scripts/check-bridge-symmetry.mjs` + 基线 `bridge-symmetry-baseline.json`（壳侧 35 个 `@JavascriptInterface`（AndroidBridge 34 + ST-10 新补 `getImmersiveMode`）与独立对象 `BackGateBridge` 2 个，vs 页面类型面 15 个成员；基线只许减少，新增不对称即拒）；③ 门禁覆盖清单化 + SKIP 纪律 `check-gate-skips.mjs`（12 项声明门禁接进五位置、两条链差集 = 0、发布链 `--run --require` 即 SKIP=0）；④ 性能 §7.2 度量入口 `scripts/perf/count-compose.mjs`（自检）+ `scripts/perf/measure-steady.ps1`（`/proc/net/tcp` LISTEN 口径，禁 adb forward 假阳性）+ `check-perf-instrumentation.mjs`（A1 出厂值 P-AC-01 + 壳侧缺口台账）；⑤ A1：出厂 profile seed `scripts/lib/profile-seed.mjs`（构建期写 `patchReload: startup`，dev 档 `DSH_PROFILE_PATCH_RELOAD=live`）+ 引擎树补丁 `perf-patch-reload-N1`（web 模板默认 + 存量升级归一化，P-AC-24）+ 行为回归。**两处真缺陷顺路修掉**：registry 里 `attach-durable-F2` 的 marker 带文档后缀导致资产/快照配对**静默 SKIP**（假绿，收紧后核对组合 2→3、SKIP=0）；check-runtime-assets 三处资产级 SKIP 与 check-patch-mirror 两处 SKIP 此前不计入总数（现全部计数）。**文档对账**：RUNTIME-PATCHES §2 字节数按实测改（旧记 138,991 失真 → 重出前实测 136,136 → **已重出 138,025**，与快照 tar 逐字节同源 sha `BDAEF25C…`，`check-runtime-assets --require` 组合 3/SKIP=0）、§7.1 补齐 F5 publish 站/F7/G1/G2/N1 并去掉 F6 重复登记、新增 §7.2 重出手册；AGENTS §1 「/api 全前缀鉴权」加 exact 路由例外（坑 78）、§3 改指针式；坑 72-86 登记（含 dev-notify 提供的通知渠道/RemoteInput/尾随 lambda/onReceive 预算四条）。设备侧 `scripts/verify-state-sync.mjs`（只改真源用例集 + `--self-test` 故意失败样本）落地，**模拟器实测 10/10 PASS**（ST-01/02/10/11/12 × on/off，收敛 205ms-2221ms）；⑦ 注入链双向对齐（**修剪**源码已删的陈旧成员 + **补齐**包内新增文件，三计数器 replaced/added/pruned）+ 产物级门禁 `scripts/check-inject-completeness.mjs`（成员集合 == 源包 + 相对导入可解析，正是 P0：包内新增文件曾丢、陈旧成员曾残留）+ Kotlin 嵌套块注释门禁 `scripts/check-kotlin-comments.mjs`（字符串感知 + 自检）；坑 87-89 登记；⑧ ST-16 scripts 半边：剥离清单后置断言 `scripts/check-strip-noop.mjs`（`--stage` 构建期 / tar 产物期 + `--base` 反 no-op + `--self-test` 两向自检）接入两条链与快照构建；发布链聚合入口新增 `SKIP=` 合计并在 `--require` 下要求 0 skip（实测「缺快照面 → SKIP=2 → 发布链红」）；坑 90 登记（RemoteInput 直回后 cancel 被系统忽略，需同 (tag,id) 重投再 cancel） | AI 开发助手 |
-| 2026-09-11 | **0.13.7fx-1 修订构建（vc36）** | **发布后 issue 修复批**：① **#154 会话迁移 link(2) 回退**（asset 从 0.1.5 包重出、两处站点都带 `EACCES/EPERM/ENOTSUP → rename`（用顶层 `rename`）+ 构建期补丁 `spj-migration-link-F5` + 回归 `scripts/patches/tests/spj-migration-link-f5.test.mjs`）；② **#160 上传选择器**（统一 SAF 文档选择器 + 显式 `["*/*"]`，删 `ACTION_PICK` 相册分支——此前空 MIME 数组让选择器落成「近期的图片」受限视图，无根目录抽屉、无媒体时「无任何文件」）；③ **#152-③ 打开配置文件**（注入层 `SettingsDocumentAction` 接管 + 壳桥 `settingsPath()` + `EngineManager.settingsDocumentPath()`，走系统选择器）；④ **#163 @ 菜单**（引擎树补丁 `reference-drill-F6`：移动形态下目录行点行体进子目录；注入层 `ReferenceMenuEnhancer`：每行勾选框 + 底部「添加」多选，一次触摸只动作一次）；⑤ #152-④ 浏览器访问经确认是上游鉴权收紧，不在范围（issue 说明）。文档：坑 66、RUNTIME-PATCHES §7.1/§8、BRIDGE-API（settingsPath）。**模拟器实测**：#154 老会话 v0→v3 迁移成功、#160 选择器出现根目录抽屉并成功附加 `alpha.txt`、#163 目录行保持菜单打开（下钻签名）、`verify-webview-015` 28/28 | AI 开发助手 |
-| 2026-09-11 | **0.13.7fx-1（vc35）** | **@ 文件回上游原生 + 移动端输入/几何修正批**：① 退役注入的 composer 菜单项「引用本机文件」（`data-dsh-file-pick`）与整条 `pickFilePath`/`onFilePicked` 桥（dsh-host-web-compat **0.1.13**：lib 删注入 IIFE 与 `insertFileMention`；壳删 AndroidBridge 接口 + ConfigTransfer SAF 文档链，JS 接口 33→32）——上游 0.1.5 自带 `@` 引用菜单（ui-input-trigger + ui-reference），实测只列会话工作区内的文件（矩阵见坑 65）；② **引擎启动目录改 `files/home/.dsh/workspaces`**（`EngineManager.workspaceRootDir`）——Android 应用进程 cwd 是 `/`，未分组会话因此把设备根目录当工作区，`@` 列出 acct/apex/cache…（apk #150/#144 的复现根因）；③ **修复 0.1.5 起失效的 Enter 守卫**（dsh-client-ui-responsive **0.2.1**）：`[data-composer-card] textarea` 在 Lexical contenteditable 上恒不命中，手机换行键变回发送；改为识别两种编辑宿主，contenteditable 走改发 Shift+Enter（上游 keymap 的原生换行路径）；④ 退役空转的 `web-frontend-index.html` 运行时补丁（实测与引擎自带 `dist/index.html` 逐字相同，且其 hashAdaptive 追不上新 hash 形态，坑 64；删 asset + 注册行 + `adaptIndexHashes`）；⑤ 合入贡献者 PR #157（xuanxuan9929）：抽屉底部安全区 `padding-bottom: max(env(safe-area-inset-bottom, 0px), var(--dsh-android-system-bottom, 0px))`（apk #153），并回写权威源 + 重建 lib 产物；⑥ 文档：RUNTIME-PATCHES §8、BRIDGE-API、坑 64/65 | AI 开发助手 |
-| 2026-09-10 | **0.13.7（已发布，vc34，Release 15 资产）** | **追上游 dsh 0.1.5-rc.1（UI 基线 + 移动适配层）**：ui-responsive 0.2.0 去 fork（不再注册 root 槽；新增 phone form / 顶栏抽屉开关 / 原生「打开方式」入口与 open-with 标签类型）；host-web-compat **0.1.12**（退役「上传图片」「导出调试日志」与自己遮蔽上游附件按钮的 CSS，新增 __dshOpenPath；**修 polyfill 装配语法缺陷**——POLYFILLS 用 join('') 拼接，Set 片段 `})()` 撞下一段 `if (` 让整个 script 被解析器拒绝、polyfill 全灭（表现为上游包 `Iterator is not defined` → Failed to load plugins），HTML 里文本仍在所以 grep 全绿；防线 = 装配补分号 + apply() 装载期 new Function 断言 + `scripts/smoke-injections.mjs` 门禁，坑 61）；壳侧新增 PathOpen.kt（系统选择器：MT 管理器 / 系统文件管理）+ 桥 openPathChooser（删 downloadDebugLogs/pickImage，JS 接口 34→33）+ 删 DebugLogExporter.kt；engine-overlay 升 0.1.5-rc.1（265 包，新增 UI 底座与会话格式/LSP/E2B 包 + node-addon-system）；profile patch 不再禁用 ui-layout（坑 58）并关掉 open-in-app/ui-open-in-app；**引擎树补丁**：退役 pi-drift-F1（上游 0.1.5 原生 strict/deferred 校验）、新增 flock-android-F3（node-addon-system 无 Android 预编译 → 按上游 browser-worker 先例 stub 立即成功）、新增 atomic-stale-lock-F4（孤儿写锁回收：pid 已消失 + 二次核验才删，坑 62；行为回归 `scripts/patches/tests/atomic-stale-lock.test.mjs`）；设备侧 WebView 断言脚本 `scripts/verify-webview-015.mjs`（含 polyfill 活性与内联脚本可解析）；**模拟器验收已通过**（MuMu x86_64：全门禁绿 + 快照指纹 12329ed4→81654b6a 事务化刷新；`scripts/verify-webview-015.mjs` 26/26 ALL PASS；`verify-engine-tree` 13/13；打开方式桥对工作区与外部存储均 `{ok:true}` 且拉起选择器，应用私有区仍 `not-allowed`）；**追加 UI 清理（用户当场指出）**：退役 dsh-attachment-formats（重复的「添加附件」）、vendor 补丁 undo-E8 把快照徽章折叠成小绿点；360x780 度量覆盖下无横向溢出、模型选择器由上游自动折叠；verify-webview-015 仍 26/26。清单与未决项见协调仓 docs/UPSTREAM-0.1.5-ADAPT-2026-09-10.md §3.2.1/§4.3 | AI 开发助手 |
-| 2026-09-10 | 0.13.6 | **v0.13.6 发布收官（vc33，Release 15 资产）**：全量认证通过（全门禁 + 双 ABI 纯净构建 + 快照资产一致性双 PASS arm64 `e85e8980`/x86_64 `4fe3a85e` + 单测 85/30/5 + smoke PASS）；x86 双形态设备回归（竖屏 16416：`android_web_dump` 106 节点 / `android_screenshot` 内联回图 / `android_env_prepare`；横屏 16384：布局+门禁行为）；真机 V2425A 链路验证通过后发版；新增坑 55-57 与认证台账 | AI 开发助手 |
-| 2026-09-10 | 0.13.5+ | **UI 畸变与无障碍体验修复批（未发版）**：#135 壳侧补 top inset 通道（`webSystemTopInset` → `--dsh-android-system-top`；实测状态栏 48px/24CSS、topbar 61→85、设置页 nav y=12→24）+ 注入层弹出面板几何守卫（卡片/滚动容器同宽、水平钳制、高度上限；360px 视口 shift=14px 标签完整）；#127 无障碍截屏改写 `files/home/tmp/dsh-tmp`（引擎 TMPDIR 同源）+ LRU 兜底，工具层一次性内联回图并删文件；#129 新增 `state` op（代次+失效标记，不建树）供点击生效校验 + 回填真实坐标；#133 完成事件丢弃该会话 pending + 自动收起（`auto_collapse_on_done`，有草稿不收）；#134 能力插件方言门（跨厂商 thinkingFormat 非统一即跳过 reasoningEfforts）；#130 dump/tree 描述改「首选/兜底」；镜像 ui-responsive 0.1.14 + manage/bridge/model-capability 0.2.1；坑 49-54 登记；详见协调仓 `docs/UI-A11Y-FIX-2026-09-10.md` | AI 开发助手 |
-| 2026-09-10 | 0.13.5 | **v0.13.5 发布收官（vc32，Release 15 资产）**：双 ABI 纯净构建（arm64 158.23MB / x86_64 155.55MB）+ 快照资产一致性门禁双 PASS + 全门禁绿（overlay 271 断言 / 挂载集 / 权限模式 51822 文件 / 第三方 / elf / 机密）+ gradle 双 BUILD SUCCESSFUL；release 15 资产（双 APK + 双快照 xz+sha256 + 8 插件 tgz 含新增 dsh-model-capability + MANIFEST.txt；notes 只做 release body）；**设备验收（模拟器 16416）**：无障碍 dump 字段完整（类型/resource-id/完整 bounds/父子层级/可见性/包名窗口号，未截断）→ click 成功 → 无障碍截屏成功；G1 实证（假插件 pending 时引擎照常启动，日志 `boot continues (dsh-mobile boot tolerance (G1))`）；**残余问题开 issue：#127 截屏落私有目录引擎读不到 / #128 WebView 无障碍树过浅 / #129 点击无生效校验**；issue 对账：关 #124/#125/#126（各附根因与复验指引）；**arm64 真机复验未完成**（升级安装 Success，刷新途中 USB 掉线；事务化刷新理论安全，复验步骤见 release notes） | AI 开发助手 |
-| 2026-09-10 | 0.13.5 | **无障碍控制通道 v1 + 双通道授权面重构（用户当场指出的设计缺口）**：① `DeviceControlService.kt`（新，无障碍服务：树快照路径 id/attrs 与 uiautomator XML 同构、click/setText/scroll/global/**screenshot**、令牌与状态）+ `ControlPoller.kt`（新，引擎队列长轮询：空闲 5s/有活即时，轮询即心跳）+ `res/xml/accessibility_service_config.xml`（`canRetrieveWindowContent`/`canPerformGestures`/**`canTakeScreenshot`**）+ manifest 声明；② **门禁重构**：`gateFor` 改为「无障碍在线 **或** ADB 三道人门」等价、无障碍优先（此前 ADB 门先行导致 a11y 通道永远不可达——坑 47），后端由 `ControlPolicy.decideControl` 选择；③ **授权面重构**：设置页「设备控制授权」无障碍为主入口（官方 Intent 跳系统设置 + Android 13 受限设置一键解锁 `appops ACCESS_RESTRICTED_SETTINGS`），ADB 折叠为高级/脚本面；桥新增 `a11yStatus/openA11ySettings/unlockRestrictedSettings`；④ **僵尸 a11yEnabled 修复**：引擎侧判定叠加队列轮询心跳（坑 46）；⑤ 无障碍截屏（API 30+ `takeScreenshot`）落地——截图不再依赖 ADB；⑥ `docs/AGENTS/ACCESSIBILITY-API.md`（新）无障碍 API/权限面全量参考（SDK api-versions.xml 抽取）；⑦ #126 P1 兜底：`EngineManager.snapshotSettingsBackup()` 换树前 settings 三世代备份；⑧ 引擎侧配套（协调仓）：`boot-pending-G1`/`pi-toolcall-G2` 补丁、`dsh-model-capability` 0.2.0（UI 全流程回归 PASS）、构建提速（WSL 内原生执行 172s vs ~29min） | AI 开发助手 |
-| 2026-09-08 | 0.13.3 | **v0.13.3 正式发布收官**：双 ABI 纯净构建（`-Suffix "" -ExportSnapshots`，arm64 158.17MB / x86_64 155.27MB）+ 快照资产一致性门禁双 PASS（arm64 cb27e9c1 / x86_64 773eb631，与 APK 内嵌同源）+ 全门禁绿（overlay 269 断言 / 挂载集 10/10 / 权限模式 51805+51687 文件 / 第三方 / elf / 机密）+ gradle 双 BUILD SUCCESSFUL；release 14 资产（双 APK + 双快照 xz+sha256 + 7 插件 tgz + MANIFEST.txt；**notes.md 只做 release body，不再作为资产上传**）；draft 转正式（tag v0.13.3 落 main，prerelease=false）；设备复验 release x86_64 包 PASS（指纹翻转 773eb631、暂存→交换→提交全链、零残留、settings md5 与 sessions 不变、绝对 applet 链接在场、引擎 `dsh web:` 起来）；issue 对账：关 #122/#123（各附根因与改动清单 + 复验指引），开 #125（自定义提供商能力发现跟踪），#124 回复保持开放（上游流式累加器，待复现数据） | AI 开发助手 |
-| 2026-09-08 | 0.13.3 | **运行时替换事务化 + 解压面两处实锤修复（接续 HANDOVER-0.13.3-ISSUES-PERF）**：① `SnapshotTransaction.kt`（新）——`refreshSnapshot` 改为「暂存解压 → 原子交换 → 指纹提交」，标记 `.snapshot-transaction`（STAGED/SWAPPING/SWAPPED + moved 记账）；**用户数据从不移动/复制/删除**（旧 backup/restore 语义退役，`.dsh-backup` 仅作 ≤0.13.2 遗留一次性补写）；`recoverInterruptedRefresh()` 每次启动解析中断事务（前滚/回滚/丢弃）；② `SnapshotFs.kt`（新）NOFOLLOW 原语；③ `SnapshotExtractor` 新增 `runtimeRoot` 参数——放行指向 `files/usr/...` 的绝对符号链接（坑 45，否则暂存解压静默丢 9 条 applet 链），Termux 残留/`../` 逃逸仍拒；④ 权限归一化改在 `inject-all.py` 重打包层（坑 44：WSL 9p chmod 无效）；⑤ 看门狗 ProbeState/UndoGate 单飞/onDestroy 不杀引擎/engine.log 尾部读取（前轮未提交改动）；⑥ 单测 16 项（事务 9 + 解压策略 1 + 用户数据 5 + 文件模式 1）；manage 0.1.3（ui-tree 祖先回退修公开 id/原路径混用，3 项回归） | AI 开发助手 |
-| 2026-09-06 | 0.13.3 | **0.13.3 开发批落地（W1-W10）**：壳侧 EngineAuth（P0/P1）/MuxClient remote.mux/setTextZoom 退役/vc30；构建链 overlay+抽验门禁+pi-drift-F1+model-sync；ui-responsive 0.1.13（store-rehome 适配：client-store 内联 + slots-augment + RUNTIME_STORE_EXEMPTION 退役——rc.1 loader module table 不再应答 client-runtime require 的 boot 硬阻断修复）；host-web-compat 0.1.9（withResolvers + 引用文件按钮）；运行时补丁重出（SPJ/ATT rename 回退）与退役（fs-local/primitives）；AI 实测 read 工作目录外文件 PASS | AI 开发助手 |
+**热重载（仅 JS 插件，不含 Kotlin）**：`node scripts/hot-push.mjs --serial <s> --plugin <dir> [--pkg ...] [--restart]`。
+
+---
+
+## 3. 去哪查（按需 grep，别通读）
+
+| 要查什么 | 去哪 |
+|---|---|
+| **坑位（历史实锤，权威）** | `docs/AGENTS/gotchas.md`（递增编号，允许空缺；grep 关键词） |
+| 模块职责 / 函数位置 | `docs/AGENTS/modules.md` |
+| 架构 / 依赖方向 | `docs/AGENTS/ARCHITECTURE.md` |
+| 桥方法签名 / 通道语义 | `docs/AGENTS/BRIDGE-API.md` |
+| 无障碍 API 与权限面 | `docs/AGENTS/ACCESSIBILITY-API.md` |
+| 构建失败 / 门禁 / WSL 环境 | `docs/AGENTS/build-and-env.md` |
+| 运行时补丁（`assets/patched`） | `docs/AGENTS/RUNTIME-PATCHES.md` |
+| gradle 依赖与升级 | `docs/AGENTS/DEPENDENCIES.md` |
+| GPL 合规三形态 | `docs/AGENTS/gpl-compliance.md` |
+| 已知缺口 / 待办 | `docs/AGENTS/known-gaps.md` |
+| **版本历史（全量）** | `docs/AGENTS/changelog-archive.md` |
+
+---
+
+## 4. 铁律（违反即返工）
+
+1. **需求不延期**：有明确需求且未获准延后，本轮必须完成。技术阻塞只能给替代实现 + 记真因，不得以「实验特性 / 下版本」降级。
+2. **模拟器优先**：本地构建 → **MuMu x86_64 实测** → 才谈 PR。禁止以「等真机」推迟模拟器实测，也禁止把模拟器实测挂在 PR 之后。真机是发布前补充门禁。
+3. **批量改、统一验**：成组改动一次改完，再做一次构建 + 打包 + 装机 + 回归。中途只跑廉价检查（Kotlin 单测、静态门禁）。安全敏感项（快照事务 / 签名 / 门禁自身 / 桥协议面）例外，即时验。
+4. **一切改动走 PR**：建分支 → 提交（`<type>: <描述>`）→ 推分支 → 开 PR（1-3 标签）→ CI 绿 → 合并 → 删分支。**禁止直接 push `main`**。例外仅限不改仓库内容的外部动作（Release 资产、issue 评论与开关、标签）。
+5. **子仓镜像（幽灵缺陷防线）**：改 `dsh-client-ui-responsive` / `dsh-host-web-compat` / `dsh-shell-termux` / `plugins/dsh-android-*` 的源码或 bump 版本后，**必须 robocopy 镜像到本仓同名目录**（src + package.json + **`lib/` 产物**）。漏了 → 云端自包含构建注入旧副本，**编译通过但功能缺失**。
+   - 只同步**镜像清单内的文件**，切勿对 `scripts/` 等目录整体 `/MIR`——会删掉本仓独有的设备脚本（真实事故）。
+6. **补丁镜像面**：`scripts/patches/**`、`scripts/check-patch-mirror.mjs`、`scripts/build-apk-013.ps1` 等是协调仓的**逐字节镜像**，单边演进即拒。补丁改动**先合本仓镜像 PR，再合协调仓权威源 PR**。
+7. **禁 emoji**：提交信息、PR 标题/描述、文档、标签一律不用。
+
+---
+
+## 5. 更新协议（改完代码必须做，否则文档失真）
+
+> **核心原则：AGENTS.md 只是地图，不承载细节。** 任何细节写进 §5.2 的对应详档。
+> 本文件**不设更新记录表**——所有版本记录进 `docs/AGENTS/changelog-archive.md`。
+
+### 5.1 按改动类型对号入座
+
+| 你改了什么 | 必须更新 | 位置 |
+|---|---|---|
+| **任何**代码/行为改动 | 坑位（若踩过坑或修了坑） | `docs/AGENTS/gotchas.md` **文末追加**，编号递增（允许空缺，**不得重编号**） |
+| 版本发布 / 里程碑 | 更新记录（一行摘要，**倒序加在最上方**） | `docs/AGENTS/changelog-archive.md` |
+| 新增/删除 `.kt` 文件，或函数职责变化 | 模块地图 | `docs/AGENTS/modules.md` |
+| 模块边界、依赖方向变化 | 架构 | `docs/AGENTS/ARCHITECTURE.md` |
+| 新增/改签名桥方法、通道语义变化 | 桥协议 | `docs/AGENTS/BRIDGE-API.md`（**同步跑** `scripts/check-bridge-symmetry.mjs`） |
+| 无障碍 API 用法、权限面变化 | 无障碍参考 | `docs/AGENTS/ACCESSIBILITY-API.md` |
+| 构建链、门禁、WSL 环境差异 | 构建与环境 | `docs/AGENTS/build-and-env.md` + `docs/AGENTS/gotchas.md` |
+| 改 `scripts/patches/**` 或 `assets/patched` | 运行时补丁 | `docs/AGENTS/RUNTIME-PATCHES.md` §7.1 登记 + §2 字节数按实测更新 |
+| gradle 依赖增删/升级 | 依赖台账 | `docs/AGENTS/DEPENDENCIES.md` |
+| 发现未实现 / 有意留下的缺口 | 已知缺口 | `docs/AGENTS/known-gaps.md` |
+| **本文件 §1-§4 的描述失真** | 就地改**对应行** | 只改那一行，**不要新增章节、不要加历史** |
+
+### 5.2 写作纪律
+
+- **细节不下放 §1-§4**：一行能说清就一行；说不清 → 写进详档，本文件只放**指针**。
+- **坑位写「为什么」不只写「怎么做」**：现象 → 真因 → 修法 → 复验证据。无真因的条目等于没写。
+- **同一事实只写一处**：其余地方用链接/路径指向它。重复即漂移源。
+- **数字不写死**：坑位总数、门禁项数、文件数一律用命令现数（`grep -c '^[0-9]\+\. \*\*' docs/AGENTS/gotchas.md`、`node scripts/check-release-gates.mjs --list`）。
+- **改了要跑**：文档改动本身不需要构建；但涉及门禁/桥面/补丁改动时，对应的 `check-*.mjs` 必须跑过再提交。
+
+### 5.3 门禁（哪些是自动挡）
+
+`scripts/check-release-gates.mjs` 是聚合入口（`--list` 现数）。关键几条与文档直接相关：
+
+| 门禁 | 守什么 |
+|---|---|
+| `check-bridge-symmetry.mjs` | 桥面对称性（改桥方法必跑） |
+| `check-api-route-auth.mjs` | 新增 `/api` 路由必须自带鉴权并登记 policy |
+| `check-control-ops.mjs` | 控制 op 六面登记一致（新增 op 必须六处同改） |
+| `check-kotlin-comments.mjs` | Kotlin 嵌套块注释 |
+| `check-plugin-tests.mjs` | 每个插件的单测真实跑通（全 skip 判假绿） |
+| `check-tool-surface-budget.mjs` | 模型面 wire 预算（新增工具会撞；近义工具优先复用既有 + 参数） |
+| `check-patch-mirror.mjs` | 双仓镜像逐字节一致 |
+
+---
+
+## 6. 高频雷点（只有三条，全量见 §3 坑位表）
+
+1. **ABI**：debug 包内嵌快照决定 ABI；x86_64 快照装 arm64 真机**必崩**。真机只用 `-arm64.apk`。
+2. **快照刷新**：唯一完成标志 = `.snapshot-fingerprint` **翻转** + `.snapshot-transaction` **消失**。刷新期间（8-12 分钟）**禁 force-stop/杀进程**，且**不得跑设备套件**（会是假失败）。
+3. **`Select -First N` 会杀掉长任务子进程**——构建/长脚本必须全量重定向日志，不能用 `Select -First`。

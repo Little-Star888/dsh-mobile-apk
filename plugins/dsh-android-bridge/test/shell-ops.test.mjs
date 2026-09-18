@@ -1,6 +1,33 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { SHELL_OPS, translateAdbLine } from '../lib/shell-ops.js'
+import { condenseRepeatedText } from '../lib/index.js'
+
+test('condenseRepeatedText 折叠重复行并标注次数（0.14.0 报错风暴）', () => {
+  // 设备实录形态：Termux 的 am 包装脚本 unset LD_LIBRARY_PATH/LD_PRELOAD，之后每条 Termux 二进制
+  // 都以链接失败收场，同一句重复 40+ 次且互相交错，回执 25 KB 全是乱码。
+  const storm = Array.from({ length: 40 }, () => 'CANNOT LINK EXECUTABLE "grep": library "libandroid-support.so" not found').join('\n')
+  const out = condenseRepeatedText(storm)
+  assert.equal(out.split('\n').length, 1, '同一句应折叠成一行')
+  assert.match(out, /同句重复 40 次/)
+  assert.ok(out.length < 200, '回执长度必须压回可读范围')
+})
+
+test('condenseRepeatedText 保留不同行与空行结构', () => {
+  const text = 'AAA\nBBB\nBBB\nCCC'
+  assert.equal(condenseRepeatedText(text), 'AAA\nBBB   （同句重复 2 次）\nCCC')
+  assert.equal(condenseRepeatedText(''), '')
+})
+
+test('condenseRepeatedText 超长时保留首尾并标注省略量', () => {
+  const many = Array.from({ length: 900 }, (_, i) => 'line-' + i).join('\n')
+  const out = condenseRepeatedText(many, 100)
+  const lines = out.split('\n')
+  assert.equal(lines.length, 101, 'head 50 + 省略标记 + tail 50')
+  assert.match(out, /中间省略/)
+  assert.match(lines[0], /^line-0$/)
+  assert.match(lines[lines.length - 1], /^line-899$/)
+})
 
 test('shell op family is the four privileged shell ops (neverA11y)', () => {
   assert.deepEqual([...SHELL_OPS], ['shExec', 'shPull', 'shPush', 'shRemove'])

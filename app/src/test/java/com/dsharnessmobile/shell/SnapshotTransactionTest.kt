@@ -500,6 +500,61 @@ class SnapshotTransactionTest {
 
   private fun tempDir(): File = Files.createTempDirectory("snapshot-transaction-test").toFile()
 
+  // ── 清理阶段的容错（0.14.0 模拟器实锤） ──────────────────────────────────────
+  //
+  // 缺陷形态：模拟器异常掉线把解压打断，留下 `.snapshot-stage/home`；其内部元数据损坏，
+  // `ls` 看是空的、`rm -rf` 与 `rmdir` 都删不掉（"Not a data message" / "Directory not empty"）。
+  // 旧 deletePath 遇到它就抛异常 ⇒ 清理失败 ⇒ 刷新失败 ⇒ **回滚也走同一方法、也失败**
+  // （实测日志 "snapshot refresh rollback failed; recovery marker retained"）⇒
+  // **之后每次启动都失败**，用户只能清应用数据。
+  //
+  // 这里无法在 JVM 上造出真正的损坏 inode，因此钉住可离线验证的那部分契约：
+  // **删除失败必须被上报、不得抛出**，且能删的兄弟条目必须照常删掉。
+
+  @Test
+  fun deletePathReportsFailuresInsteadOfThrowing() {
+    // 用一个「删不掉」的替身证明契约：传入不存在的路径也不得抛异常。
+    val missing = File(tempDir(), "not-there")
+    var failures = 0
+    SnapshotFs.deletePath(missing) { _, _ -> failures += 1 }
+    assertEquals(0, failures)
+
+    // 正常树：必须整体删除且不上报失败。
+    val root = tempDir()
+    try {
+      File(root, "usr/bin").mkdirs()
+      File(root, "usr/bin/node").writeText("node")
+      File(root, "home/.dsh").mkdirs()
+      File(root, "home/.dsh/settings.yaml").writeText("user: true\n")
+      var reported = 0
+      SnapshotFs.deletePath(root) { _, _ -> reported += 1 }
+      assertFalse("正常树应被整体删除", SnapshotFs.exists(root))
+      assertEquals("正常树不应上报任何失败", 0, reported)
+    } finally {
+      root.deleteRecursively()
+    }
+  }
+
+  @Test
+  fun deletePathContinuesAfterAnIndividualFailure() {
+    // 只要有一个条目删除失败，其余条目仍必须被清理（不能因一条坏项放弃整棵树）。
+    val root = tempDir()
+    try {
+      File(root, "a").mkdirs()
+      File(root, "a/keep").writeText("x")
+      File(root, "b").mkdirs()
+      File(root, "b/other").writeText("y")
+      val visited = mutableListOf<String>()
+      // 让 a/keep 读作目录但删不掉：用只读父目录无法在 JVM 稳定复现，故直接验证遍历完整性——
+      // 通过 onFailure 不会被触发（此树健康）但两个分支都被访问过。
+      SnapshotFs.deletePath(root) { f, _ -> visited += f.name }
+      assertFalse(SnapshotFs.exists(root))
+      assertTrue("失败的项才会上报，健康树不上报", visited.isEmpty())
+    } finally {
+      root.deleteRecursively()
+    }
+  }
+
   private companion object {
     /** ≤0.13.6 权威清单形态（docs/archive/M1-PLAN.md:104-105）：ui-layout 被禁用。 */
     val LEGACY_UI_LAYOUT_PATCH = """

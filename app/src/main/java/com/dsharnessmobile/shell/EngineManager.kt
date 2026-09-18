@@ -114,7 +114,32 @@ class EngineManager(private val context: Context, private val pickToken: String?
       }
 
       onStage("正在解压运行时…")
-      SnapshotFs.deletePath(stage)
+      // 清理上次残留。deletePath 现在逐项容错（见 SnapshotFs），但**删不掉的条目仍会挡住解压**：
+      // 0.14.0 模拟器实锤——解压中途掉线留下的 \`.snapshot-stage/home\` 内部元数据损坏，
+      // root 都删不掉（\`Not a data message\`），于是之后**每次启动都失败**，用户只能清应用数据。
+      //
+      // 因此清理后复查：仍有残留就把整个 stage **改名挪开**（改名只需动父目录项，不触碰坏子项，
+      // 因此比删除更容易成功），再用干净的固定名 stage 继续。挪开的孤儿目录留待后续启动清理，
+      // 它不再参与事务，也不会阻塞升级。
+      val discarded = mutableListOf<String>()
+      SnapshotFs.deletePath(stage) { f, ex -> discarded += (f.name + " (" + ex.javaClass.simpleName + ")") }
+      if (SnapshotFs.exists(stage)) {
+        val orphan = File(filesDir, ".snapshot-stage-orphan-" + startedAt)
+        val movedAside = try {
+          SnapshotFs.move(stage, orphan); true
+        } catch (t: Throwable) {
+          Log.w(TAG, "snapshot refresh: could not move residue stage aside", t); false
+        }
+        if (!movedAside) {
+          // 连改名都失败：如实报告并保留诊断，不再让后续每次启动都撞同一堵墙。
+          Log.e(TAG, "snapshot refresh aborted: unusable staging residue at " + stage.absolutePath
+            + " -> " + discarded.joinToString(", "))
+          onStage("上次更新的残留目录无法清理，请清应用数据后重试")
+          return false
+        }
+        Log.w(TAG, "snapshot refresh: residue stage moved aside to " + orphan.name
+          + " -> " + discarded.joinToString(", "))
+      }
       SnapshotFs.createDirectories(stage)
       if (!extractSnapshotTo(stage, onProgress)) {
         SnapshotFs.deletePath(stage)

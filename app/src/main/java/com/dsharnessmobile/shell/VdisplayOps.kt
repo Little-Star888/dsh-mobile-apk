@@ -24,6 +24,19 @@ internal object VdisplayOps {
       "vdLaunch" -> VdisplayController.launchSettingsProbe(context, args)
       "vdMoveTask" -> unsupported(op)
       "vdInfo" -> VdisplayController.status(context)
+      // 跨屏拉起（0.14.0 用户实报：android_app_launch 没有屏幕维度，虚拟屏里开不了应用）。
+      // 虚拟屏输入（0.14.0 用户实报：virtual-only 下「请改用坐标」指向一条不存在的路）。
+      "vdInput" -> VdisplayController.input(
+        context,
+        args.optString("verb", ""),
+        args,
+        args.optString("target", "").takeIf { it.isNotBlank() },
+      )
+      "vdLaunchApp" -> VdisplayController.launchApp(
+        context,
+        args.optString("pkg", ""),
+        args.optString("target", "").takeIf { it.isNotBlank() },
+      )
       else -> JSONObject()
         .put("__error", "未知虚拟屏操作 $op")
         .put("reason", "unknown-op")

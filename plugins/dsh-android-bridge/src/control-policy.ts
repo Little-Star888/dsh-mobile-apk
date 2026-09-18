@@ -43,7 +43,7 @@ export type ControlOp = 'snapshot' | 'click' | 'longClick' | 'setText' | 'scroll
   | 'browserCaps' | 'browserShow' | 'browserHide' | 'browserClose' | 'browserOpen' | 'browserJs'
   | 'browserInput' | 'browserShot' | 'browserState' | 'browserSetUa' | 'browserViewport'
   | 'browserTabs' | 'browserFollowTab' | 'browserCloseTab'
-  | 'vdCreate' | 'vdDestroy' | 'vdLaunch' | 'vdMoveTask' | 'vdInfo'
+  | 'vdCreate' | 'vdDestroy' | 'vdLaunch' | 'vdMoveTask' | 'vdInfo' | 'vdLaunchApp' | 'vdInput'
   | 'shExec' | 'shPull' | 'shPush' | 'shRemove'
 
 export interface ControlPolicyInput {

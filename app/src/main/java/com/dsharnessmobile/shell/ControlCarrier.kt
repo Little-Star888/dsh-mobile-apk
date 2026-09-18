@@ -32,7 +32,7 @@ internal object ControlCarrier {
     // 多页签（0.14.0）：AI 同时控制多个网页
     "browserTabs", "browserFollowTab", "browserCloseTab",
   )
-  private val VD_OPS = setOf("vdCreate", "vdDestroy", "vdLaunch", "vdMoveTask", "vdInfo")
+  private val VD_OPS = setOf("vdCreate", "vdDestroy", "vdLaunch", "vdMoveTask", "vdInfo", "vdLaunchApp", "vdInput")
   /** 特权 shell 通道（0.14.0 §6：替换内置 adb；同样 neverA11y）。 */
   private val SHELL_OPS = setOf("shExec", "shPull", "shPush", "shRemove")
 

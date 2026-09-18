@@ -26,7 +26,25 @@ function strictFace() {
   const calls = []
   const face = {
     controlQueue: {
-      enqueue: async (op) => ({ ok: true, data: { ok: true, state: 'active', displayId: 42, guidance: op + ' ok' } }),
+      // 载荷形状必须与壳侧 `VdisplayController.status()` **逐字段对齐**（`enabled`/`ops`/
+      // `transports`/`screens` 都在真回执里）。第一版夹具漏了 `enabled`，于是状态被判成
+      // `vdisplay-disabled`——那不是产品缺陷，是夹具不忠实；夹具不忠实会让回归测试变成噪声。
+      enqueue: async (op) => ({
+        ok: true,
+        data: {
+          ok: true,
+          enabled: true,
+          state: 'active',
+          displayId: 42,
+          ops: ['vdCreate', 'vdDestroy', 'vdLaunch', 'vdMoveTask', 'vdInfo'],
+          transports: ['shizuku'],
+          screens: [{
+            alias: 'virtual-1', displayId: 42, kind: 'virtual', label: '虚拟屏幕 1', state: 'on',
+            width: 360, height: 640, densityDpi: 160, selectable: true, reason: 'DSH 创建的虚拟屏，可作为查看器目标。',
+          }],
+          guidance: op + ' ok',
+        },
+      }),
     },
     async controlExec(op, args, timeoutMs) {
       // 与生产实现同构：先读 this.controlQueue。this 丢失时就是设备上那句真实报错。
@@ -166,4 +184,73 @@ test('资源全局唯一、归属只管呈现：幂等判断必须看「本机�
     /count \{ it\.owner == session \}/,
     '不得按会话过滤计数：那会把全局唯一资源当成每会话私有资源（第 2 个会话必撞上限）',
   )
+})
+// ── 0.14.0 真机实锤回归：状态与控制 op 必须同源（不得自相矛盾） ─────────────────
+
+test('状态必须走控制队列：只有 controlExec 的服务（引擎侧真实形状）不得报「桥面未接通」', async () => {
+  // 缺陷形态（真机实锤，用户复现）：同一次交互里
+  //   android_vdisplay_create → ok:true，displayId=25，state=active
+  //   android_vdisplay_status → ok:false，code=vdisplay-shell-not-wired
+  // 「有屏但没用处」，模型据此判定能力不可用而放弃整条路径。
+  //
+  // 真因：引擎侧 AndroidPrivilegeService **只暴露 controlExec**（create/destroy 都从这条路走通），
+  // 从来没有 vdisplayStatus 字段；而工具却去读 vdisplayStatus?.()，于是恒拿 undefined。
+  //
+  // 危害与「声称可用而实际不可用」等价：**声称不可用而实际可用**同样让模型做出错误决策。
+  const { face } = strictFace()
+  const tools = loadTools(face)
+  const status = tools.find((t) => t.name === 'android_vdisplay_status')
+  assert.ok(status, 'android_vdisplay_status 必须注册')
+  const value = await status.execute({}, { agent: { session: 't' } })
+  const text = JSON.stringify(value ?? {})
+  assert.doesNotMatch(text, /vdisplay-shell-not-wired/, '服务在场且 vdInfo 可用时不得报「桥面未接通」: ' + text)
+  assert.equal(value.ok, true, '控制队列可用时必须如实报可用: ' + text)
+  assert.equal(value.state, 'active', '必须透传壳侧 state: ' + text)
+  assert.equal(value.displayId, 42, '必须透传 displayId: ' + text)
+})
+
+test('状态工具同样不得出现服务方法接收者丢失（与 create/destroy 同一缺陷类）', async () => {
+  const { face} = strictFace()
+  const tools = loadTools(face)
+  const status = tools.find((t) => t.name === 'android_vdisplay_status')
+  const value = await status.execute({}, { agent: { session: 't' } })
+  const text = JSON.stringify(value ?? {})
+  assert.doesNotMatch(text, LOST_RECEIVER, '状态读取不得摘出方法裸调: ' + text)
+  assert.doesNotMatch(text, /is not a function/, text)
+})
+
+test('控制队列失败必须归因准确：读不到 ≠ 没落地（不得回退成「壳侧未接通」）', async () => {
+  // 「静默降级并且归因错误」是本轮两轮阻碍的共同主题：读不到就说「没落地」，
+  // 会让模型放弃一条其实可用的路径。失败必须区分「通路异常」与「能力缺席」。
+  const face = {
+    controlQueue: {},
+    async controlExec() { throw new TypeError('boom') },
+  }
+  const tools = loadTools(face)
+  const status = tools.find((t) => t.name === 'android_vdisplay_status')
+  const value = await status.execute({}, { agent: { session: 't' } })
+  assert.equal(value.ok, false)
+  assert.equal(value.code, 'vdisplay-control-exception')
+  assert.doesNotMatch(String(value.code), /not-wired/, '通路异常不得报成能力未落地')
+  assert.match(String(value.guidance), /create/, '指引必须提示可以试建屏复核，而不是让模型放弃')
+})
+
+test('控制队列回执 ok:false 时同样归因到通路（vdisplay-control-failed）', async () => {
+  const face = {
+    async controlExec() { return { ok: false, error: 'queue-timeout' } },
+  }
+  const tools = loadTools(face)
+  const status = tools.find((t) => t.name === 'android_vdisplay_status')
+  const value = await status.execute({}, { agent: { session: 't' } })
+  assert.equal(value.ok, false)
+  assert.equal(value.code, 'vdisplay-control-failed')
+  assert.match(String(value.guidance), /queue-timeout/, '必须把壳侧原因带出来')
+})
+
+test('真的没有任何来源时才报 vdisplay-shell-not-wired（保留「真未接通」语义）', async () => {
+  const tools = loadTools(undefined)
+  const status = tools.find((t) => t.name === 'android_vdisplay_status')
+  const value = await status.execute({}, { agent: { session: 't' } })
+  assert.equal(value.ok, false)
+  assert.equal(value.code, 'vdisplay-shell-not-wired')
 })

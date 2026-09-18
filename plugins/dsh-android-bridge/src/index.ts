@@ -396,6 +396,48 @@ function pickText(v: Record<string, unknown>, ...keys: string[]): string {
 }
 
 /**
+ * 折叠重复行（0.14.0 设备实锤）。
+ *
+ * 缺陷形态：`android_termux_channel_exec` 跑 Termux 的 `am` 包装脚本时，同一条 loader 报错
+ * 重复 40+ 次并**互相交错**，回执 25 KB 全是乱码：
+ *
+ *   CANNOT LINK EXECUTABLE "CANNOT LINK EXECUTABLE "grep": library ... not found
+ *   grep": library ... not found
+ *
+ * 真因（源码实证，非推断）：Termux 的 `$PREFIX/bin/am` 在 exec 前显式执行
+ *   `unset LD_LIBRARY_PATH LD_PRELOAD`
+ * 于是它之后派生的任何 Termux 二进制（`grep` 等）都丢了库搜索路径 → 每条都以链接失败收场。
+ * 这是 Termux 打包方的决定，**不是我们的环境注入有缺陷**（`printenv` 实测两项都在、`grep` 单跑正常）。
+ *
+ * 模型侧真正需要的结论只有一条：「这条命令失败了，原因是 X」。所以这里按行折叠，
+ * 相同行只留一次并标注次数，把 25 KB 压回可读长度。
+ */
+export function condenseRepeatedText(text: string, maxRuns = 400): string {
+  if (text.length === 0) return text
+  const lines = text.split('\n')
+  const out: string[] = []
+  let prev: string | null = null
+  let count = 0
+  const flush = (): void => {
+    if (prev === null) return
+    out.push(count === 1 ? prev : `${prev}   （同句重复 ${count} 次）`)
+    count = 0
+  }
+  for (const line of lines) {
+    if (line === prev) { count += 1; continue }
+    flush()
+    prev = line
+    count = 1
+  }
+  flush()
+  // 行数仍超上限时保留首尾：开头与结尾最能说明问题，中间是同一故障的重复。
+  if (out.length <= maxRuns) return out.join('\n')
+  const head = out.slice(0, Math.floor(maxRuns / 2))
+  const tail = out.slice(-Math.floor(maxRuns / 2))
+  return [...head, `   …（中间省略 ${out.length - maxRuns} 行同类输出）…`, ...tail].join('\n')
+}
+
+/**
  * 热补丁根修（2026-08-27 活体插桩实锤）：dsh-shell run() 契约返回收集输出结构体
  * `{text, truncated, spillPath?}`（引擎内置 bash 工具经 streamText(output).text 同款读取），
  * 历史代码误按字符串 String() 直取 —— 进程真实执行（审计恒 ok）、转录恒 "[object Object]"，
@@ -658,7 +700,9 @@ export class AndroidPrivilegeService {
         coordinate: true,
         actionMode: 'coordinate',
         screenId,
-        guidance: '改用坐标操作：android_screenshot（拿物理分辨率锚点）→ android_ui_click 传 nx/ny（0-1 归一化，相对物理屏）或对虚拟屏传 x/y + screenId。若确实需要语义树/ref 动作，请由用户在系统设置里开启「DSH 设备控制」无障碍服务。',
+        guidance: '改用坐标操作：① 真实屏 → android_screenshot 拿分辨率锚点，再 android_ui_click 传 nx/ny（0-1 归一化）；' +
+          '② 虚拟屏 → android_vdisplay_input（tap/swipe/keyevent/text，坐标基于该屏自身像素，经 input -d 注入，真实屏不受影响）。' +
+          '若确实需要语义树/ref 动作，请由用户在系统设置里开启「DSH 设备控制」无障碍服务。',
       }
     }
     // review C11 范围复查下沉到执行点：manage 工具层之外（其它插件/直连调用）不得绕过——
@@ -691,7 +735,9 @@ export class AndroidPrivilegeService {
       const r = await this.shellFace.run(spec)
       return {
         ok: true,
-        stdout: collectText((r as Record<string, unknown>).stdout) + collectText((r as Record<string, unknown>).stderr),
+        stdout: condenseRepeatedText(
+          collectText((r as Record<string, unknown>).stdout) + collectText((r as Record<string, unknown>).stderr),
+        ),
       }
     } catch (e) {
       return { ok: false, stdout: '执行失败：' + String((e as Error).message) }
@@ -747,13 +793,22 @@ export class AndroidPrivilegeService {
   }
 }
 
-/** 壳侧 sh\* 回执的失败文案：优先 guidance，其次 error，最后给出可执行的通用引导（不得只回「失败」）。 */
+/**
+ * 壳侧 sh\* 回执的失败文案：优先 guidance，其次 error，最后给出可执行的通用引导（不得只回「失败」）。
+ *
+ * 「正在建立」与「未就绪」**必须分开**（0.14.0 设备实锤）：前者是可以立刻重试的瞬时态，
+ * 后者才需要去设置页排查。此前两者共用「特权 shell 通道执行失败；请查看 Shizuku 状态」，
+ * 于是壳侧明明还在正常建连，模型却被告知通道有问题——设备会话里 agent 正是据此放弃了特权通道。
+ */
 function shellFailureText(data: Record<string, unknown>): string {
   const guidance = typeof data.guidance === 'string' && data.guidance.length > 0 ? data.guidance : ''
   if (guidance.length > 0) return guidance
   const error = typeof data.error === 'string' && data.error.length > 0 ? data.error : ''
   if (error.length > 0) return error
   const code = typeof data.code === 'string' ? data.code : ''
+  if (code === 'shizuku-user-service-connecting') {
+    return 'Shizuku shell 通道正在建立（瞬时态）：请直接重试同一命令，不要改道或去设置页排查。'
+  }
   return `特权 shell 通道执行失败${code.length > 0 ? `（${code}）` : ''}；请在设置页「手机控制」查看 Shizuku 状态与引导。`
 }
 
@@ -958,7 +1013,11 @@ function tools(svc: AndroidPrivilegeService, shellFace?: { resolve?(spec: Record
         const raw = { command, cwd: '/', env: {} }
         const spec = shellFace.resolve ? shellFace.resolve(raw) : raw
         const r = await shellFace.run(spec)
-        return { ok: true, stdout: collectText((r as Record<string, unknown>).stdout), stderr: collectText((r as { stderr?: unknown }).stderr) }
+        return {
+          ok: true,
+          stdout: condenseRepeatedText(collectText((r as Record<string, unknown>).stdout)),
+          stderr: condenseRepeatedText(collectText((r as { stderr?: unknown }).stderr)),
+        }
       } catch (e) {
         return { ok: false, text: '执行失败：' + String((e as Error).message) }
       }

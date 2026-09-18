@@ -80,8 +80,6 @@ type NativeVdisplayBridge = {
   vdisplayCreate?: () => string
   /** 可传 target 别名；缺省销毁当前选中/本会话自己的屏。 */
   vdisplayDestroy?: (target?: string) => string
-  vdisplayLaunchSettingsProbe?: () => string
-  vdisplayBackProbe?: () => string
   vdisplayBounds?: (bounds: string) => string
   vdisplaySelect?: (alias: string) => string
   /**
@@ -120,6 +118,53 @@ async function pullPanelState(): Promise<VdPanelState> {
 }
 
 /**
+ * 把「侧栏收起/展开、切标签页、面板被隐藏」变成**事件驱动**的即时可见性下发。
+ *
+ * 缺陷形态（用户 2026-09-17 实报）：侧栏收起后虚拟屏**还要挡一下、延迟一下**才消失。
+ *
+ * 真因：收起/切页签**不改变舞台几何**（上游只是把面板隐藏，组件在 DOM 里保活），
+ * 所以 `ResizeObserver` 与 `window.resize` 都不触发；旧实现唯一的兜底是 1s 轮询，
+ * 于是原生覆盖层的消失要等下一拍——用户感知到的就是那一下延迟。
+ *
+ * 这类「状态变了但没有任何几何事件」的缺口，靠**轮询兜底**永远只能做到「约一秒内正确」，
+ * 要做到「即时」只能去观察状态本身变化的事件源：DOM 结构/属性变化（收起控件增删、
+ * 面板 `data-sidebar-right-open` 摘除、style/class 改写）与页面可见性。
+ *
+ * 轮询保留（不删）：它是原生层重启后重新对齐的兜底，事件通道只是把延迟压到下一帧。
+ * @param publish - 可见性下发函数（幂等，可在同一帧内安全重复调用）。
+ * @returns 解绑函数。
+ */
+function watchStageVisibility(publish: () => void): () => void {
+  // rAF 合帧：MutationObserver 在整棵子树上是高频回调，必须收敛到每帧最多一次下发。
+  let queued = 0
+  const schedule = () => {
+    if (queued !== 0) return
+    queued = window.requestAnimationFrame(() => { queued = 0; publish() })
+  }
+  const observer = typeof MutationObserver === 'undefined'
+    ? null
+    : new MutationObserver(schedule)
+  try {
+    observer?.observe(document.body, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      // 只盯与可见性相关的属性，避免把每次文本重排都收进来。
+      attributeFilter: ['style', 'class', 'hidden', 'data-sidebar-right-open', 'data-sidebar-right-collapsed'],
+    })
+  } catch {
+    /* document.body 尚未就绪：轮询兜底仍然在 */
+  }
+  document.addEventListener('visibilitychange', schedule)
+  return () => {
+    if (queued !== 0) window.cancelAnimationFrame(queued)
+    queued = 0
+    observer?.disconnect()
+    document.removeEventListener('visibilitychange', schedule)
+  }
+}
+
+/**
  * Panel: 编号列表（选择查看哪块虚拟屏）+ 原生画面工位。
  * 空态「暂无虚拟屏」；占用态「由会话 X 使用中」（不渲染任何操作面）。
  */
@@ -152,7 +197,12 @@ function VdPanel(props: { sessionId?: unknown }): ReactElement {
         visible: !occupiedRef.current && !collapsed && !hidden && snap.state === 'active' &&
           rect.width > 1 && rect.height > 1,
         viewerId: VIEWER_ID,
-        target: snap.selected,
+        // 目标屏别名兜底（0.14.0 设备实锤）：`snap.selected` 在面板刚打开 / 状态未拉到 / 该屏刚被
+        // 销毁时为空，壳侧便会退回「按舞台宽高比」拉伸（用户报「自适应缩放不对」）。
+        // 内容宽高比只取决于「哪块屏存在」，故这里按 选中 → 唯一活跃屏 依次退化。
+        target: snap.selected ?? (snap.screens.filter((s) => s.kind === 'virtual').length === 1
+          ? snap.screens.find((s) => s.kind === 'virtual')?.alias
+          : undefined),
       }))
     } catch {
       /* old/desktop shells have no native viewer */
@@ -164,7 +214,10 @@ function VdPanel(props: { sessionId?: unknown }): ReactElement {
     const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(publishBounds)
     if (stageRef.current !== null) observer?.observe(stageRef.current)
     window.addEventListener('resize', publishBounds)
+    // 事件驱动的可见性下发（0.14.0 用户实报「收起后还要延迟一下才消失」的直接修复）。
+    const unwatch = watchStageVisibility(publishBounds)
     return () => {
+      unwatch()
       observer?.disconnect()
       window.removeEventListener('resize', publishBounds)
       try { nativeBridge()?.vdisplayBounds?.(JSON.stringify({ visible: false, viewerId: VIEWER_ID })) } catch { /* host gone */ }
@@ -188,12 +241,14 @@ function VdPanel(props: { sessionId?: unknown }): ReactElement {
     // 必须切换上方状态栏才显示」。
     //
     // 收起/展开只改可见性、不改舞台尺寸，ResizeObserver 不触发，所以必须由轮询兜底同批下发。
-    // 与浏览器侧 300ms 轮询同口径（那里也是 refresh + publishBounds 同批）。
+    // 与浏览器侧同口径（那里也是 refresh + publishBounds 同批，并同样有事件通道）。
     const pull = () => {
       void pullPanelState().then((s) => { if (alive) setSnap(s) })
       if (alive) publishBounds()
     }
     pull()
+    // 1s 轮询保留为**兜底对齐**（原生层重建、事件通道漏网时用）；即时性由上面的
+    // watchStageVisibility 事件通道负责，不再依赖这一拍。
     const timer = setInterval(pull, 1000)
     return () => { alive = false; clearInterval(timer) }
   }, [tick, publishBounds])

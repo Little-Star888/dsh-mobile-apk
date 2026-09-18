@@ -94,30 +94,26 @@ class W3ShellContractTest {
     assertTrue("新下载分支也必须走同一判定（旧实现只判 HTTP 200）", afterDownload.contains("artifactVerdict()"))
   }
 
-  // ── ST-12：wirelessDebugOn / connected 走轻量真源探测，且 TTL < 页面轮询 ──
-
+  // ── ST-12：已随内置 adb 退役**迁移**（0.14.0 §6）──
+  //
+  // 原两条断言直接读 `AdbState.kt` 的 `stateJson` / `WIRELESS_PROBE_TTL_MS`。该文件随内置 adb
+  // 一起删除（特权面改由 Shizuku 承载），于是它们必然失败——**测试没跟着代码退役**（存量假红）。
+  //
+  // 逻辑本身并未失去覆盖：真源探测原语被抽到 `LiveProbe.kt`，行为回归在同目录的
+  // `AdbLiveProbeTest.kt`（TTL 内复用 / 过期重探 / 失败不冒充实测成功 / TCP 探测区分端口，4 项全绿）。
+  // 因此这里只保留「退役事实」的守卫：**不得**再出现对已删除文件的引用，避免有人日后照旧写法回退。
   @Test
-  fun stateJsonProbesWirelessDebugLiveInsteadOfEchoingThePreference() {
-    val body = memberBody(codeOnly(source("AdbState.kt")), "fun stateJson(context: Context): String")
-    assertTrue("必须活体探测", body.contains("wirelessDebugLive(context)"))
-    assertTrue("wirelessDebugOn 用活体值", body.contains(".put(\"wirelessDebugOn\", wirelessOn)"))
-    assertFalse(
-      "旧实现（wirelessDebugOn = pair 偏好回读）必须消失——那正是「关掉无线调试后仍显示已授权」",
-      body.contains(".put(\"wirelessDebugOn\", pair)"),
+  fun st12LivesInLiveProbeAfterAdbRetirement() {
+    assertTrue(
+      "ST-12 应已迁移到 LiveProbe.kt（真源探测原语）",
+      File("src/main/java/com/dsharnessmobile/shell/LiveProbe.kt").isFile ||
+        File("app/src/main/java/com/dsharnessmobile/shell/LiveProbe.kt").isFile,
     )
-    assertTrue("connected 必须叠加活体可达", body.contains("connected(context) && wirelessOn"))
-    assertTrue("授权判定必须把活体无线调试算进去", body.contains("pair && wirelessOn"))
-  }
-
-  @Test
-  fun probeTtlStaysStrictlyBelowTheThreeSecondPagePoll() {
-    val code = codeOnly(source("AdbState.kt"))
-    val m = Regex("WIRELESS_PROBE_TTL_MS = ([0-9_]+)").find(code)
-      ?: throw AssertionError("找不到 WIRELESS_PROBE_TTL_MS 常量")
-    val ttl = m.groupValues[1].replace("_", "").toLong()
-    assertTrue("TTL 必须为正", ttl > 0)
-    assertTrue("TTL(" + ttl + "ms) 必须 < 判据阈值 3000ms（关掉无线调试后 ≤3s 降级）", ttl < 3_000L)
-    assertTrue("探测必须真连 TCP", code.contains("tcpProbe(\"127.0.0.1\", port, WIRELESS_PROBE_TIMEOUT_MS)"))
+    assertFalse(
+      "AdbState.kt 已删除：不得再有测试引用它",
+      java.io.File("src/main/java/com/dsharnessmobile/shell/AdbState.kt").exists() ||
+        java.io.File("app/src/main/java/com/dsharnessmobile/shell/AdbState.kt").exists(),
+    )
   }
 
   // ── ST-13：握手非 101 → 按状态码走鉴权刷新；refresh 不得缓存短路 ─────────────
@@ -237,10 +233,20 @@ class W3ShellContractTest {
     assertTrue("用户关停过则不自启（日志留痕）", code.contains("NOT started"))
   }
 
+  /**
+   * ST-22 已**随内置 adb 退役而终结**（0.14.0 §6）。
+   *
+   * 原断言针对 `AdbState.kt` 的两个 prefs 访问器（删除读口、保留写口）。该文件整体随内置 adb
+   * 删除，`KEY_FULLACCESS` 的读写通道不复存在，于是这条断言无从落地——**测试没跟着退役**。
+   * 保留它作「不得复活」的守卫：AdbState.kt 不得回归（否则等于把已退役的 adb 授权面偷偷加回来）。
+   */
   @Test
-  fun adbStateNoLongerDefinesTheUnusedPrefAccessor() {
-    assertFalse("ST-22：零调用者的门1 pref 读口必须删除", codeOnly(source("AdbState.kt")).contains("fun fullAccessPrefs"))
-    assertTrue("写侧（引擎 live 读）必须保留", codeOnly(source("AdbState.kt")).contains("fun syncFullAccess(context: Context)"))
+  fun adbStateStaysRetired() {
+    assertFalse(
+      "ST-22 终结：AdbState.kt 已随内置 adb 删除，不得复活",
+      File("src/main/java/com/dsharnessmobile/shell/AdbState.kt").exists() ||
+        File("app/src/main/java/com/dsharnessmobile/shell/AdbState.kt").exists(),
+    )
   }
 
 

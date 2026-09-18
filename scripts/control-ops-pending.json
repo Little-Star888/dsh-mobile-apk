@@ -65,7 +65,9 @@
         "vdDestroy",
         "vdLaunch",
         "vdMoveTask",
-        "vdInfo"
+        "vdInfo",
+        "vdLaunchApp",
+        "vdInput"
       ],
       "toolSurface": {
         "file": "plugins/dsh-android-vdisplay/src/index.ts",

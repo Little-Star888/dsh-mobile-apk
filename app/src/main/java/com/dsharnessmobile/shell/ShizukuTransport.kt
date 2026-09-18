@@ -23,7 +23,22 @@ object ShizukuTransport {
   private const val TAG = "dsh-shizuku"
   private const val REQUEST_CODE_VDISPLAY = 0xD514
   private const val USER_SERVICE_TAG = "dsh-mobile-vdisplay-v1"
+  /** 单次 latch 等待片（保持既有 4s 语义：到点先复用/汇报，不无限阻塞调用方）。 */
   private const val BIND_TIMEOUT_MS = 4_000L
+  /**
+   * 首次绑定允许等待的**总预算**（0.14.0 设备实锤修正）。
+   *
+   * 缺陷形态：`ensureBound()` 只 await 一片 4s 就返回，而 `Shizuku.bindUserService` 在真机/模拟器上
+   * 实测要 5s 量级才回调 `onServiceConnected`。于是**同一条命令第一次必然报「通道失败」、第二次必然成功**——
+   * 那不是「Shizuku 抖动」，是状态机时序的确定结果。设备会话实录里 agent 因此判定特权通道不可靠、
+   * 转投 Termux 通道，又撞上该通道的环境缺陷，两个缺陷串联把整条链路打崩。
+   *
+   * 现在在预算内循环等待：绑定完成即返回，超预算才如实汇报「正在建立」并给出可重试建议。
+   */
+  private const val BIND_TOTAL_MS = 15_000L
+
+  /** 「正在建立连接」的结构化 code（可重试语义，与「未绑定需排查」区分）。 */
+  private const val CONNECTING_CODE = "shizuku-user-service-connecting"
 
   private val lock = Any()
   @Volatile private var service: ShizukuUserService? = null
@@ -39,6 +54,9 @@ object ShizukuTransport {
       connectedAt = SystemClock.elapsedRealtime()
       lastError = if (binder.pingBinder()) "" else "shizuku-user-service-invalid-binder"
       bindLatch?.countDown()
+      // 连接已建立，latch 使命完成：清空以便断连后重建。留着它会让下一次 ensureBound 的
+      // await 立即返回、永远看不到新的等待窗口（本缺陷的根因形态）。
+      bindLatch = null
       Log.i(TAG, "user service connected ${name.className}")
     }
 
@@ -47,6 +65,9 @@ object ShizukuTransport {
       binding = false
       lastError = "shizuku-user-service-disconnected"
       bindLatch?.countDown()
+      // 断连后旧 latch 已经 countDown、语义作废；清掉它，下一次 ensureBound 才会新建并真正等待。
+      // 复用已放行的 latch 会让 await 立即返回 → 又变成「第一次必失败」，正是本缺陷的成因。
+      bindLatch = null
       Log.w(TAG, "user service disconnected ${name.className}")
     }
   }
@@ -145,24 +166,44 @@ object ShizukuTransport {
     }
     if (service?.asBinder()?.pingBinder() == true) return status(context)
 
-    val latch: CountDownLatch
-    synchronized(lock) {
-      if (service?.asBinder()?.pingBinder() == true) return status(context)
-      latch = bindLatch ?: CountDownLatch(1).also { bindLatch = it }
-      if (!binding) {
-        binding = true
-        lastError = "shizuku-user-service-connecting"
-        try {
-          Shizuku.bindUserService(args(context.applicationContext), connection)
-        } catch (t: Throwable) {
-          binding = false
-          lastError = "shizuku-user-service-bind-failed:${t.javaClass.simpleName}"
-          latch.countDown()
+    val deadline = SystemClock.elapsedRealtime() + BIND_TOTAL_MS
+    while (true) {
+      val latch: CountDownLatch
+      synchronized(lock) {
+        if (service?.asBinder()?.pingBinder() == true) return status(context)
+        latch = bindLatch ?: CountDownLatch(1).also { bindLatch = it }
+        if (!binding) {
+          binding = true
+          lastError = CONNECTING_CODE
+          try {
+            Shizuku.bindUserService(args(context.applicationContext), connection)
+          } catch (t: Throwable) {
+            binding = false
+            lastError = "shizuku-user-service-bind-failed:${t.javaClass.simpleName}"
+            // 发起就抛异常：latch 永不会因回调而放行，必须换新的，否则后续调用会永远复用一个死 latch。
+            bindLatch = null
+            latch.countDown()
+          }
         }
       }
+      if (service?.asBinder()?.pingBinder() == true) return status(context)
+      val remaining = deadline - SystemClock.elapsedRealtime()
+      if (remaining <= 0L) break
+      // 到点即复用当次结果，不把 4s 片拉长到整段预算——调用方的超时语义不变。
+      latch.await(minOf(BIND_TIMEOUT_MS, remaining), TimeUnit.MILLISECONDS)
+      if (service?.asBinder()?.pingBinder() == true) return status(context)
+      if (!binding) {
+        // 回调已发生但服务仍不可用（invalid-binder / disconnected）：不要继续等，如实汇报。
+        break
+      }
     }
-    latch.await(BIND_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-    return status(context)
+    // 预算耗尽且仍在连接中：给出「可重试」而不是「去设置页排查」。区分这两者是本缺陷的核心。
+    return if (binding) {
+      status(context).put("code", CONNECTING_CODE).put("retryAfterMs", BIND_TIMEOUT_MS)
+        .put("guidance", "Shizuku shell 通道正在建立（通常几秒内完成）；请稍候直接重试同一命令，无需去设置页排查。")
+    } else {
+      status(context)
+    }
   }
 
   /** Native-only fixed argv execution. Never pass user/model-controlled shell text here. */

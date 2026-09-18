@@ -21,9 +21,9 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { readVdSnapshot, VD_STATUS_PATH, type VdOp, type VdisplayFace } from './status.js'
+import { readVdToolSnapshot, readVdSnapshot, VD_STATUS_PATH, type VdOp, type VdisplayFace } from './status.js'
 
-export { VD_OPS, VD_STATUS_PATH, mapStatusPayload, readVdSnapshot } from './status.js'
+export { VD_OPS, VD_STATUS_PATH, mapStatusPayload, readVdSnapshot, readVdToolSnapshot, snapshotFromRaw } from './status.js'
 export type { VdOp, VdPanelState, VdSnapshot, VdState, VdStatusPayload, VdisplayFace } from './status.js'
 
 export const name = '@dsh-android/dsh-android-vdisplay'
@@ -140,7 +140,20 @@ export function apply(ctx: Context): void {
       render: (_args, v: Record<string, unknown>) => [{ type: 'text', text: String(v.guidance ?? '') }],
     },
     execute: async () => {
-      const snap = readVdSnapshot(faceOf())
+      // 状态必须走**与控制 op 同一条通路**（0.14.0 真机实锤缺陷）。
+      //
+      // 缺陷形态：`android_vdisplay_create` 成功（displayId=25/state=active），同一时刻
+      // `android_vdisplay_status` 报「虚拟屏桥面尚未接通」。真因不是壳侧没落地，而是两条通路
+      // 形状不同——create 走 controlExec（引擎侧 androidPrivilege 只暴露这一个面），
+      // status 却去读 `vdisplayStatus?.()`，而**该字段在引擎侧服务上从未存在**。
+      // 于是 status 恒拿 undefined → 恒报 blocked/vdisplay-shell-not-wired。
+      //
+      // 后果（用户实测）：模型看到「有屏但没用处」，据此判定能力不可用而放弃整条路径。
+      // **声称不可用而实际可用**，与「声称可用而实际不可用」危害相同——都会让模型做出错误决策。
+      //
+      // 修法：`readVdToolSnapshot` 优先走控制队列 vdInfo（与 create/destroy 同源），
+      // 拿不到才回退桥面；失败时的 code/guidance 必须**归因准确**（读不到 ≠ 没落地）。
+      const snap = await readVdToolSnapshot(faceOf())
       return { ...snap, text: snap.ok ? snap.guidance : '虚拟屏不可用：' + snap.code + '。' + snap.guidance }
     },
   }))
@@ -160,7 +173,7 @@ export function apply(ctx: Context): void {
    * AI 自主建屏：把 vd* 生命周期 op 经控制队列投递给壳侧（neverA11y 的壳桥 op 借队列投递）。
    * 失败一律结构化（ok:false + 稳定 code/guidance），从不静默，也不在工具层猜测壳侧状态。
    */
-  const callVdOp = async (op: VdOp, timeoutMs: number, session?: string): Promise<Record<string, unknown>> => {
+  const callVdOp = async (op: VdOp, timeoutMs: number, session?: string, extra?: Record<string, unknown>): Promise<Record<string, unknown>> => {
     // **必须以服务对象为接收者调用**（0.14.0 设备实锤：Agent 全工具扫描揪出）。
     //
     // 错误写法（曾存在）：先 const controlExec = faceOf()?.controlExec，再 controlExec(op, ...)。
@@ -180,7 +193,9 @@ export function apply(ctx: Context): void {
       }
     }
     try {
-      const reply = await service.controlExec(op, session === undefined ? {} : { session }, timeoutMs)
+      const payload: Record<string, unknown> = { ...(extra ?? {}) }
+      if (session !== undefined) payload.session = session
+      const reply = await service.controlExec(op, payload, timeoutMs)
       if (reply === null || typeof reply !== 'object' || reply.ok !== true) {
         const message = typeof reply?.error === 'string' && reply.error !== ''
           ? reply.error
@@ -202,6 +217,7 @@ export function apply(ctx: Context): void {
         state: typeof data.state === 'string' && data.state !== '' ? data.state : 'ready',
       }
       if (typeof data.displayId === 'number') out.displayId = data.displayId
+      if (typeof data.screenId === 'string' && data.screenId !== '') out.screenId = data.screenId
       return out
     } catch (e) {
       return { ok: false, code: 'vdisplay-control-exception', guidance: '控制通道异常：' + String((e as Error).message) }
@@ -251,6 +267,17 @@ export function apply(ctx: Context): void {
     output: lifecycleOutput('虚拟屏销毁') as never,
     execute: async (_args: unknown, exec: unknown) => callVdOp('vdDestroy', 30_000, sessionOf(exec)) as never,
   }))
+  // **本插件不新增模型面工具**（0.14.0 工具面 wire 预算门禁的硬约束，且此处本就不该有）。
+  //
+  // 虚拟屏的两个新执行面（壳侧 vdLaunchApp / vdInput）不在工具面另开近义工具，原因有两条：
+  //   1. **预算**：新增两个工具实测 +1.7KB wire，直接越过 2% 阈值（47 个工具已是上限附近）；
+  //   2. **模型体验**：模型已经熟悉 `android_app_launch`（拉起应用）与 `android_ui_click`（点击），
+  //      再暴露近义的 vdisplay 版本会让它在同义工具间反复试探。
+  //
+  // 正确落法 = **复用既有工具、用 screenId 选屏**（两个执行面已接好）：
+  //   android_app_launch { pkg, screenId: 'virtual-N' } → 壳侧 vdLaunchApp
+  //   android_ui_click    { x, y, screenId: 'virtual-N' } → 壳侧 vdInput tap
+  // 能力可达、工具面零增长、模型调用习惯不变。
 
   // 右侧栏面板的数据源（只读；与工具面同源）。webServer 服务缺席时只告警：面板会走
   // "状态源不可达 → blocked"，不影响引擎启动，也不假装可用。
@@ -283,7 +310,8 @@ export function apply(ctx: Context): void {
         res.end('')
         return
       }
-      sendJson(res, 200, readVdSnapshot(faceOf()))
+      // 与控制 op 同源（readVdToolSnapshot 的说明）：控制队列 vdInfo 优先，桥面兜底。
+      sendJson(res, 200, await readVdToolSnapshot(faceOf()))
     },
   })
 }

@@ -70,6 +70,41 @@ const SNAPSHOT_NODE_SCHEMA = {
   },
 }
 
+/**
+ * 把节点列表渲染成**模型可直接使用的行**（每行一个 ref），而不是只报总数。
+ *
+ * 缺陷形态（用户 2026-09-17 实报）：`browser_snapshot` 的返回值里 `nodes` 明明带着 `ref`，
+ * 但 render 只输出「快照 N 个可交互节点」——**模型看不到任何 ref，于是 browser_click/
+ * browser_type 根本无从下手**。工具「声称可用」（schema 有 nodes）却「关键信息不可达」，
+ * 这正是本轮两轮阻碍的共同主题：能力声明与可用通道不一致。
+ *
+ * 行格式（紧凑、按预算截断，逐行一个可点目标）：
+ *   bx12 button "登录" [in-view]
+ * 名称里的换行/引号做转义，避免一行被拆成两行后误读。
+ * @param nodes - 快照节点数组（形状不可信，逐字段收窄）。
+ * @param budget - 最多渲染的行数（超出如实注明省略数量，不静默截断）。
+ * @returns 多行文本；无节点时给明确空态说明。
+ */
+function renderSnapshotNodes(nodes: unknown[], budget = 120): string {
+  if (nodes.length === 0) {
+    return '（本页没有可交互节点——可能是纯文本页、页面尚未加载完，或内容在 iframe 内。）'
+  }
+  const lines: string[] = []
+  for (const raw of nodes.slice(0, budget)) {
+    if (raw === null || typeof raw !== 'object') continue
+    const node = raw as Record<string, unknown>
+    const ref = typeof node.ref === 'string' ? node.ref : ''
+    const role = typeof node.role === 'string' && node.role !== '' ? node.role : 'node'
+    const name = typeof node.name === 'string' ? node.name.replace(/\\s+/g, ' ').trim() : ''
+    const flags = node.inView === false ? ' [off-screen]' : ''
+    const disabled = node.disabled === true ? ' [disabled]' : ''
+    const label = name === '' ? '' : ' "' + name.replace(/"/g, "'").slice(0, 80) + '"'
+    lines.push((ref === '' ? '(no-ref) ' : ref + ' ') + role + label + flags + disabled)
+  }
+  if (nodes.length > budget) lines.push('…（还有 ' + String(nodes.length - budget) + ' 个节点未列出）')
+  return lines.join('\n')
+}
+
 export function browserTools(face: () => BrowserControlFace | undefined): unknown[] {
   /** 会话键：控制 op 一律带归属会话，壳侧据此做单实例归属校验（0.14.0）。 */
   const sessionScope = new AsyncLocalStorage<string>()
@@ -233,6 +268,14 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
         let appliedViewport: string | undefined
         if (typeof viewport === 'string' && viewport !== '') {
           const preset = VIEWPORT_PRESETS.find((p) => p.id === viewport)
+          // 未知预设必须**回报可用取值**（用户实报：只报 unknown-viewport，模型无从得知有哪些档，
+          // 只能靠猜——猜不到就放弃整条路径）。与 browser_set_viewport 的错误形状保持一致。
+          if (preset === undefined && viewport !== 'follow-screen' && viewport !== 'device') {
+            return {
+              ok: false, error: 'unknown-viewport',
+              guidance: '可用视口：' + VIEWPORT_PRESETS.map((p) => p.id).join(', ') + '（device/follow-screen = 跟随工位）。',
+            } as never
+          }
           const result = await call(BROWSER_OPS.viewport, { preset: viewport, route: 'S2', width: preset?.width ?? 0, height: preset?.height ?? 0 }, 8_000)
           if (!result.ok) return denied(result) as never
           appliedViewport = viewport
@@ -240,7 +283,12 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
         let appliedIdentity: string | undefined
         if (typeof identity === 'string' && identity !== '') {
           const profile = IDENTITY_PROFILES.find((p) => p.id === identity)
-          if (profile === undefined) return { ok: false, error: 'unknown-identity' } as never
+          if (profile === undefined) {
+            return {
+              ok: false, error: 'unknown-identity',
+              guidance: '可用身份：' + IDENTITY_PROFILES.map((p) => p.id).join(', ') + '。',
+            } as never
+          }
           const result = await call(BROWSER_OPS.setUa, { profile: profile.id, ua: profile.ua, platform: profile.platform, mobile: profile.mobile }, 8_000)
           if (!result.ok) return denied(result) as never
           appliedIdentity = profile.id
@@ -286,9 +334,25 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
         }),
         render: (_args, v: Record<string, unknown>) => {
           const nodes = Array.isArray(v.nodes) ? v.nodes : []
-          return [
+          // 必须把 ref 行显式渲染出来（用户实报：只报计数时 click/type 完全不可用）。
+          const blocks: Array<{ type: 'text'; text: string }> = [
             { type: 'text', text: '快照 ' + String(nodes.length) + ' 个可交互节点（' + String(v.url) + '，代次 ' + String(v.pageGeneration) + '）' },
+            { type: 'text', text: renderSnapshotNodes(nodes) },
           ]
+          // 节点极少时给出**可执行的**下一步（0.14.0 模拟器实锤）。
+          //
+          // 现象：移动档下打开 B 站（m.bilibili.com），snapshot 只回 1-2 个节点，search 框之外什么都拿不到，
+          // 于是 browser_click 无从下手，模型反复 snapshot/wait 直到放弃。
+          // 真因**不是**选择器太窄（实测该站 1339 个元素里 cursor:pointer 为 0，内容是 JS 委托的非语义 div），
+          // 而是站点按 UA 返回了非语义的移动版页面。换桌面身份档后同一 URL 直接给 135 个可交互节点。
+          // 这个「换档」是模型自己推不出来的（它只看到「这页没元素」），必须在返回里点明。
+          if (nodes.length <= 3) {
+            blocks.push({ type: 'text', text:
+              '可交互节点过少（' + String(nodes.length) + ' 个）：该站很可能按 UA 返回了非语义的移动版页面（内容用非语义 div + JS 事件委托，快照取不到）。'
+              + '建议先 browser_set_identity { profile: "linux-desktop" } 再 browser_navigate 同一地址——实测同一页面可交互节点会从 1-2 个升到上百个。'
+              + '若仍不足，用 browser_get_text 读正文或 browser_screenshot 看画面。' })
+          }
+          return blocks
         },
       },
       execute: async (_args, exec) => {
@@ -449,7 +513,14 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
           text: { type: 'string' },
           truncated: { type: 'boolean' },
         }),
-        render: (_args, v: Record<string, unknown>) => [{ type: 'text', text: String(v.text).slice(0, 4000) }],
+        render: (_args, v: Record<string, unknown>) => {
+          const text = String(v.text ?? '')
+          if (text !== '') return [{ type: 'text', text: text.slice(0, 4000) }]
+          // 空文本时不能再输出空字符串：模型看到空正文会以为「工具没返回」而放弃，
+          // 而真实原因通常是「页面还没加载完 / 正文在 iframe 内 / 取错了区域」。
+          return [{ type: 'text', text: '（页面可见文本为空。可能原因：页面尚未加载完、正文在 iframe 内，或 region 落点没有文本；'
+            + '可先用 browser_snapshot 看可交互节点，或用 browser_wait 等页面稳定后重试。）' }]
+        },
       },
       execute: async ({ region }: { region?: { x?: number; y?: number; w?: number; h?: number } }, exec) => {
         const session = gate(exec)

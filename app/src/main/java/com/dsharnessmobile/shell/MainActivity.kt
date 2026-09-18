@@ -647,8 +647,6 @@ class MainActivity : ComponentActivity() {
         onVdisplayStatus = { VdisplayController.status(this).toString() },
         onVdisplayCreate = { VdisplayController.create(this).toString() },
         onVdisplayDestroy = { VdisplayController.destroy(this).toString() },
-        onVdisplayLaunchSettingsProbe = { VdisplayController.launchSettingsProbe(this).toString() },
-        onVdisplayBackProbe = { VdisplayController.sendBackProbe(this).toString() },
         onVdisplayBounds = { bounds -> vdisplayHost.setStageBounds(bounds) },
         onVdisplaySelect = { alias -> VdisplayController.select(this, alias).toString() },
         onGetVdisplayScale = { VdisplayPrefs.scale(this) },

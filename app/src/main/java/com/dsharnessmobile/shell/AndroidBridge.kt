@@ -66,8 +66,6 @@ class AndroidBridge(
   private val onVdisplayStatus: () -> String = { """{"ok":false,"code":"vdisplay-not-wired"}""" },
   private val onVdisplayCreate: () -> String = { """{"ok":false,"code":"vdisplay-not-wired"}""" },
   private val onVdisplayDestroy: () -> String = { """{"ok":false,"code":"vdisplay-not-wired"}""" },
-  private val onVdisplayLaunchSettingsProbe: () -> String = { """{"ok":false,"code":"vdisplay-not-wired"}""" },
-  private val onVdisplayBackProbe: () -> String = { """{"ok":false,"code":"vdisplay-not-wired"}""" },
   private val onVdisplayBounds: (String) -> String = { _ -> """{"ok":false,"code":"vdisplay-not-wired"}""" },
   /** Controller-owned presentation target selection for the realtime screen registry. */
   private val onVdisplaySelect: (String) -> String = { _ -> """{"ok":false,"code":"vdisplay-not-wired"}""" },
@@ -296,14 +294,6 @@ class AndroidBridge(
 
   @JavascriptInterface
   fun vdisplayDestroy(): String = onVdisplayDestroy()
-
-  /** Fixed Android Settings launch used only to prove a shell-routed third-party launch. */
-  @JavascriptInterface
-  fun vdisplayLaunchSettingsProbe(): String = onVdisplayLaunchSettingsProbe()
-
-  /** Fixed display-scoped back key used only to prove Shizuku input routing. */
-  @JavascriptInterface
-  fun vdisplayBackProbe(): String = onVdisplayBackProbe()
 
   /** Trusted virtual-screen viewer geometry from the Files-sidebar stage. */
   @JavascriptInterface

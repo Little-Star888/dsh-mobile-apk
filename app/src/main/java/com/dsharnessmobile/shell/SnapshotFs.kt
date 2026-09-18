@@ -22,17 +22,42 @@ internal object SnapshotFs {
   /** True when [file] is a symbolic link, dangling or not. */
   fun isSymbolicLink(file: File): Boolean = Files.isSymbolicLink(file.toPath())
 
-  /** Deletes a file, directory or link without following links. */
-  fun deletePath(path: File) {
+  /**
+   * Deletes a file, directory or link without following links.
+   *
+   * 逐项容错（0.14.0 模拟器实锤）：**一个删不掉的条目曾让整个快照刷新永久卡死**。
+   * 现象：模拟器异常掉线时解压中断，留下 `.snapshot-stage/home`；该目录的内部元数据损坏，
+   * `ls` 看是空的、`rm -rf` 与 `rmdir` 都删不掉（\`Not a data message\` ／ \`Directory not empty\`）。
+   * 而本方法是 refreshSnapshot 的第一步（清理上次残留），它一抛异常就：
+   *   ① 本次刷新失败；② 回滚也走同一方法 → **回滚同样失败**（实测日志：
+   *   \`snapshot refresh rollback failed; recovery marker retained\`）；
+   *   ③ 残留永远存在 ⇒ **之后每次启动都失败**，用户只能清应用数据。
+   *
+   * 因此这里不能「遇到坏条目就整体失败」：能删的必须删掉，删不掉的**如实记下并继续**，
+   * 由调用方决定是否致命。清理阶段的残余不影响后续解压到干净的 staging 目录——
+   * 反过来，因一个残余就让整条升级链永久瘫痪，是远比残留更严重的问题。
+   *
+   * @param onFailure 单条删除失败时的回调（收集诊断用）；不抛异常。
+   */
+  fun deletePath(path: File, onFailure: (File, Exception) -> Unit = { _, _ -> }) {
     val nioPath = path.toPath()
-    if (!Files.exists(nioPath, NOFOLLOW_LINKS)) return
-    val attrs = Files.readAttributes(nioPath, BasicFileAttributes::class.java, NOFOLLOW_LINKS)
-    if (attrs.isDirectory) {
-      Files.list(nioPath).use { children ->
-        children.forEach { deletePath(it.toFile()) }
+    try {
+      if (!Files.exists(nioPath, NOFOLLOW_LINKS)) return
+      val attrs = Files.readAttributes(nioPath, BasicFileAttributes::class.java, NOFOLLOW_LINKS)
+      if (attrs.isDirectory) {
+        // 目录项本身读取失败（元数据损坏）也要能继续：记下并跳过，不要让它中断整棵树。
+        val children = try {
+          Files.list(nioPath).use { stream -> stream.toList() }
+        } catch (e: Exception) {
+          onFailure(path, e)
+          return
+        }
+        for (child in children) deletePath(child.toFile(), onFailure)
       }
+      Files.deleteIfExists(nioPath)
+    } catch (e: Exception) {
+      onFailure(path, e)
     }
-    Files.deleteIfExists(nioPath)
   }
 
   /** Rename within one filesystem; falls back to a plain move when ATOMIC_MOVE is unsupported. */

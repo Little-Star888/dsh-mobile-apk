@@ -164,11 +164,33 @@ internal class BrowserHost(
     return created
   }
 
-  /** 切到某会话的工作台（不发可见性变更；可见性由该会话的 bounds 下推决定）。 */
+  /**
+   * 切到某会话的工作台（不发可见性变更；可见性由该会话的 bounds 下推决定）。
+   *
+   * **必须在主线程执行**（0.14.0 真机闪退实锤）
+   * ------------------------------------------------
+   * `applyStageBounds()` 会写 `view.layoutParams`、`applyVisibility()` 会写 `view.visibility`——
+   * 都是 View 方法，只能在 UI 线程调用。而本函数有两个调用方：
+   *   1. `setStageBounds`（本就在 onMain 里）——安全；
+   *   2. `controlOp`（**运行在控制队列线程**，见其 KDoc）——直接调用会抛
+   *      `java.lang.IllegalStateException: Calling View methods on another thread than the UI thread`，
+   *      进程闪退（真机实测 21:40 连续两次）。
+   *
+   * 修法：把「切换当前工作台」与「按新工作台重排 View」分离——前者是纯状态赋值（任何线程安全），
+   * 后者统一走主线程。这样两种调用方都对，且不依赖调用方自觉。
+   */
   private fun switchTo(workspace: Workspace) {
     currentWorkspace = workspace
-    applyStageBounds()
-    applyVisibility()
+    if (Looper.myLooper() == Looper.getMainLooper()) {
+      applyStageBounds()
+      applyVisibility()
+    } else {
+      // 非 UI 线程：投递到主线程重排（不阻塞控制队列；几何/可见性稍后生效即可）。
+      main.post {
+        applyStageBounds()
+        applyVisibility()
+      }
+    }
   }
 
   /**
@@ -240,6 +262,15 @@ internal class BrowserHost(
   private var stageBounds: StageBounds?
     get() = currentWorkspace?.stageBounds
     set(value) { currentWorkspace?.stageBounds = value }
+  /**
+   * 最近一次**可见舞台**的物理像素尺寸（宽, 高）。
+   *
+   * 用途：舞台被收起（`bounds.visible=false`）时，仍要按这个尺寸给 WebView 排版，
+   * 否则页面布局盒塌成 0×0（`innerWidth/innerHeight = 0`），模型侧 snapshot/click 全线失效。
+   * 「收起」只是不显示，不是「页面不存在」。
+   */
+  @Volatile
+  private var lastStageSize: Pair<Int, Int>? = null
   /** Device viewport is default; named presets letterbox inside the trusted stage without transforms. */
   private var requestedViewport: RequestedViewport? = null
   private var lastError = ""
@@ -632,7 +663,24 @@ internal class BrowserHost(
       bounds.width <= 1.0 || bounds.height <= 1.0 || root.width <= 0 || root.height <= 0 ||
       dshWebView.width <= 0 || dshWebView.height <= 0
     ) {
+      // **没有可用舞台 ≠ 页面可以不排版**（0.14.0 模拟器实锤的严重缺陷）。
+      //
+      // 缺陷形态：侧栏收起时前端把 bounds.visible 置 false，本函数原来直接 return——WebView 保持
+      // 上一次的尺寸甚至 GONE，于是**页面自身布局盒变成 0×0**：
+      //   document.body.getBoundingClientRect() → width=1100 height=0
+      //   window.innerWidth/innerHeight          → 0 / 0
+      //   window.visualViewport                  → 0×0
+      // 后果不是「画面不好看」，而是**模型侧读页面全线残废**：真实站点（B 站）191 个可交互元素里
+      // 绝大多数被 `r.width < 1 || r.height < 1` 判掉，browser_snapshot 只回 1 个节点，
+      // browser_click/browser_type 因此无从下手。实测 7 次 snapshot 全部拿不到搜索框。
+      //
+      // 语义依据（用户口径）：UI 是给用户看的，**AI 的工作面必须独立于 UI 是否可见**。
+      // 人把侧栏收起来，不该让 AI 的浏览器瞎掉。
+      //
+      // 修法：舞台不可见时，仍按**上一次已知的舞台尺寸**（或该档位 CSS 视口）给 WebView 一个
+      // 非退化的排版尺寸，只把「绘制」关掉（INVISIBLE）——页面继续有真实布局盒，原生层不再覆盖 UI。
       stageVisible = false
+      layoutDetached()
       applyVisibility()
       return
     }
@@ -662,6 +710,8 @@ internal class BrowserHost(
     val height = if (desired == null) stageHeight else Math.round(pageCssHeight * factor).toInt()
     val positionedLeft = left + (stageWidth - width) / 2
     val positionedTop = top + (stageHeight - height) / 2
+    // 记下这块「用户刚见过」的舞台尺寸，供收起态排版兜底（见 lastStageSize 说明）。
+    lastStageSize = width.coerceAtLeast(1) to height.coerceAtLeast(1)
     view?.layoutParams = FrameLayout.LayoutParams(width.coerceAtLeast(1), height.coerceAtLeast(1)).apply {
       leftMargin = positionedLeft
       topMargin = positionedTop
@@ -696,9 +746,45 @@ internal class BrowserHost(
     for (workspace in workspaces.values) {
       val visible = workspace === current && workspace.requestedVisible && workspace.stageVisible
       for (tab in workspace.tabs.values) {
-        tab.view?.visibility = if (visible) View.VISIBLE else View.GONE
+        // **INVISIBLE 而不是 GONE**（0.14.0 模拟器实锤）：
+        // GONE 的 View 不参与布局 → WebView 内页面拿不到布局盒（innerWidth/innerHeight = 0），
+        // 模型侧的 snapshot/click/type 全部失效；INVISIBLE **保留布局**、只是不绘制。
+        // 两者对用户的观感完全一致（都不会盖在聊天界面上），但对 AI 的可读性是「全有 vs 全无」。
+        tab.view?.visibility = if (visible) View.VISIBLE else View.INVISIBLE
       }
     }
+  }
+
+  /**
+   * 舞台不可见时给当前工作台的 WebView 一个**非退化的排版尺寸**，保证页面布局盒真实存在。
+   *
+   * 尺寸取值优先级：① 上一次已知的舞台尺寸（用户刚见过的那块，最贴合其预期）；
+   * ② 该会话请求的分辨率档（若设过）；③ 兜底用原生 WebView 自身的可用宽高。
+   * 这是「后台工作面」的物理矩形，与「可见舞台」解耦——它不进 UI，也不参与点击坐标换算
+   * （后者始终由阶段 bounds 下推的真实舞台决定）。
+   */
+  private fun layoutDetached() {
+    val browser = view ?: return
+    // 尺寸优先级（越靠前越贴合「用户/AI 预期的那块画布」）：
+    //   ① 用户刚见过的舞台尺寸；② 显式请求的分辨率档（browser_set_viewport 的物理像素）；
+    //   ③ 主 UI WebView 的可用尺寸（= 手机可用视口，最合理的通用兜底）；④ 640x960 常量兜底。
+    //
+    // **为什么必须有兜底**（0.14.0 模拟器实锤的 P0）：WebView 建页时是按
+    // `root.addView(created, FrameLayout.LayoutParams(1, 1))` 挂上去的，只有
+    // `applyStageBounds()` 走到「舞台可见」那一支才会被改成真实矩形。模型在**用户侧栏收起**时
+    // 调 browser_open（这是常态——AI 干活时人未必看着），舞台永远不可见 → 页面停在 1×1 →
+    // `window.innerWidth/innerHeight = 0`、`document.documentElement` 矩形 0×0，
+    // 于是真实站点里 `getBoundingClientRect()` 全为 0，browser_snapshot 只回 1 个节点，
+    // browser_click/type 无从下手。实测 B 站页面 191 个可交互元素全部被 `r.width < 1` 判掉。
+    val preset = requestedViewport
+    val stage = lastStageSize
+    val uiW = dshWebView.width.coerceAtLeast(1)
+    val uiH = dshWebView.height.coerceAtLeast(1)
+    val w = (stage?.first ?: preset?.width ?: uiW.coerceAtLeast(320)).coerceAtLeast(1)
+    val h = (stage?.second ?: preset?.height ?: uiH.coerceAtLeast(480)).coerceAtLeast(1)
+    val lp = browser.layoutParams as? FrameLayout.LayoutParams
+    if (lp != null && lp.width == w && lp.height == h) return
+    browser.layoutParams = FrameLayout.LayoutParams(w, h)
   }
 
   private fun status(): JSONObject {
@@ -936,8 +1022,16 @@ a{display:inline-block;margin-top:16px;padding:10px 20px;border-radius:8px;backg
   private fun identityApply(args: JSONObject): JSONObject {
     val profile = args.optString("profile", "android-real").take(32)
     val ua = args.optString("ua", "").take(512)
-    view ?: return JSONObject().put("ok", false).put("reason", "browser-not-created")
-      .put("guidance", "先打开浏览器页面再切换身份。")
+    // 身份与视口是**宿主状态**，不是「页面」的属性（0.14.0 真机实锤修正）。
+    //
+    // 缺陷形态（用户 2026-09-17 实报）：`browser_open { identity: "linux-desktop" }` 恒失败
+    // `browser-not-created`。真因是这里的 `view ?:` 前置守卫——它排在状态赋值**之前**，
+    // 于是「还没有页面」时不但不重建，连身份都没记下；而 browser_open 的正常流程恰恰是
+    // **先设身份/视口、再开页**，第一个人用这个参数必然撞上。
+    //
+    // 正确语义：没有页面时**先记下状态**（建页时由 ensureViewFor → applyIdentityToView 与
+    // requestedViewport 统一应用），只有「需要重建现有页面」时才要求 view 在场。
+    // 这样既修好首个调用的失败，也避免「先建页再设身份」带来的多余重载。
     // PC / 手机切换 = 身份 + 该模式记忆分辨率 + 一次重载（SPEC §1.2）。
     val width = args.optInt("width", 0)
     val height = args.optInt("height", 0)
@@ -951,6 +1045,10 @@ a{display:inline-block;margin-top:16px;padding:10px 20px;border-radius:8px;backg
     val changed = profile != identityId || nextUa != identityUa || requestedViewport != appliedViewport
     identityId = profile
     identityUa = nextUa
+    if (view == null) {
+      // 页面尚未建立：状态已记下，建页时按此应用（不报错、不假装已应用脚本）。
+      return identityResult(profile, false, false)
+    }
     if (changed) {
       // document-start 脚本只在新建 WebView 时注册（当前实现无法可靠替换），故重建一次。
       recycleView()
@@ -1480,6 +1578,15 @@ a{display:inline-block;margin-top:16px;padding:10px 20px;border-radius:8px;backg
       var MAX = $SNAPSHOT_MAX_NODES;
       var old = document.querySelectorAll('[data-dsh-bx]');
       for (var i = 0; i < old.length; i++) old[i].removeAttribute('data-dsh-bx');
+      // 选择器口径（0.14.0 模拟器实测，勿轻易扩大）：
+      // 本选择器**只收语义化可交互元素**。我一度加过「cursor:pointer / 可滚动容器」的补充扫描，
+      // 想解决移动端 B 站（m.bilibili.com）内容区全是非语义 <div> 的问题——实测**零收益**：
+      // 该站 1339 个元素里 cursor:pointer 的为 0（点击全靠 JS 事件委托，样式上不体现），
+      // 却要为此对全部 div/span/li 逐个 getComputedStyle（数百毫秒）。已回退。
+      //
+      // 移动端非语义站点的正确解法是**换身份档**（站点自己会返回语义化桌面标记）：
+      // 实测同一页面 linux-desktop 档 => 135 个可交互节点（含 bx18 link "影视飓风"），
+      // 而默认移动档只有 1-2 个。见 browser_open 的 identity 参数说明。
       var sel = 'a[href],button,input,select,textarea,[role],[onclick],[tabindex],[contenteditable="true"]';
       var all = document.querySelectorAll(sel);
       var nodes = [];
@@ -1490,7 +1597,7 @@ a{display:inline-block;margin-top:16px;padding:10px 20px;border-radius:8px;backg
         var style = window.getComputedStyle(el);
         if (style.visibility === 'hidden' || style.display === 'none') continue;
         var tag = el.tagName;
-        var role = el.getAttribute('role') || (tag === 'A' ? 'link' : tag === 'BUTTON' ? 'button' : tag === 'SELECT' ? 'combobox' : (tag === 'INPUT' || tag === 'TEXTAREA') ? ((el.type === 'submit' || el.type === 'button' || el.type === 'checkbox' || el.type === 'radio') ? el.type : 'textbox') : '');
+        var role = el.getAttribute('role') || (tag === 'A' ? 'link' : tag === 'BUTTON' ? 'button' : tag === 'SELECT' ? 'combobox' : (tag === 'INPUT' || tag === 'TEXTAREA') ? ((el.type === 'submit' || el.type === 'button' || el.type === 'checkbox' || el.type === 'radio') ? el.type : 'textbox') : (el.getAttribute('onclick') ? 'clickable' : (el.getAttribute('tabindex') ? 'focusable' : 'text')));
         var name = el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('title') || el.getAttribute('alt') || el.innerText || el.value || '';
         name = String(name).replace(/\s+/g, ' ').trim();
         if (name.length > 120) name = name.slice(0, 120);

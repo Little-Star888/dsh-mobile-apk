@@ -11,7 +11,7 @@
  */
 
 /** 计划中的 `vd*` op 表（源文档 §8.2）。仅声明：未进六处登记链，当前不可从控制队列调用。 */
-export const VD_OPS = ['vdCreate', 'vdDestroy', 'vdLaunch', 'vdMoveTask', 'vdInfo'] as const
+export const VD_OPS = ['vdCreate', 'vdDestroy', 'vdLaunch', 'vdMoveTask', 'vdInfo', 'vdLaunchApp', 'vdInput'] as const
 export type VdOp = (typeof VD_OPS)[number]
 
 /** 能力状态。 */
@@ -111,12 +111,32 @@ export interface VdPanelState {
  * @param face - 壳侧桥面（可选服务，缺失即未接通）。
  * @returns 状态快照。
  */
-export function readVdSnapshot(face: VdisplayFace | undefined): VdSnapshot {
-  const raw = face?.vdisplayStatus?.()
+/**
+ * 由**已取到的**状态载荷映射为工具快照（纯函数）。
+ *
+ * 拆出这一层的理由（0.14.0 真机实锤）：状态有两条来源，形状不同，必须共用同一个映射体，
+ * 否则「同一事实、两种读数」的缺陷会再次出现——
+ *   - 壳侧 WebView 桥 `vdisplayStatus()`（面板读，**存在且正常**）；
+ *   - 引擎侧 `androidPrivilege.controlExec('vdInfo')`（模型工具唯一可达的通路）。
+ * 缺陷形态：模型工具只认前者，而引擎侧服务从来没有 `vdisplayStatus` 字段（只有 `controlExec`），
+ * 于是 `android_vdisplay_status` 恒报 blocked/`vdisplay-shell-not-wired`，
+ * 而 `android_vdisplay_create` 同一时刻成功建屏（displayId=25/state=active）。
+ * 模型据此判定能力不可用而放弃整条路径——**声称不可用而实际可用**，与「声称可用而实际不可用」
+ * 危害相同（都会让模型做出错误决策）。
+ *
+ * @param raw - 状态载荷；`undefined` = 无任何来源（fail-closed）。
+ * @param absent - 无来源时的失败文案（区分「真的没接通」与「控制队列报错」）。
+ * @returns 工具快照。
+ */
+export function snapshotFromRaw(
+  raw: VdStatusPayload | undefined,
+  absent?: { code: string; guidance: string },
+): VdSnapshot {
   const base = { enabled: false, transports: [] as string[], ops: [...VD_OPS], screens: [] as VdScreen[] }
   if (raw === undefined) {
-    return { ok: false, ...base, state: 'blocked', code: 'vdisplay-shell-not-wired',
-      guidance: '虚拟屏桥面尚未接通（壳侧 Shizuku/建屏探针未落地）。当前只能用真实屏控制，或先用 android_privilege_status 检查授权面。' }
+    return { ok: false, ...base, state: 'blocked',
+      code: absent?.code ?? 'vdisplay-shell-not-wired',
+      guidance: absent?.guidance ?? '虚拟屏状态不可达：引擎侧 androidPrivilege 既无 vdisplayStatus 桥面、控制队列也未回执。先用 android_vdisplay_create 试建屏，或用 android_privilege_status 检查授权面。' }
   }
   const enabled = raw.enabled === true
   const state = raw.state === 'ready' || raw.state === 'active' || raw.state === 'blocked' || raw.state === 'disabled'
@@ -139,6 +159,56 @@ export function readVdSnapshot(face: VdisplayFace | undefined): VdSnapshot {
   if (typeof raw.displayId === 'number') out.displayId = raw.displayId
   if (typeof raw.selected === 'string') out.selected = raw.selected
   return out
+}
+
+/**
+ * 读一次能力状态（**仅壳侧 WebView 桥**路径；浏览器面板与只读端点没有引擎侧服务，只有这个面）。
+ *
+ * 注意：引擎侧模型工具**不要**用本函数——引擎侧 androidPrivilege 服务没有 `vdisplayStatus`
+ * （这正是 0.14.0 那个「status 恒报未接通」缺陷）。模型面请用 `readVdToolSnapshot`。
+ * @param face - 壳侧桥面（可选服务，缺失即未接通）。
+ * @returns 状态快照。
+ */
+export function readVdSnapshot(face: VdisplayFace | undefined): VdSnapshot {
+  return snapshotFromRaw(face?.vdisplayStatus?.())
+}
+
+/**
+ * 读一次能力状态——**模型工具专用**，走与控制 op 完全相同的通路。
+ *
+ * 为什么模型工具不能复用 `readVdSnapshot(faceOf())`：引擎侧 androidPrivilege 服务只暴露
+ * `controlExec`（create/destroy 都从这条路走通），**没有** `vdisplayStatus`。工具只认桥面就必然
+ * 恒报「未接通」。这里优先控制队列 `vdInfo`，与 create/destroy 同源；控制队列不可用时才回退桥面。
+ *
+ * @param face - 引擎侧 androidPrivilege 面（可选服务）。
+ * @returns 状态快照；任何失败都带**归因准确**的 code/guidance，绝不把「读不到」说成「没落地」。
+ */
+export async function readVdToolSnapshot(face: VdisplayFace | undefined): Promise<VdSnapshot> {
+  const service = face
+  if (service?.controlExec !== undefined) {
+    try {
+      const reply = await service.controlExec('vdInfo', {}, 8_000)
+      if (reply !== null && typeof reply === 'object' && reply.ok === true) {
+        const data = reply.data
+        if (data !== null && typeof data === 'object') return snapshotFromRaw(data as VdStatusPayload)
+      }
+      const detail = reply !== null && typeof reply === 'object' && typeof reply.error === 'string' && reply.error !== ''
+        ? reply.error
+        : undefined
+      return snapshotFromRaw(undefined, {
+        code: 'vdisplay-control-failed',
+        guidance: '虚拟屏控制通道未回执 vdInfo：' + (detail ?? '控制队列未返回结果')
+          + '。建屏/销毁走同一条通路，此处读不到不代表能力不可用——可先试 android_vdisplay_create。',
+      })
+    } catch (e) {
+      return snapshotFromRaw(undefined, {
+        code: 'vdisplay-control-exception',
+        guidance: '虚拟屏控制通道异常：' + (e instanceof Error ? e.message : String(e))
+          + '。可先试 android_vdisplay_create 复核通路是否真的不可用。',
+      })
+    }
+  }
+  return snapshotFromRaw(service?.vdisplayStatus?.())
 }
 
 /** 逐字段收窄壳侧 screens 数组（形状不可信；坏条目丢弃而不是整块失败）。 */

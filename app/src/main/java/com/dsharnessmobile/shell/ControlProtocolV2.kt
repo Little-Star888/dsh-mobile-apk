@@ -52,7 +52,7 @@ object ControlProtocolV2 {
     // 多页签（0.14.0）：工具面承诺的 list/follow/close 在壳侧真实存在
     "browserTabs", "browserFollowTab", "browserCloseTab",
     // 虚拟屏特权通道（vd*）
-    "vdCreate", "vdDestroy", "vdLaunch", "vdMoveTask", "vdInfo",
+    "vdCreate", "vdDestroy", "vdLaunch", "vdMoveTask", "vdInfo", "vdLaunchApp", "vdInput",
     // 特权 shell 通道（sh*，0.14.0 §6：替换退役的内置 adb）
     "shExec", "shPull", "shPush", "shRemove",
   )

@@ -128,6 +128,20 @@
       "reason": "vd* 是虚拟屏 Shizuku 特权通道 op（像素合成在壳侧 SurfaceView），不经无障碍通道——plugins/dsh-android-vdisplay/src/status.ts 的声明；随六处登记落地时生效。永久豁免。"
     },
     {
+      "op": "vdLaunchApp",
+      "faces": [
+        "A11Y_OPS"
+      ],
+      "reason": "vd* 是虚拟屏 Shizuku 特权通道 op（像素合成在壳侧 SurfaceView），不经无障碍通道——plugins/dsh-android-vdisplay/src/status.ts 的声明；随六处登记落地时生效。永久豁免。"
+    },
+    {
+      "op": "vdInput",
+      "faces": [
+        "A11Y_OPS"
+      ],
+      "reason": "vd* 是虚拟屏 Shizuku 特权通道 op（像素合成在壳侧 SurfaceView），不经无障碍通道——plugins/dsh-android-vdisplay/src/status.ts 的声明；随六处登记落地时生效。永久豁免。"
+    },
+    {
       "op": "vdInfo",
       "faces": [
         "A11Y_OPS"

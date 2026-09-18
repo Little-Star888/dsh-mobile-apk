@@ -283,7 +283,7 @@
       "registration": "path: VD_STATUS_PATH",
       "endpointSource": "plugins/dsh-android-vdisplay/src/status.ts",
       "access": "public",
-      "publicResponseMarker": "sendJson(res, 200, readVdSnapshot(faceOf()))",
+"publicResponseMarker": "sendJson(res, 200, await readVdToolSnapshot(faceOf()))",
       "rationale": "Only fail-closed VirtualDisplay readiness metadata is returned. It contains no pixels, UI tree, input, task command, shell output, path, or credential."
     }
   ]

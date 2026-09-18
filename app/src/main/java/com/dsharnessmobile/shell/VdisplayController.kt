@@ -30,6 +30,7 @@ import org.json.JSONObject
 object VdisplayController {
   private const val TAG = "dsh-vdisplay"
   private const val FLAG_PUBLIC = 1 shl 0
+  /** 非系统应用创建虚拟屏的**必备** flag（缺它会被当作镜像而索要投屏权限）。见 create() 注释。 */
   private const val FLAG_OWN_CONTENT_ONLY = 1 shl 3
   private const val FLAG_SUPPORTS_TOUCH = 1 shl 6
   private const val FLAG_DESTROY_CONTENT_ON_REMOVAL = 1 shl 8
@@ -153,8 +154,17 @@ object VdisplayController {
    * 不拉伸变形）。
    */
   fun contentSizeForAlias(alias: String?): Pair<Int, Int>? = synchronized(lock) {
-    val record = if (alias == null) null else records[alias]
-    if (record == null) null else record.width to record.height
+    // 兜底顺序（0.14.0 设备实锤修正）：`alias` 来自**页面**上报的 `snap.selected`，在面板刚打开、
+    // 状态还没拉到、或该屏刚被销毁时会为空/失效。此前直接返回 null，宿主侧 `applyStageBounds()`
+    // 便退回「按舞台宽高比」拉伸 → 用户看到的「自适应缩放不对 / 黑边」。
+    //
+    // 内容宽高比与「谁被选中」无关，只与「哪块屏存在」有关，所以这里按
+    // 指定别名 → 当前选中 → 唯一活跃屏 依次退化；只要本机还有虚拟屏，就能给出正确的宽高比。
+    val record = (alias?.let { records[it] })
+      ?: records[selectedAlias]
+      ?: records.values.firstOrNull()
+      ?: return null
+    record.width to record.height
   }
 
   private fun selectedRecord(): Record? = synchronized(lock) { records[selectedAlias] }
@@ -343,6 +353,22 @@ object VdisplayController {
           // healthy while the visual viewer surface is attached separately.
           runCatching { source.acquireLatestImage()?.close() }
         }, Handler(nextThread.looper))
+        // flags 组合（0.14.0 模拟器两轮实锤，两个方向都踩过，**不要再改**）：
+        //
+        //   ✅ `PUBLIC | OWN_CONTENT_ONLY | SUPPORTS_TOUCH | DESTROY_CONTENT_ON_REMOVAL | ROTATES_WITH_CONTENT`
+        //   ❌ 去掉 OWN_CONTENT_ONLY → 创建直接抛：
+        //        SecurityException: Requires ADD_MIRROR_DISPLAY, CAPTURE_VIDEO_OUTPUT or
+        //        CAPTURE_SECURE_VIDEO_OUTPUT permission, or an appropriate MediaProjection token
+        //        ... please use the flag VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY.
+        //      即：不带该 flag，系统按「屏幕共享/镜像」处理，而镜像需要投屏权限（我们没有）。
+        //      该 flag 是**非系统应用创建虚拟屏的必备条件**，故必须保留。
+        //
+        // 实测 dumpsys 的最终形态：`FLAG_ROTATES_WITH_CONTENT, FLAG_OWN_CONTENT_ONLY,
+        // FLAG_DESTROY_CONTENT_ON_REMOVAL`（**没有 FLAG_PUBLIC**——Android 13+ 起 PUBLIC 只对系统应用生效，
+        // 应用自建的虚拟屏一律为 private，只能显示 owner 自己的窗口）。
+        //
+        // 这条结论有直接后果，见 launchApp()：private 屏上**无法把第三方应用拉进来**
+        // （`SafeActivityOptions.checkPermissions` 拒；已验证 uid 2000 与 uid 10053 两条路都被拒）。
         val flags = FLAG_PUBLIC or FLAG_OWN_CONTENT_ONLY or FLAG_SUPPORTS_TOUCH or
           FLAG_DESTROY_CONTENT_ON_REMOVAL or FLAG_ROTATES_WITH_CONTENT
         val manager = appContext.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
@@ -542,6 +568,136 @@ object VdisplayController {
     } else {
       out.put("ok", false).put("code", "vd-launch-failed")
         .put("guidance", "虚拟屏已创建，但 shell 拉起测试应用失败：" + result.optString("stdout", result.optString("guidance", "")))
+    }
+    return out
+  }
+
+  /**
+   * 向指定屏幕注入输入（坐标 / 按键 / 文本）——虚拟屏「坐标模式」的真实执行面。
+   *
+   * 为什么必须有（0.14.0 用户实报）：`android_ui_click` 的 guidance 明确告诉模型「纯 Shizuku 下
+   * 只能坐标操作，用 nx/ny 或 x/y」，但**真实执行面只有 `/system/bin/input`（无屏幕维度）**；
+   * 于是 virtual-only 范围下那条路被范围门正确拒掉，模型收到的却是「请改用坐标」——**指引指向
+   * 一条不存在的路**。提示与能力不一致，比直接拒绝更糟。
+   *
+   * 本函数补上 `input -d <displayId>` 这一段（displayId 来自原生注册表，绝不为 0）。
+   *
+   * 载荷约束：verb 只接受白名单枚举；坐标/键码为 Int；文本按 UTF-8 作为**单个 argv 元素**传递
+   * （不经 shell 解析，因此无需转义，也不存在中文被误解码的问题）。
+   *
+   * @param verb - tap / swipe / keyevent / text。
+   * @param args - tap{x,y} / swipe{x,y,x2,y2,duration} / keyevent{keycode} / text{text}。
+   * @param target - 虚拟屏别名；缺省取当前选中/第一块。
+   * @returns 结果对象（ok/code/guidance/screenId/displayId）。
+   */
+  fun input(context: Context, verb: String, args: JSONObject, target: String? = null): JSONObject {
+    val appContext = context.applicationContext
+    val record = selectedRecord() ?: recordOf(target)
+      ?: return status(appContext).put("ok", false).put("code", "screen-not-ready")
+        .put("guidance", "虚拟屏幕尚未创建，无法向其注入输入；可先 android_vdisplay_create。")
+    val id = record.displayId
+    val argv = ArrayList<String>(12)
+    argv += arrayOf("/system/bin/input", "-d", id.toString())
+    when (verb) {
+      "tap" -> argv += arrayOf("tap", args.optInt("x", -1).toString(), args.optInt("y", -1).toString())
+      "swipe" -> {
+        val duration = args.optInt("duration", 300).coerceIn(1, 20_000)
+        argv += arrayOf(
+          "swipe",
+          args.optInt("x", -1).toString(), args.optInt("y", -1).toString(),
+          args.optInt("x2", -1).toString(), args.optInt("y2", -1).toString(),
+          duration.toString(),
+        )
+      }
+      "keyevent" -> argv += arrayOf("keyevent", args.optInt("keycode", -1).toString())
+      "text" -> {
+        val text = args.optString("text", "")
+        if (text.isEmpty() || text.length > 500) {
+          return JSONObject().put("ok", false).put("code", "invalid-text")
+            .put("guidance", "text 长度需为 1-500。")
+        }
+        argv += arrayOf("text", text)
+      }
+      else -> return JSONObject().put("ok", false).put("code", "unknown-input-verb")
+        .put("guidance", "verb 必须是 tap / swipe / keyevent / text。")
+    }
+    val result = ShizukuTransport.runController(appContext, argv.toTypedArray())
+    val out = JSONObject()
+      .put("displayId", id)
+      .put("screenId", record.alias)
+      .put("generation", synchronized(lock) { generation })
+    return if (result.optBoolean("ok")) {
+      out.put("ok", true).put("code", "vd-input-ok").put("verb", verb)
+        .put("guidance", "已在 ${record.alias}（displayId=$id）注入 $verb；真实屏前台不受影响。")
+    } else {
+      out.put("ok", false).put("code", "vd-input-failed").put("verb", verb)
+        .put("guidance", "虚拟屏输入失败：" + result.optString("stdout", result.optString("error", "")))
+    }
+  }
+
+  /**
+   * 把任意应用拉起到指定屏幕（模型面 `android_app_launch { screenId }` 的落点）。
+   *
+   * 为什么必须单独有这一条（0.14.0 用户实报）：`android_app_launch` 走的是引擎侧特权 shell 的
+   * `monkey -p <pkg>`——那条命令**没有屏幕维度**，永远落在真实屏上。于是「在虚拟屏里开个应用」
+   * 这件事在工具面根本无法表达：模型只能看着一块空虚拟屏。
+   *
+   * 权限主体（关键）：**必须由壳侧自己发起**。`monkey` 没有屏幕维度；`am start --display` 虽然正确，
+   * 但 uid 2000（Shizuku shell）不是这块 VirtualDisplay 的 owner，会被 SafeActivityOptions 拒绝。
+   * 壳侧持有该屏，用 `ActivityOptions.setLaunchDisplayId` 直接拉起即可。
+   *
+   * 载荷约束：包名按 Android 包名文法**白名单校验**；displayId 取自原生注册表（Int）。
+   *
+   * @param pkg - 目标包名（须匹配 Android 包名文法）。
+   * @param target - 虚拟屏别名；缺省取当前选中/第一块。
+   * @returns 结果对象（ok/code/guidance/screenId/displayId）。
+   */
+  fun launchApp(context: Context, pkg: String, target: String? = null): JSONObject {
+    val appContext = context.applicationContext
+    if (!Regex("^[a-zA-Z][\\w.]*$").matches(pkg)) {
+      return JSONObject().put("ok", false).put("code", "invalid-package")
+        .put("guidance", "包名不合法：$pkg（须为 Android 包名文法，如 com.example.app）。")
+    }
+    val record = selectedRecord() ?: recordOf(target)
+      ?: return status(appContext).put("ok", false).put("code", "screen-not-ready")
+        .put("guidance", "虚拟屏幕尚未创建，无法在其上拉起应用；可先 android_vdisplay_create。")
+    val id = record.displayId
+    // 拉起路径（0.14.0 模拟器逐条实测，**四条路只有最后一条成立**）：
+    //
+    //   ① `monkey -p <pkg> --display <id>`            → Error: Unknown option: --display（monkey 无屏幕维度）
+    //   ② `am start --display <id>` 经 Shizuku(uid 2000) → SecurityException: Permission Denial ... uid=2000
+    //   ③ 进程内 `ActivityOptions.setLaunchDisplayId`   → SecurityException: Permission Denial ... uid=10053
+    //      （owner 本人也拒；SafeActivityOptions.checkPermissions 依据的是 START_ACTIVITIES_FROM_BACKGROUND
+    //       等特权，普通应用没有）
+    //   ④ ✅ `am start --display <id> -n <component>` 经**特权 shell 通道**（Shizuku UserService）
+    //      → 实测成功：Settings 成为该 display 上的 task，a11y 也能看到它的窗口。
+    //
+    // 注意 ① 与 ④ 的区别不是「命令」而是**经由谁来执行**：同一台设备、同一个 uid=2000，
+    // 经 UserService 的 binder 调用（`runController`）走的是特权路径，直接 adb shell 拼字符串则被拒。
+    // 因此这里用 `runController`（固定 argv，包名已白名单校验，模型可控内容不进 shell 文本）。
+    // 先解析 launcher 组件，再拉起——两步都是固定 argv。
+    val resolved = ShizukuTransport.runController(
+      appContext,
+      arrayOf("cmd", "package", "resolve-activity", "--brief", "-c", "android.intent.category.LAUNCHER", pkg),
+    )
+    val component = resolved.optString("stdout", "")
+      .lineSequence().map { it.trim() }.lastOrNull { it.contains("/") } ?: ""
+    if (!resolved.optBoolean("ok") || component.isEmpty() || !component.startsWith("$pkg/")) {
+      return status(appContext).put("ok", false).put("code", "vd-launch-unresolved")
+        .put("displayId", id).put("screenId", record.alias)
+        .put("guidance", "无法解析 " + pkg + " 的启动组件（可能未安装或无 launcher 入口）：" + component)
+    }
+    val result = ShizukuTransport.runController(
+      appContext,
+      arrayOf("am", "start", "--display", id.toString(), "-n", component),
+    )
+    val out = status(appContext).put("displayId", id).put("screenId", record.alias)
+    if (result.optBoolean("ok")) {
+      out.put("ok", true).put("code", "vd-launched")
+        .put("guidance", "已把 " + pkg + " 拉起到 " + record.alias + "（displayId=" + id + "，组件 " + component + "）；真实屏前台不变。")
+    } else {
+      out.put("ok", false).put("code", "vd-launch-failed")
+        .put("guidance", "虚拟屏已创建，但跨屏拉起失败：" + result.optString("stdout", result.optString("error", "")))
     }
     return out
   }

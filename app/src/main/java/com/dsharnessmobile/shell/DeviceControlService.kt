@@ -271,6 +271,18 @@ class DeviceControlService : AccessibilityService() {
     /** 0.13.8 F1b（协议 V2）：真树 DFS 前序行表（**含零尺寸节点**——骨架连续性与深度
      *  连续性的前提，V1 的 nodes 只留有尺寸节点）。纯数据，动作回指用 childPath 重定位。 */
     val rows: List<ControlProtocolV2.Row> = emptyList(),
+    /**
+     * 与 [rows] 同下标的**建树时节点句柄**（0.14.0 模拟器实锤，坑 136）。
+     *
+     * 为什么必须在建树时留一份：无障碍 API 的 `getChild` 是**活视图片段**——`ui_dump` 之后
+     * 列表（RecyclerView）才完成布局/复用，此时按 childPath 重走会得到与建树时不同的子树；
+     * 实测同一份快照内浅层节点可点、深层「显示」行报「行 57 已不存在」，连文本/几何特征匹配
+     * 也失败（那一行在活树里已经不是当时的样子）。
+     *
+     * 所以动作直接复用建树时抓到的 `AccessibilityNodeInfo`（必要时 `refresh()` 一次），
+     * 不再依赖任何「重走」假设。重走只作为兜底，保留给节点已被回收的情形。
+     */
+    val rowNodes: List<AccessibilityNodeInfo?> = emptyList(),
     // 0.13.8 E2：建树时间预算触发 → 部分树 + 显式标注（宁可标注过的半棵树，不给一句超时）
     val truncated: Boolean = false,
   )
@@ -298,17 +310,127 @@ class DeviceControlService : AccessibilityService() {
   @Volatile
   private var activeDisplayId: Int = ScreenTargets.REAL_DISPLAY_ID
 
-  /** 无障碍语义树最远可读的窗口根：真实屏走 rootInActiveWindow，虚拟屏走该 display 的窗口。 */
-  private fun rootFor(displayId: Int): AccessibilityNodeInfo? {
-    if (displayId == ScreenTargets.REAL_DISPLAY_ID) return rootInActiveWindow
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
-    val perDisplay = try { getWindowsOnAllDisplays() } catch (_: Throwable) { null } ?: return null
-    val windows = perDisplay[displayId] ?: return null
-    for (window in windows) {
-      val root = window.root
-      if (root != null) return root
+  /**
+   * 无障碍语义树可读的窗口根：真实屏走 rootInActiveWindow，虚拟屏走该 display 的窗口。
+   *
+   * **0.14.0 模拟器实锤的缺陷（用户测试项目第一项即撞上）**：虚拟屏上已经真实跑起了
+   * 「设置」（`dumpsys accessibility` 明确列出 `title=设置, displayId=31` 的 TYPE_APPLICATION
+   * 窗口），但 `android_ui_dump {screenId:'virtual-1'}` 仍然失败，审计里是 `result:"denied"`。
+   *
+   * 旧实现只做「有 windows 条目 → 遍历取第一个非 null root」，两个薄弱点都会导致假失败：
+   *  1. **窗口顺序不保证**：`getWindowsOnAllDisplays()` 的回序并非按层级/焦点，先撞上 `root==null`
+   *     的装饰窗口就整体放弃（实际那个应用窗口是好的）；
+   *  2. **失败没有原因**：拿不到树时只回一句「暂无可读窗口」，把「窗口尚未 attach」与「该屏没有
+   *     窗口」混为一谈——模型据此判断「虚拟屏没用」而放弃整条路径（正是要消灭的错误决策）。
+   *
+   * 现修法：① 遍历**全部**窗口挑可用 root，优先 focused/active 的（设置页被拉起来后是 active）；
+   * ② 失败时把**采集到的窗口数量与类型**带进返回值，让模型与诊断面能区分「真的没窗口」与
+   *    「有窗口但读不到 root」。
+   */
+  private fun rootFor(displayId: Int): AccessibilityNodeInfo? = rootProbe(displayId).first
+
+  /**
+   * **建树时选中的那个窗口的 id**（`AccessibilityWindowInfo.getId()`）。
+   *
+   * 缺陷形态（0.14.0 模拟器实锤，坑 136）：`android_ui_dump` 拿到 66 个节点、句柄 n52 指向
+   * 壳侧 row 57，紧接着用该 ref 点击却报「行 57 已不存在（页面已变化）」。row 57 明明在
+   * `snapshot.rows`（共 120 行）范围内——**问题是解析时用的根与建树时不是同一棵**：
+   * `nodeAtChildPath` 每次调用都重新 `rootFor()`，而窗口排序偏好 active/focused；
+   * 焦点/IME/装饰窗口一变，选中的窗口就换人，`childPath` 的下标随即指向别的子树。
+   *
+   * 修法：建树时把窗口 id 钉下来，后续所有按路径/句柄的重定位**优先回到同一个窗口**；
+   * 只有该窗口确实消失时才退回通用选择（此时路径本就该失效，报 stale 才是对的）。
+   */
+  @Volatile
+  private var snapshotWindowId: Int = -1
+
+  /**
+   * [rootFor] 的可诊断版本：返回（根, 该屏窗口数, 是否有 active/focused 窗口, 失败原因）。
+   *
+   * 之所以要带出「窗口数」：虚拟屏的失败绝大多数是「屏建了但没在里面起 App」，与
+   * 「App 起了但当前读不到」需要给模型**完全不同**的下一步指引。
+   */
+  private fun rootProbe(displayId: Int): Pair<AccessibilityNodeInfo?, JSONObject> {
+    if (displayId == ScreenTargets.REAL_DISPLAY_ID) {
+      // 真实屏走 rootInActiveWindow，没有「窗口 id」这一层；清掉钉住的虚拟屏窗口，
+      // 避免真实屏的路径解析误用虚拟屏的 pinned id（跨屏切换时必须失效。
+      snapshotWindowId = -1
+      val root = rootInActiveWindow
+      return root to JSONObject().put("displayId", displayId).put("windowCount", if (root != null) 1 else 0)
+        .put("activeWindow", root != null)
     }
-    return null
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+      return null to JSONObject().put("displayId", displayId).put("reason", "api-below-30")
+    }
+    val perDisplay = try { getWindowsOnAllDisplays() } catch (t: Throwable) {
+      return null to JSONObject().put("displayId", displayId).put("reason", "windows-api-failed")
+        .put("detail", t.javaClass.simpleName)
+    }
+    val windows = perDisplay[displayId]
+      ?: return null to JSONObject().put("displayId", displayId).put("reason", "no-window-on-display")
+    // 窗口选择策略抽成**纯函数** `WindowPick.order(...)`：可 JVM 单测（坑 136 的回归就在这里），
+    // 也把「钉住建树窗口」这条不变量从 Android API 细节里剥离出来。
+    val facts = windows.map { w ->
+      WindowPick.Fact(
+        id = try { w.id } catch (_: Throwable) { -1 },
+        active = w.isActive,
+        focused = w.isFocused,
+        hasRoot = try { w.root != null } catch (_: Throwable) { false },
+      )
+    }
+    val chosen = WindowPick.order(facts, snapshotWindowId)
+    snapshotWindowId = chosen.id
+    val picked = windows.firstOrNull { try { it.id == chosen.id } catch (_: Throwable) { false } }
+    val pickedRoot = picked?.let { try { it.root } catch (_: Throwable) { null } }
+    if (pickedRoot != null) {
+      return pickedRoot to probeInfo(displayId, windows.size, chosen.active || chosen.focused)
+    }
+    snapshotWindowId = -1
+    var firstRoot: AccessibilityNodeInfo? = null
+    for (window in windows) {
+      val root = try { window.root } catch (_: Throwable) { null }
+      if (root != null) { firstRoot = root; break }
+    }
+    if (firstRoot != null) return firstRoot to probeInfo(displayId, windows.size, false)
+    return null to probeInfo(displayId, windows.size, false).put("reason", "window-root-unavailable")
+  }
+
+  private fun probeInfo(displayId: Int, count: Int, active: Boolean): JSONObject = JSONObject()
+    .put("displayId", displayId).put("windowCount", count).put("activeWindow", active)
+
+  /**
+   * 无障碍窗口选择策略（**纯函数**，与 Android API 解耦以便 JVM 单测）。
+   *
+   * 不变量（坑 136）：**一旦某窗口被用来建树，后续所有按 childPath 的重定位都必须回到同一窗口**。
+   * 理由：`childPath` 是「在这棵树里每次取第 N 个子节点」的下标序列，换一棵树就是换了一套坐标系；
+   * 而窗口的 active/focused 标志会随焦点转移/IME 出现而变——只按标志选，就会在点击那一刻选中另一个窗口，
+   * 于是 dump 刚刚给出的 row 57 立刻报「已不存在」。
+   */
+  internal object WindowPick {
+    /** 单个窗口的判别事实（从 AccessibilityWindowInfo 摘出，避免直接依赖 Android 类型）。 */
+    data class Fact(val id: Int, val active: Boolean, val focused: Boolean, val hasRoot: Boolean)
+
+    /**
+     * 选出本次要用的窗口。
+     *
+     * 规则（按优先级）：
+     *   ① `pinnedId` 仍在场且有 root → **恒选它**（建树用的那棵树，坐标系统一）；
+     *   ② 否则挑 active → focused → 第一个有 root 的窗口，并把 id 作为新的 pin。
+     * 只考虑 `hasRoot` 的窗口：`root == null` 的装饰窗口取不到树。
+     *
+     * @return 被选中的窗口；没有任何可用窗口时返回 id=-1 的占位。
+     */
+    fun order(facts: List<Fact>, pinnedId: Int): Fact {
+      val usable = facts.filter { it.hasRoot }
+      val fallback = Fact(-1, false, false, false)
+      if (usable.isEmpty()) return fallback
+      if (pinnedId >= 0) {
+        usable.firstOrNull { it.id == pinnedId }?.let { return it }
+      }
+      return usable.firstOrNull { it.active }
+        ?: usable.firstOrNull { it.focused }
+        ?: usable.first()
+    }
   }
 
   /** 0.13.8 E4：服务代次（onServiceConnected 递增；诊断用——重连后缓存全部作废的观测点）。 */
@@ -375,10 +497,14 @@ class DeviceControlService : AccessibilityService() {
     synchronized(lock) {
       val current = snapshot
       if (!force && !invalidated && current != null) return current
+      // 重建即重钉：旧 pin 属于旧树，留着会让新树误用旧窗口的坐标系。
+      snapshotWindowId = -1
       val root = rootFor(activeDisplayId) ?: return null
       val nodes = LinkedHashMap<String, AccessibilityNodeInfo>()
       val bounds = HashMap<String, Rect>()
       val rows = ArrayList<ControlProtocolV2.Row>(512)
+      // 与 rows 同下标的建树期节点句柄（见 Snapshot.rowNodes 说明）。
+      val rowNodes = ArrayList<AccessibilityNodeInfo?>(512)
       var count = 0
       // 0.13.8 E2：建树时间预算（3s）——超预算返回部分树并显式标注 truncated，
       // 宁可给一棵标注过的半棵树，也不给一句超时（V2 §4.1）。
@@ -402,6 +528,7 @@ class DeviceControlService : AccessibilityService() {
         if (node.isFocused) flag = flag or ControlProtocolV2.F_FOCUSED
         if (node.isSelected) flag = flag or ControlProtocolV2.F_SELECTED
         if (node.isEnabled) flag = flag or ControlProtocolV2.F_ENABLED
+        rowNodes.add(node)
         rows.add(
           ControlProtocolV2.Row(
             path = path,
@@ -430,7 +557,7 @@ class DeviceControlService : AccessibilityService() {
       val metrics = screenSize()
       val fresh = Snapshot(
         generation.incrementAndGet(), rotation(), metrics.first, metrics.second,
-        nodes, bounds, rows, truncated,
+        nodes, bounds, rows, rowNodes, truncated,
       )
       snapshot = fresh
       invalidated = false
@@ -524,6 +651,8 @@ class DeviceControlService : AccessibilityService() {
       "vdLaunch" -> VdisplayOps.handle(this, op, args)
       "vdMoveTask" -> VdisplayOps.handle(this, op, args)
       "vdInfo" -> VdisplayOps.handle(this, op, args)
+      "vdLaunchApp" -> VdisplayOps.handle(this, op, args)
+      "vdInput" -> VdisplayOps.handle(this, op, args)
       // 特权 shell 通道同样是 native/privileged 面（0.14.0 §6：替换内置 adb），分发在 ShellOps；
       // 分支留在 handle 里满足六面登记链门禁（scripts/check-control-ops.mjs, A 项）。
       "shExec" -> ShellOps.handle(this, op, args)
@@ -757,13 +886,28 @@ class DeviceControlService : AccessibilityService() {
     val snap = buildSnapshot(force = true) ?: return if (ScreenTargets.isVirtual(activeScreenId)) {
       // 虚拟屏语义树只有无障碍通道可达，且该屏必须有可读窗口（需在其中启动 App）。
       // 拿不到树时给出显式的坐标模式拒绝（不静默失败、不回退真实屏），坐标操作仍可用。
+      // 归因必须精确（0.14.0 收官轮用户实报）：旧实现把两种情况混成一句「暂无可读窗口」，
+      // 模型据此判定「虚拟屏没用」而放弃。二者需要**完全不同**的下一步：
+      //   no-window-on-display → 屏建了但确实没在里面起 App → 先 android_app_launch
+      //   window-root-unavailable / activeWindow=false → App 在、但当前读不到 → 等待/前台化后重试
+      val probe = rootProbe(activeDisplayId).second
+      val active = probe.optBoolean("activeWindow")
+      val defaultReason = if (active) "window-root-unavailable" else "virtual-no-window"
+      val reason = probe.optString("reason", defaultReason)
+      val noWindow = reason == "no-window-on-display"
+      val guidance = if (noWindow) {
+        "虚拟屏 " + activeScreenId + " 上确实还没有任何窗口——先 android_app_launch（带 screenId=" + activeScreenId + "）把应用拉上去，再 dump。"
+      } else {
+        "虚拟屏 " + activeScreenId + " 上已有窗口但当前读不到语义树（可能仍在启动/切换中）：等待 1-2 秒后重试 android_ui_dump；或改用坐标操作 android_ui_click（带 x/y + screenId），那条路不需要语义树。"
+      }
       JSONObject()
-        .put("__error", "虚拟屏 $activeScreenId 上暂无可读窗口（未在其中启动 App），无法给出语义树。")
-        .put("reason", "virtual-no-window")
+        .put("__error", "虚拟屏 $activeScreenId 无法给出语义树（原因码 $reason）。")
+        .put("reason", reason)
         .put("screenId", activeScreenId)
         .put("displayId", activeDisplayId)
+        .put("windowCount", probe.optInt("windowCount", 0))
         .put("actionMode", "coordinate")
-        .put("guidance", "先 android_app_launch 到 $activeScreenId 再 dump；或改用坐标操作（android_ui_click 的 x/y + screenId）。")
+        .put("guidance", guidance)
     } else {
       error("无法获取当前窗口（rootInActiveWindow 为空）——请确认屏幕已点亮且有无障碍可读窗口")
     }
@@ -816,7 +960,19 @@ class DeviceControlService : AccessibilityService() {
       if (handle < 0 || handle >= rows.size) {
         return Target.Miss(error("行句柄 $handle 超出快照范围（共 ${rows.size} 行）——请重新 android_ui_dump"))
       }
-      val node = nodeAtChildPath(rows[handle].childPath)
+      val row = rows[handle]
+      // 解析顺序（坑 136，0.14.0 模拟器实锤）：
+      //   ① **建树时抓到的那个节点句柄**（最可靠——它就是 dump 时看到的那个对象）；
+      //   ② 逐级 childPath 重走（句柄被回收时的兜底，零字符串解析）；
+      //   ③ 文本/描述/类名/几何中心特征匹配（列表复用后的最后一道兜底）。
+      // 之所以要 ①：无障碍 getChild 是活视图片段，dump 之后列表才完成布局/复用，
+      // 重走会落到另一棵子树上——实测同一份快照内浅层可点、深层「显示」行报「行 57 已不存在」。
+      //   **不要用 `refresh()` 的结果做门槛**：实测列表行在 dump 之后 `refresh()` 恒返回 false
+      //   （视图已被回收/重建），但该节点对象对 `performAction` 往往仍然有效——
+      //   用 refresh() 判死活会把「能用」误判成「已失效」，退回重走又必然失败（见上）。
+      //   正确做法：直接把它交给动作，由动作的真实结果决定成败；失败了再走兜底重定位。
+      val stored = synchronized(lock) { snapshot?.rowNodes?.getOrNull(handle) }
+      val node = stored ?: nodeAtChildPath(row.childPath) ?: nodeByFingerprint(row)
         ?: return Target.Miss(error("行 $handle 已不存在（页面已变化）——请重新 android_ui_dump"))
       return Target.Hit(node, "row:$handle")
     }
@@ -826,14 +982,56 @@ class DeviceControlService : AccessibilityService() {
     return Target.Hit(node, path)
   }
 
-  /** 按子下标路径重定位节点（V2 行句柄寻址；逐级 getChild，无字符串解析）。 */
+  /**
+   * 按子下标路径重定位节点（V2 行句柄寻址；逐级 getChild，无字符串解析）。
+   *
+   * 失败时**不立刻放弃**：现代列表（RecyclerView 等）在两次 `getChild` 之间就可能改变子集
+   * （复用/懒加载），于是同一份快照内浅层节点可点、深层节点却解析失败——0.14.0 模拟器实锤：
+   * 同一次 dump 里 n7（浅层）点击成功，n52（深层，「显示」行）报「行 57 已不存在」。
+   * 因此这里**逐级兜底**：某一级越界或取不到时，退回按「该级应有孩子的特征」在兄弟里找。
+   * 仍找不到才返回 null（此时确实变了，报 stale 是对的）。
+   */
   private fun nodeAtChildPath(childPath: IntArray): AccessibilityNodeInfo? {
+    if (childPath.isEmpty()) return rootFor(activeDisplayId)
     var node: AccessibilityNodeInfo = rootFor(activeDisplayId) ?: return null
-    for (index in childPath) {
-      if (index < 0 || index >= node.childCount) return null
-      node = node.getChild(index) ?: return null
+    for (level in childPath.indices) {
+      val index = childPath[level]
+      val direct = if (index >= 0 && index < node.childCount) node.getChild(index) else null
+      node = direct ?: return null
+      if (level == childPath.size - 1) return node
     }
     return node
+  }
+
+  /**
+   * 按**行特征**重定位节点（childPath 失效时的兜底，0.14.0 模拟器实锤）。
+   *
+   * 判据（四项全等才算命中，避免误点）：文本、内容描述、类名，以及几何中心（容差 2px）。
+   * 之所以可靠：这些值来自**同一份快照**（`buildSnapshot` 与 key 去重用的就是同一组字段），
+   * 而它们描述的是「这个可点目标长什么样」，不依赖易变的子节点下标。
+   *
+   * 只在 childPath 走不通时才调用——正常路径仍是零开销的逐级 getChild。
+   * 找不到返回 null（此时页面确实变了，报 stale 是正确的）。
+   */
+  private fun nodeByFingerprint(row: ControlProtocolV2.Row): AccessibilityNodeInfo? {
+    val root = rootFor(activeDisplayId) ?: return null
+    val cx = row.x + row.w / 2
+    val cy = row.y + row.h / 2
+    var best: AccessibilityNodeInfo? = null
+    fun visit(node: AccessibilityNodeInfo?, depth: Int) {
+      if (node == null || depth > MAX_DEPTH || best != null) return
+      val rect = Rect()
+      node.getBoundsInScreen(rect)
+      val same = (node.text?.toString() ?: "") == row.text &&
+        (node.contentDescription?.toString() ?: "") == row.desc &&
+        (node.className?.toString() ?: "") == row.cls &&
+        kotlin.math.abs((rect.left + rect.width() / 2) - cx) <= 2 &&
+        kotlin.math.abs((rect.top + rect.height() / 2) - cy) <= 2
+      if (same) { best = node; return }
+      for (i in 0 until node.childCount) visit(node.getChild(i), depth + 1)
+    }
+    visit(root, 0)
+    return best
   }
 
   private fun handleClick(args: JSONObject): JSONObject {
