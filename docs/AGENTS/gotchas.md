@@ -181,107 +181,24 @@
     要源码级抽取 `defineTool` 名集合与注册名集合求差集（本轮 T2 门禁 `check-tool-output-schema.mjs`）。
     锚点：`plugins/dsh-android-manage/src/index.ts` 的 `tools()` 数组 + `scripts/check-tool-output-schema.mjs`。
 74. **跨语言/跨模块等价门禁只锁「同一输入同一输出」不够，还要锁「输出能被另一端正确解释」**：V2 行句柄口径即此例
-    ——载荷行下标 ≠ 壳侧全量行表下标，两侧各自「自洽」而语义不互通（issue #206.1）。铁律：等价门禁必须包含
-    一端的**真实解码路径**（不能只比字节/长度/自造解析器）。锚点：`scripts/check-protocol-v2.mjs`。
-75. **门禁必须接在「所有」发布路径上，且任何 SKIP 必须计数（0.13.8 批 B2 实锤）**：本地链 PS1 / 云端编排器 /
-    两仓 CI / 发布组装四条路径任一漏接 = 门禁形同虚设（issue #208 根因）。发布链要求 **SKIP = 0**：只有
-    `--require` 把每一处 SKIP 判成失败，才不是「缺件也算过」。本轮修掉的真缺陷：registry 里 `attach-durable-F2`
-    的 marker 带文档后缀「（存在=已应用）」→ 与代码串永不相等 → 该资产/快照配对**每次静默 SKIP**（假绿）；
-    收紧为 `dsh-mobile durable-walk guard` 后核对组合 2→3、SKIP=0。锚点：`scripts/check-gate-skips.mjs`。
-76. **「我方写出的声明值」必须有一条会失败的机器检查把它与真源绑在一起**：哈希 / 清单 / 版本常量 / peer 基线 /
-    装配清单都属此类（ST-04/05/06 的共性）；没有对账断言 = 单边演进无人知。锚点：
-    `scripts/check-perf-instrumentation.mjs`（A1 出厂值 P-AC-01）、`scripts/contract-pin-gaps.json`（peer 基线声明制）。
-77. **桥面必须成对：凡「设备侧状态」必须有只读 getter，且 getter 返回事实而非偏好（0.13.8 ST-26）**：只有
-    setter 的开关一定会出现「开关显示开、功能不在」。基线 = `scripts/bridge-symmetry-baseline.json`（只许减少）：
-    本轮实测壳侧 AndroidBridge 35 个 `@JavascriptInterface`（含 ST-10 新补的 `getImmersiveMode`）、页面类型面 15 个成员、
-    独立对象 `BackGateBridge` 2 个；`getOverlayEnabled` 仍返偏好（ST-02 已改壳侧判定，桥面 getter 待同步）。
-    锚点：`scripts/check-bridge-symmetry.mjs`。
-78. **上游路由 exact 表先于 prefix 表 → 插件用 `kind:'exact'` 注册在 `/api/...` 下会绕过 `/api` 前缀的 cookie 鉴权与
-    Host 校验（上游零兜底）**：AGENTS.md §1「/api 全前缀浏览器鉴权」的表述必须带例外（已改）。自愈：鉴权必须
-    由插件自己带（本轮三条 file-incoming 路由），不能指望前缀栅栏。锚点：issue #205 / E-15。
-79. **门禁只在「正确的仓根」生效（0.13.8 批 B2 实锤）**：同一份门禁在两仓布局下相对路径不同（协调仓
-    `dsh-mobile-apk/app/...` vs apk 自包含根 `app/...`；`scripts/` 侧同名）。写死一种布局的结果是**一方恒红、
-    另一方恒绿**（假绿更危险）。铁律：新门禁必须带布局无关解析（候选路径逐个试，命中即用），并在两仓布局下
-    各跑一次自证。锚点：`check-state-registry.mjs` / `check-gate-skips.mjs` / `check-perf-instrumentation.mjs` 的 `resolveRepoPath`。
-80. **「接线面」与「声明集合」必须双向断言（0.13.8 ST-31）**：只断言「链上调用 ⊇ 声明」会漏掉「链上多调了没人
-    声明」，只断言「声明 ⊆ 链上调用」会漏掉「声明了但没人接」；两条链之间还要断言**门禁集差集 = 0**；发布链
-    必须以 `--run --require` 调聚合入口（去掉 `--require` 即 SKIP 结案）。锚点：`scripts/check-release-gates.mjs`。
-81. **补丁行为回归受 CRLF 影响（FX-E19）**：fixture 索引里是 LF，而 `core.autocrlf=true` 的工作树落地为 CRLF——
-    **多行锚点（含 `\n`）恒失配** → 回归在本地必红、CI 却绿（信号反转）。铁律：夹具写入前按 LF 归一
-    （`readFileSync(...).replace(/\r\n/g, '\n')`），不要靠工作树编码。锚点：`scripts/patches/tests/atomic-stale-lock.test.mjs`（本轮修复）。
-82. **`Reflect.get(ctx, 非 inject 服务)` 会让上游 webserver 把请求兜成 400**：插件读未声明 inject 的服务时，Cordis
-    属性代理不报错而是返回 `undefined`，调用方随后在上游请求处理链里被兜底成 HTTP 400（表现为「接口莫名 400」
-    而非「服务缺失」）。铁律：可选服务一律 `ctx.get(name)` 并显式判空，不要在 `inject` 之外靠 `ctx.x` 试探。
-    锚点：`plugins/dsh-android-manage/src/index.ts`。
-83. **通知渠道 importance 创建后只能降不能升；删除后同 ID 重建是 `un-deleted`（0.13.8 通知章实锤）**：弹窗语义
-    （HIGH）必须**第一次建渠道就用 HIGH**；要从静默转弹窗只能换**新渠道 ID**（改 importance 无效）。
-    锚点：`NotifyCenter.selectChannel()` 三态 + `NotifyCenterChannelTest`。
-84. **RemoteInput 回复动作的 PendingIntent 必须 `FLAG_MUTABLE`**：结果经 ClipData 注入，`IMMUTABLE` 会**静默失败**
-    （通知栏回复看着发出去了，引擎永远收不到）。仓内「一律 IMMUTABLE」口径改为「默认 IMMUTABLE，唯一例外 =
-    通知回复动作」。锚点：`NotifyCenter.actionPending(mutable = true)` + `NotifyActionReceiver.replyText`。
-85. **Kotlin 尾随 lambda 绑定最后一个形参**：给构造器末位加可选参数，会让 `MuxClient(a,b,c) { }` 把 lambda 当成
-    那个新参数（本轮编译两连败实锤：报的是类型不匹配而非无歧义错误）。铁律：加末位参数时同时检查所有尾随
-    lambda 调用点。锚点：`OverlayPanel.startMux` 注释 + `MuxClient` streamId。
-86. **通知动作接收器 `onReceive` 预算 10s（`goAsync` 不延长）且全程不得 `startActivity`**：只做「先落盘入队 + 一次
-    快速尝试」，重活交退避队列；动作处理器 `startActivity` 在 Android 12+ 会被 trampoline 禁令拦成静默失败
-    （logcat `Background activity launch blocked`）。锚点：`NotifyActionReceiver.onReceive` + `NotifyDecisionQueue`。
 
-87. **注入链「只替换已存在成员」= 包内新增文件被静默丢弃 + 陈旧成员残留（0.13.8 实测，坑 63 活体复现）**：
-    inject-all.py 原语义只替换基座里已有的成员，且「包名已见」即不触发整包追加 → ①插件新增一个模块文件
-    （如 lib/route-auth.js、lib/types/**）不会进快照，而 tar 内的 lib/index.js 仍 import 它 → 设备侧
-    `ERR_MODULE_NOT_FOUND` → 引擎启动即死；②反向更隐蔽：源码已删的旧组件（0.13.7 去 fork 的
-    AppFrame/columns/stores/service/theme-presenter）会永久留在快照里。铁律：**注入后包内容 == 源包内容**
-    ——对每个工厂包先修剪 ∉ 源包成员的条目、再补 push 源包中缺失的 rel（父目录项一并补），计数器打印
-    `pruned stale`。门禁 `scripts/check-inject-completeness.mjs`（成员集合 + 相对导入可解析，仅对「源包有、tar 缺」判红）。
-    锚点：`scripts/inject-all.py`（factory_rel 修剪 + 补缺循环）、`scripts/check-inject-completeness.mjs`。
-88. **镜像漂移会让「本地已验证的修复」在另一棵树/另一条链上静默失效（0.13.8 实测）**：本次修 inject-all.py 时先改
-    协调仓、随后用 **apk 树副本**跑真注入 → 跑的是旧脚本（replaced 212 / added 0），于是「修复后仍红」的假象
-    排查了两轮；同一形态也解释过 -Fast 链上的 4 项门禁红。铁律：**改完立刻双写并跑 `check-patch-mirror`，再跑构建/注入**；
-    构建日志里的 `[fill]/[prune]` 计数缺失即是「用了旧脚本」的直接信号。锚点：`scripts/check-patch-mirror.mjs`（目录级镜像面）。
-89. **Kotlin 块注释可嵌套：KDoc 里写 `node_modules/**` 这类 glob 会吞掉整个文件（dev-shell 实测）**：块注释内再出现
-    `/*` 会开启一层嵌套注释，注释边界被推进 → 后续代码被注释掉或编译报错，且报错位置通常远离真因。
-    铁律：KDoc/块注释里不要写含 `/*` 的 glob（用 `node_modules/**` 之外的表述或行注释）。
-    门禁 `scripts/check-kotlin-comments.mjs`（字符串/原始串/字符字面量感知的词法扫描 + `--self-test` 两向自检）。
+143. **对虚拟屏截图拿到的是真实屏画面：ADB 回落路径完全忽略 `screenId`（0.14.0 模拟器实锤）**：
+    现象：设备内 agent 把「设置」成功拉到虚拟屏（`dumpsys activity` 确认在 Display #10），
+    但 `android_screenshot { screenId: "virtual-1" }` 返回的画面是 **DSH 聊天界面**；
+    它据此判定「设置没开在虚拟屏上」，整轮往错误方向排查。
 
-90. **经 RemoteInput 直接回复过的通知，`cancel()` 会被系统忽略（0.13.8 设备实测，dev-notify）**：AOSP 对「已直接回复」的通知
-    加 `LIFETIME_EXTENDED_BY_DIRECT_REPLY` 并置 `mCanceledAfterLifetimeExtension`（防止回复 UI 在应用收尾前消失）——
-    实测应用侧 `cancel()` 无效，连「清除所有静音通知」也清不掉它。**正解 = 同 `(tag,id)` 重投一次**（重投即清该标志）再 `cancel`。
-    证据：`dumpsys notification --noredact` 的 flags 原文 + id 数学复核（stableId 与投递 id 一致）+ 心跳 `pending 1→0` 但通知仍在。
-    锚点：`NotifyCenter` 的 cancel/重投路径 + `NotifyCenterChannelTest`。
+    真因：`android_screenshot` 有两条路，**只有无障碍那条认 screenId**。
+    无障碍离线时回落到的 ADB 路径写死了：
+      `adb shell screencap -p <remote> && adb pull ...`
+    无参 `screencap` 只抓默认屏（display 0），`screenId` 从始至终没被读过一次。
+    这是一个**静默错误答案**：工具返回成功、图也真实，只是拍错了屏——比直接报错更有害。
 
-91. **模型 id 改名后，既有会话的投影缓存仍钉住旧 id（0.13.8 设备实测，dev-notify）**：`settings.yaml` 已更正
-    （`agent-default-model.model` 与 provider id 都是 `mimo-v2.5`），但 `grep -r -o mimo2.5 files/home/.dsh` 命中 7 处，
-    **唯一的功能性来源**是 `files/home/.dsh/storages/session_projcache/sessions/session-<id>.json`（旧会话投影缓存，
-    mtime 早于模型 id 修复）；`sessions/**` 会话日志对两个 id 都是 0 命中 ⇒ 钉住旧 id 的是**派生缓存**而非日志。
-    表现为打开该会话时引擎报 provider xiaomimimo has no configured model mimo2.5。
-    修法：清掉该会话的投影缓存条目（或整体重建 `session_projcache`）让投影按当前 settings 重算；新建会话天然不受影响。
-    与「配置真源 vs 会话派生缓存」同族（对照坑：状态真源 vs 会话快照）。锚点：`files/home/.dsh/storages/session_projcache/`
+    修法：ADB 路径也解析目标屏（`screenAccessResolved` → `vdInfo`）并落到 `screencap -d <displayId>`
+    （该通道 uid=2000，具备此权限）；同时**把分辨率锚点换成目标屏自己的像素**——
+    锚点若仍是真实屏尺寸，模型按归一化坐标点击会整体错位。
+    未指定 screenId 时不注入 `-d`，保持真实屏默认语义不变。
 
-92. **收紧门禁的扫描口径会把「不相关的面」整体打瞎（0.13.8-b 实锤：overlay 门禁 7 项假红拒打包）**：给
-    `check-engine-overlay.mjs` 加反向面（依赖闭包 + 根安装集钉面）时，把扫描器的提取条件收紧成「只处理
-    `package.json`」——于是 `want` 里的 `.js`/`.ts` 目标（7 条引擎树补丁的 patch-marker）永远取不回内容，
-    全部报「[patch-marker] 缺失」，`-Fast` 全链拒绝打包，而反向面本身完全正常（误导排查方向）。
-    判别锚点：**目标文件是否真在 tar 里**（逐个查 tar 成员即可证伪「包被裁掉」的假设）；r10–r13b 在同档位为绿
-    亦说明 marker 本可取到。铁律：改一门禁的取数口径时，逐个调用点回到「它原本要取什么」，新口径必须与旧面
-    共享同一遍扫描、不能顺带窄化。防线 = 门禁内置自检「want 含非 `package.json` 目标而扫描器一个都没取回 → FAIL」
-    （`scripts/check-engine-overlay.mjs`），且反向面/前向面分别计数打印。
-
-93. **纯动作广播冷启动：进程没有 Activity/WebView → 应答流 WS 的 cookie 依赖 WebView 侧刷新 → `ready` 永不来（0.13.8
-    设备实测，dev-notify）**：证据 = NOT_READY Ladder 档 65s 内 `ready gen` 恒 5（不来），`am start` 之后
-    `03:11:41.659 ready gen=1` → **76ms 后** `settle re-post ok` 补投成功；Recover/Budget 两档同样以 `am start` 为恢复前提。
-    含义：「引擎未就绪」在设备上的主要表现形态是**宿主 UI 未拉起**而非引擎慢 —— 因此「5 分钟墙钟预算」与
-    「就绪后补投」两条语义成立（预算常量单一来源 `ENGINE_BOOT_BUDGET_MS`，见 `EngineStartFlow.kt`）。
-    锚点：`EngineStartFlow.kt`（就绪轮询/预算）+ `OverlayService`（通知应答流）+ 状态登记条 `notify-ready-gate`。
-
-94. **构建绿 != 产物对：某个 ABI 被门禁拒绝后，构建链仍可能以 exit 0 结束并交付单 ABI 产物（0.13.8-b 实锤）**：
-    `build-apk-013.ps1 -Suffix ''` 空跑时 arm64 侧 overlay 门禁判红 → 脚本打印「拒绝打包（arm64）」并 `continue`，
-    随后照常打印完成行且 **exit 0**，产物目录只剩 x86_64 的 APK ⇒ 发版会发出缺 ABI 的 release 而无人察觉。
-    铁律：per-ABI 的每条拒绝路径都必须把该 ABI 记入 `$rejectedAbis`，尾部必须打印「已产出 / 被拒 ABI」汇总，
-    并在「被拒非空」或「产出为空」时 `exit 1`。防线 = `scripts/check-build-chain-abort.mjs`（静态逐处断言 +
-    `--self-test` 抽真实尾部块用合成状态驱动：被拒→非 0 / 全产出→0 / 零产出→非 0 / 去掉守卫→0 承重反证）。
-
-
-
-
-
-
+    通用教训：**同一工具的多条通道必须共享同一份参数语义。**
+    这条缺陷的本质不是「截图坏了」，而是「两条路的 screenId 支持度不一致」——
+    加通道时只测了主路，回落路径的参数就跟主路脱钩了。
+    回归：`a11y-routing.test.mjs` 两条（带 screenId 必须 `-d <id>` + 锚点是虚拟屏像素；不带则不得注入 `-d`）。

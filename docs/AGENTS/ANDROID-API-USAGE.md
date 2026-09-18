@@ -1,30 +1,31 @@
 # ANDROID-API-USAGE.md — android.* 使用面分组登记
 
-> 职责：壳源码 android/androidx 平台 API 的按域分组清单与 API 等级约束。统计口径：`grep "^import android"` 当场实测（2026-09-12，0.14.0-preview 通知面落地后）——android.* 导入行 272 处、去重 98 类，分布于 44/55 个源文件（11 个零 android 导入：ApkArtifactCheck / ControlPoller / ControlProtocolV2 / EngineProbe / FactoryProfilePatch / LiveProbe / ProcIo / SnapshotFileMode / SnapshotFs / SnapshotTransaction / SnapshotUserData，纯 java.net/java.io/java.security）；androidx 导入 27 处、去重 14 类。源码根 `app/src/main/java/com/dsharnessmobile/shell/`。
+> 职责：壳源码 android/androidx 平台 API 的按域分组清单与 API 等级约束。统计口径：`grep "^import android"` 当场实测（2026-09-14，0.14.0-preview 发布后的工作区）——android.* 导入行 327 处、去重 116 类，分布于 53/65 个源文件（12 个零 android 导入：ApkArtifactCheck / BrowserHostNavigationPolicy / ControlPoller / ControlProtocolV2 / EngineProbe / FactoryProfilePatch / LiveProbe / ProcIo / SnapshotFileMode / SnapshotFs / SnapshotTransaction / SnapshotUserData，纯 java.net/java.io/java.security）；androidx 导入 28 处、去重 15 类。源码根 `app/src/main/java/com/dsharnessmobile/shell/`。
 
-## 1. 按域分组（85 类去重口径）
+## 1. 按域分组（116 类去重口径）
 
 | 域 | 类 | 关键调用点 |
 |---|---|---|
-| WebView 全家桶（8） | WebView、WebViewClient、WebChromeClient、WebSettings、WebResourceRequest、JsResult、ValueCallback、JavascriptInterface | MainActivity.kt:313-393（配置 + shouldOverrideUrlLoading/onReceivedError/onPageFinished/onShowFileChooser/onJsAlert）、ConsoleActivity.kt:79-117、WebUiChrome.kt（主题/字体回推） |
-| 通知（5） | NotificationChannel、NotificationManager、PendingIntent、（androidx）NotificationCompat、（androidx）RemoteInput | **NotifyCenter.kt**（0.14.0-preview §6：五类渠道一次性定案 + 候选 ID 迁移 + 六类 kind 分流 + 弹窗/静默形态 + 自检面）、**NotifyStore.kt**（.notify.ndjson 偏移消费）、**NotifyBridge.kt**（专用 $events 流投放）、**NotifyDecisionQueue.kt**（失败态可见通知）、MainActivity.showTestNotification、EngineService.kt（前台通知）、WatchdogV2.kt（旧信道回退） |
-| 存储 SAF / MediaStore（6） | DocumentsContract、MediaStore、ContentValues、Environment、MediaScannerConnection、provider.Settings | ConfigTransfer.kt:80-306（Directory/MediaPick 双控制器 + PickImageContract :412）、DownloadSaver.kt:185-193（MediaStore.Downloads + IS_PENDING + 200MB 上限）、EngineManager.kt:262（MediaScannerConnection.scanFile）、LogCollector.kt:76（落盘路径分代） |
-| IME 输入法（3） | InputMethodService、InputMethodManager、EditorInfo（全限定引用） | AdbKeyboardService.kt:30-118（ADBKeyboard 协议 IME）、OverlayPanel.kt:241,535（IME_ACTION_SEND/DONE） |
-| 悬浮窗 WindowManager（4） | WindowManager、PixelFormat、view.Gravity、MotionEvent | OverlayService.kt:173-256（TYPE_APPLICATION_OVERLAY 三窗口：球/光环/面板）、OverlayController.kt:33-65（canDrawOverlays 判定 + ACTION_MANAGE_OVERLAY_PERMISSION 授权页引导） |
-| FileObserver（1） | os.FileObserver | OverlayLiveFeed.kt（.live.ndjson 的 MODIFY/CREATE + debug 注入文件 .overlay-test-pending）、NotifyStore.kt:start（.notify.ndjson，偏移持久化 + 轮转残段补读） |
-| 动效（9） | animation.ObjectAnimator、ValueAnimator、AlphaAnimation、PathInterpolator、graphics.LinearGradient、graphics.Shader、（androidx）SpringAnimation、SpringForce、DynamicAnimation | ShimmerTextView.kt（Deep diving 扫光，gradient 250% 平移）、OverlayService.kt:369-408（贴边吸附 spring 380/0.8）、OverlayHalo.kt:54-59（WORKING 呼吸脉动）、GuidePageRenderer.kt（引导页 stagger 入场）、DsUi.kt:8（PathInterpolator 缓动） |
-| WakeLock（1） | os.PowerManager | MainActivity.kt:575-592（SCREEN_BRIGHT_WAKE_LOCK 常亮，单例成对 acquire/release）、WatchdogV2.kt:125（PARTIAL_WAKE_LOCK 前台保活 + 30min 续期） |
-| 剪贴板（2） | ClipData、ClipboardManager | MainActivity.kt:487-497、WebUiChrome.kt（copyText 桥）、ConsoleActivity.kt:154-163 |
+| WebView 全家桶（8） | WebView、WebViewClient、WebChromeClient、WebSettings、WebResourceRequest、JsResult、ValueCallback、JavascriptInterface | MainActivity.kt（配置 + shouldOverrideUrlLoading/onReceivedError/onPageFinished/onShowFileChooser/onJsAlert）、**BrowserHost.kt（第二 WebView：导航策略/标题/渲染进程回收）**、ConsoleActivity.kt、WebUiChrome.kt（主题/字体回推） |
+| 显示与虚拟屏（10） | hardware.display.DisplayManager、hardware.display.VirtualDisplay、view.Display、view.Surface、view.SurfaceView、view.SurfaceHolder、media.ImageReader、util.DisplayMetrics、graphics.PixelFormat、os.HandlerThread | **VdisplayController.kt**（createVirtualDisplay/release/setSurface/displayId/state）、**VdisplayHost.kt**（SurfaceView/SurfaceHolder 生命周期）、**VirtualDisplayProbe.kt**、**ScreenScope.kt（display 别名）**、MainActivity（viewer 宿主接线） |
+| 通知（5） | NotificationChannel、NotificationManager、PendingIntent、（androidx）NotificationCompat、（androidx）RemoteInput | **NotifyCenter.kt**（五类渠道 + 六类 kind 分流 + 弹窗/静默形态 + 自检面）、**NotifyStore.kt**（.notify.ndjson 偏移消费）、**NotifyBridge.kt**（专用 $events 流投放）、**NotifyDecisionQueue.kt**（失败态可见通知）、MainActivity.showTestNotification、EngineService.kt（前台通知）、WatchdogV2.kt（旧信道回退） |
+| 存储 SAF / MediaStore（6） | DocumentsContract、MediaStore、ContentValues、Environment、MediaScannerConnection、provider.Settings | ConfigTransfer.kt（Directory/MediaPick 双控制器 + PickImageContract）、DownloadSaver.kt（MediaStore.Downloads + IS_PENDING + 200MB 上限）、EngineManager.kt（MediaScannerConnection.scanFile）、LogCollector.kt（落盘路径分代）、PathOpen.kt（FileProvider URI） |
+| IME 输入法（3） | InputMethodService、InputMethodManager、EditorInfo（全限定引用） | AdbKeyboardService.kt（ADBKeyboard 协议 IME）、OverlayPanel.kt（IME_ACTION_SEND/DONE） |
+| 悬浮窗 WindowManager（4） | WindowManager、PixelFormat、view.Gravity、MotionEvent | OverlayService.kt（TYPE_APPLICATION_OVERLAY 三窗口：球/光环/面板）、OverlayController.kt（canDrawOverlays 判定 + ACTION_MANAGE_OVERLAY_PERMISSION 授权页引导） |
+| FileObserver（1） | os.FileObserver | OverlayLiveFeed.kt（.live.ndjson 的 MODIFY/CREATE + debug 注入文件 .overlay-test-pending）、NotifyStore.kt（.notify.ndjson，偏移持久化 + 轮转残段补读） |
+| 动效（9） | animation.ObjectAnimator、ValueAnimator、AlphaAnimation、PathInterpolator、graphics.LinearGradient、graphics.Shader、（androidx）SpringAnimation、SpringForce、DynamicAnimation | ShimmerTextView.kt（Deep diving 扫光）、OverlayService.kt（贴边吸附 spring 380/0.8）、OverlayHalo.kt（WORKING 呼吸脉动）、GuidePageRenderer.kt（引导页 stagger 入场）、DsUi.kt（PathInterpolator 缓动） |
+| WakeLock（1） | os.PowerManager | MainActivity.kt（SCREEN_BRIGHT_WAKE_LOCK 常亮，单例成对 acquire/release）、WatchdogV2.kt（PARTIAL_WAKE_LOCK 前台保活 + 30min 续期） |
+| 剪贴板（2） | ClipData、ClipboardManager | MainActivity.kt、WebUiChrome.kt（copyText 桥）、ConsoleActivity.kt |
 | 广播（4） | BroadcastReceiver、IntentFilter、content.Intent、os.Bundle（RemoteInput 结果） | BootReceiver.kt（BOOT_COMPLETED）、AdbKeyboardReceiver.kt（ADB_INPUT_TEXT/ADB_CLEAR_TEXT）、**NotifyActionReceiver.kt**（通知动作：回复/选项/批准/拒绝/重试；exported=false + 显式 Intent）、WatchdogV2.kt（用户交互复位监听） |
-| 进程/线程基础（6） | os.Handler、os.Looper、os.Bundle、os.Build、os.IBinder、app.ActivityManager | 全壳主线程 post 面；Build 用于全部 SDK 分支；ActivityManager 用于 WatchdogV2 进程级检查 |
-| 图形与控件（约 30） | GradientDrawable、RippleDrawable、LayerDrawable、ClipDrawable、ColorStateList、Typeface、TypedValue、Color + widget.LinearLayout/TextView/EditText/ImageView/Button/Spinner/ArrayAdapter/AdapterView/ScrollView/FrameLayout/ProgressBar 等 | GuideChrome/GuidePageRenderer/DsUi（引导页纯代码 UI）、OverlayPanel（面板）、OverlayService.buildRoot（白球黑鲸 Matrix 裁剪 :147-168） |
-| 其他（4） | util.Base64、text.InputType、text.TextUtils、net.Uri | MuxClient.kt:75-97（WS 握手 key/accept 编解码）、OverlayPanel.kt:240（输入框类型）、FileIncoming.kt（Uri 白名单校验）、权限判定各处 |
+| 进程/线程基础（8） | os.Handler、os.Looper、os.Bundle、os.Build、os.IBinder、os.Process、os.SystemClock、app.ActivityManager | 全壳主线程 post 面；Build 用于全部 SDK 分支；ActivityManager 用于 WatchdogV2 进程级检查；ShizukuUserService（Process.myUid/exec） |
+| 图形与控件（约 30） | GradientDrawable、RippleDrawable、LayerDrawable、ClipDrawable、ColorStateList、Typeface、TypedValue、Color + widget.LinearLayout/TextView/EditText/ImageView/Button/Spinner/ArrayAdapter/AdapterView/ScrollView/FrameLayout/ProgressBar 等 | GuideChrome/GuidePageRenderer/DsUi（引导页纯代码 UI）、OverlayPanel（面板）、OverlayService.buildRoot（白球黑鲸 Matrix 裁剪） |
+| 其他（4） | util.Base64、text.InputType、text.TextUtils、net.Uri | MuxClient.kt（WS 握手 key/accept 编解码）、OverlayPanel.kt（输入框类型）、FileIncoming.kt（Uri 白名单校验）、权限判定各处 |
 
-androidx 面（14 类，27 处导入）：ComponentActivity、ActivityResultContracts / ActivityResultContract（目录/图片/权限三契约）、NotificationCompat、**RemoteInput**（通知栏直接回复，NotifyCenter.kt addQuestionActions）、ViewCompat / WindowCompat / WindowInsetsCompat / WindowInsetsControllerCompat（insets 与沉浸式）、dynamicanimation 三件（SpringAnimation/SpringForce/DynamicAnimation，OverlayService 贴边吸附）。
+androidx 面（15 类，28 处导入）：ComponentActivity、ActivityResultContracts / ActivityResultContract、**OnBackPressedCallback**（MainActivity 返回网关，0.14）、NotificationCompat、**RemoteInput**（通知栏直接回复）、ViewCompat / WindowCompat / WindowInsetsCompat / WindowInsetsControllerCompat（insets 与沉浸式）、dynamicanimation 三件（SpringAnimation/SpringForce/DynamicAnimation）、**annotation.Keep**（ShizukuUserService 反射构造保留）。
 
-## 2. 单文件导入密度（前 10，grep -c 实测）
+## 2. 单文件导入密度（前 10，grep -c 实测，2026-09-14）
 
-MainActivity 31 / OverlayService 20 / OverlayPanel 15 / ConsoleActivity 15 / GuideChrome 14 / WebUiChrome 10 / GuidePageRenderer·DsUi·ConfigTransfer 各 9 / WatchdogV2·NotifyCenter·EngineService·AdbKeyboardService 各 8。引擎域文件（EngineManager 4、UndoGate 2、UpdateManager 2、MuxClient 2、SnapshotExtractor 1）刻意保持最小 android 面。
+MainActivity 33 / OverlayService 20 / **BrowserHost 18** / OverlayPanel 15 / ConsoleActivity 15 / GuideChrome 14 / DeviceControlService 12 / **VdisplayController 11** / NotifyCenter 10 / DsUi·EngineService·GuidePageRenderer 各 9。引擎域文件（EngineManager、UndoGate、UpdateManager、MuxClient、SnapshotExtractor）刻意保持最小 android 面。
 
 ## 3. 线程与生命周期约束（与 API 使用强绑定，源码注释实测）
 
@@ -54,6 +55,10 @@ MainActivity 31 / OverlayService 20 / OverlayPanel 15 / ConsoleActivity 15 / Gui
 | SYSTEM_ALERT_WINDOW | 全等级 | Settings.canDrawOverlays + 授权页引导 + onResume 补启（OverlayController.kt:33-65、MainActivity.kt:206） |
 | WRITE_EXTERNAL_STORAGE | maxSdk 29 | manifest 分代声明（分区存储后不再需要） |
 | READ_EXTERNAL_STORAGE | maxSdk 32 | Android 13+ 并入 READ_MEDIA_* 且工作区走 All Files Access |
+| VirtualDisplay（createVirtualDisplay/release/setSurface） | API 17+ | 直接使用（minSdk 26）；flags 位值本地位常量（`VIRTUAL_DISPLAY_FLAG_*` 多个为 @hide，见 VirtualDisplayProbe.kt 文件头） |
+| SurfaceView / SurfaceHolder 回调 | API 1+ | VdisplayHost 直接使用；surfaceDestroyed 必须 detach，防止 Surface 泄漏 |
+| OnBackPressedCallback / onBackPressedDispatcher | androidx.activity 1.6+（本项目 1.10.1） | MainActivity 返回网关；与 legacy onBackPressed 覆写不能并用 |
+| Shizuku api/provider 13.1.5 | Android 6+（API 23+） | 外部依赖；Shizuku 服务不在场时所有调用 fail-closed（ShizukuTransport/ShizukuProbe） |
 
 ## 5. SDK 档位理由（app/build.gradle.kts:13-16 注释为权威）
 
@@ -96,3 +101,18 @@ MainActivity 31 / OverlayService 20 / OverlayPanel 15 / ConsoleActivity 15 / Gui
 - **WS 应答流不得被单帧异常杀死**：`NotifyBridge.onFrame` 与 `NotifyCenter.notifyEvent` 都有 Throwable 边界（返回 `Result.ERROR`），否则异常冒到 `MuxClient.frameLoop` 会让整条 `$events` 流反复重连、后续提问/审批通知全部消失。
 - **耐久探针**：`files/notify-responder.log`（`NotifyProbe`，追加 + 128KB 轮转）记 `start / ready / waterfall / notify result / 异常 / 连接心跳`，设备复验用 `run-as cat` 读取，不依赖调试日志采集器；判据口径见计划 §6.2.2「NT-11 四段可判定」。
 - **提交成功必须本地结算**（DEF-NOTIFY-03）：网关只给其它持有者发 `cancel`，提交者不会收到——`NotifyDecisionQueue` 的 `OK` 分支立即 `markSettled`（`markSettled` 无条件 `cancelEvent`，不依赖 pending 表存在），否则通知停在「正在发送」。
+
+## 9. 0.14 新增面（Shizuku / 虚拟屏 / 浏览器宿主 / 返回网关）
+
+- **Shizuku（外部依赖，非 android.*）**：`dev.rikka.shizuku:api/provider 13.1.5`。`ShizukuTransport` 管理
+  UserService 生命周期（权限状态、bind 超时 4s、`ShizukuUserServiceArgs`）；`ShizukuUserService` 实现既有
+  AIDL v1（uid/protocolVersion/exec(argv)，16KB 输出上限）。所有调用 fail-closed；授权只能由用户在
+  Shizuku App 内授予。`ShizukuSupport`/`ShizukuProbe` 仍走反射（探针可注入式降级）。
+- **虚拟屏**：`VdisplayController` 在**应用进程**建 `PUBLIC|OWN_CONTENT_ONLY|SUPPORTS_TOUCH|DESTROY_CONTENT_ON_REMOVAL`
+  的 VirtualDisplay，输出先用 `ImageReader` 兜底；viewer 挂接后 `setSurface(viewerSurface)`，释放回 reader。
+  运行时 displayId 动态，产品别名 `virtual-N` 稳定；`ScreenTargets.REAL` 固定 display 0 且不可镜像。
+- **浏览器宿主**：`BrowserHost` 惰性创建第二个 WebView（不 `addJavascriptInterface`），
+  `BrowserHostNavigationPolicy` 只放行 http(s)/about:blank 且拒绝 loopback；stage 几何用物理
+  letterbox rect（不做 CSS/Android 缩放），视口预设由页面桥 `browserHostViewport` 下发。
+- **返回网关**：`BackGate`（决策器）+ `BackGateBridge`（`window.dshBackBridge`，独立 @JavascriptInterface
+  对象，2 方法）——页内层栈可用性同步过桥，Activity 用 `OnBackPressedCallback` 消费；层穷尽才退出。

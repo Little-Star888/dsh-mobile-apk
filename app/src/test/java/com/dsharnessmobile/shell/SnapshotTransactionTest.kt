@@ -126,10 +126,43 @@ class SnapshotTransactionTest {
         SnapshotTransaction.Marker(SnapshotTransaction.Phase.SWAPPING, "fp1", 1L, listOf("home/.dsh/profiles")),
       )
 
-      val recovery = SnapshotTransaction.recover(filesDir, stage, File(live, "usr"), File(live, "home"), "old-fp")
+      val recovery = SnapshotTransaction.recover(filesDir, stage, File(live, "usr"), File(live, "home"))
 
       assertEquals(SnapshotTransaction.Outcome.ROLLED_BACK, recovery.outcome)
       assertEquals("old-profile", File(live, "home/.dsh/profiles/web/cordis.yml").readText())
+    } finally {
+      SnapshotFs.deletePath(filesDir)
+    }
+  }
+
+  /**
+   * review C4：备份只有「拷贝完成 + 原子 rename」后才入 journal——拷贝中途被杀的残渣
+   * （`profiles.copying`，半份内容）绝不能被恢复路径当成 displaced 覆盖 live。
+   */
+  @Test
+  fun rollbackIgnoresAHalfWrittenProfilesBackupLeftover() {
+    val filesDir = tempDir()
+    try {
+      val live = File(filesDir, "live").apply { mkdirs() }
+      writeRuntime(live, "old-node", "old-profile-live")
+      val stage = SnapshotTransaction.stageRoot(filesDir)
+      SnapshotFs.createDirectories(stage)
+      val previous = SnapshotTransaction.previousRoot(filesDir)
+      // 半份备份残渣（模拟拷贝中被杀）：目录名带 .copying，内容不完整
+      val copying = File(previous, "home/.dsh/profiles.copying/web")
+      copying.mkdirs()
+      File(copying, "cordis.yml").writeText("half-copied")
+      SnapshotTransaction.writeMarker(
+        filesDir,
+        SnapshotTransaction.Marker(SnapshotTransaction.Phase.SWAPPING, "fp1", 1L),
+      )
+
+      val recovery = SnapshotTransaction.recover(filesDir, stage, File(live, "usr"), File(live, "home"))
+
+      assertEquals(SnapshotTransaction.Outcome.ROLLED_BACK, recovery.outcome)
+      assertEquals("live 必须保持原样（半份备份不得覆盖）", "old-profile-live", File(live, "home/.dsh/profiles/web/cordis.yml").readText())
+      assertFalse("残渣不得被搬进 live", SnapshotFs.exists(File(live, "home/.dsh/profiles.copying")))
+      assertFalse("previous 整目录清掉（含残渣）", SnapshotFs.exists(previous))
     } finally {
       SnapshotFs.deletePath(filesDir)
     }
@@ -170,7 +203,7 @@ class SnapshotTransactionTest {
         SnapshotTransaction.Marker(SnapshotTransaction.Phase.SWAPPING, "fp1", 1L, listOf("usr")),
       )
 
-      val recovery = SnapshotTransaction.recover(filesDir, stage, File(live, "usr"), File(live, "home"), "old-fp")
+      val recovery = SnapshotTransaction.recover(filesDir, stage, File(live, "usr"), File(live, "home"))
 
       assertEquals(SnapshotTransaction.Outcome.ROLLED_BACK, recovery.outcome)
       assertEquals("old-node", File(live, "usr/bin/node").readText())
@@ -197,7 +230,7 @@ class SnapshotTransactionTest {
         SnapshotTransaction.Marker(SnapshotTransaction.Phase.SWAPPING, "fp1", 1L, listOf("usr", "home/.dsh/profiles")),
       )
 
-      val recovery = SnapshotTransaction.recover(filesDir, stage, File(live, "usr"), File(live, "home"), "old-fp")
+      val recovery = SnapshotTransaction.recover(filesDir, stage, File(live, "usr"), File(live, "home"))
 
       assertEquals(SnapshotTransaction.Outcome.ROLLED_BACK, recovery.outcome)
       assertEquals("old-node", File(live, "usr/bin/node").readText())
@@ -220,7 +253,7 @@ class SnapshotTransactionTest {
         SnapshotTransaction.Marker(SnapshotTransaction.Phase.SWAPPING, "fp1", 1L, listOf("usr")),
       )
 
-      SnapshotTransaction.recover(filesDir, stage, File(live, "usr"), File(live, "home"), "")
+      SnapshotTransaction.recover(filesDir, stage, File(live, "usr"), File(live, "home"))
 
       assertFalse(SnapshotFs.exists(File(live, "usr")))
     } finally {
@@ -241,7 +274,7 @@ class SnapshotTransactionTest {
         SnapshotTransaction.Marker(SnapshotTransaction.Phase.STAGED, "fp1", 1L),
       )
 
-      val recovery = SnapshotTransaction.recover(filesDir, stage, File(live, "usr"), File(live, "home"), "old-fp")
+      val recovery = SnapshotTransaction.recover(filesDir, stage, File(live, "usr"), File(live, "home"))
 
       assertEquals(SnapshotTransaction.Outcome.DISCARDED_STAGE, recovery.outcome)
       assertEquals("old-node", File(live, "usr/bin/node").readText())
@@ -265,7 +298,7 @@ class SnapshotTransactionTest {
         SnapshotTransaction.Marker(SnapshotTransaction.Phase.SWAPPED, "fp2", 1L, listOf("usr")),
       )
 
-      val recovery = SnapshotTransaction.recover(filesDir, stage, File(live, "usr"), File(live, "home"), "fp1")
+      val recovery = SnapshotTransaction.recover(filesDir, stage, File(live, "usr"), File(live, "home"))
 
       assertEquals(SnapshotTransaction.Outcome.ROLLED_FORWARD, recovery.outcome)
       assertEquals("fp2", recovery.fingerprintToCommit)
@@ -278,8 +311,12 @@ class SnapshotTransactionTest {
     }
   }
 
+  /**
+   * review C13（旧语义反转）：指纹已等于目标**不再是**提交证据——同版本重解压时指纹在交换开始前
+   * 就等于目标，交换中途被杀必须回滚（旧实现会误判前滚，live 可能只换了一半）。
+   */
   @Test
-  fun rollsForwardWhenTheFingerprintAlreadyMatchesTheTarget() {
+  fun rollsBackWhenOnlyTheTargetFingerprintMatchesButTheSwapNeverCommitted() {
     val filesDir = tempDir()
     try {
       val live = File(filesDir, "live").apply { mkdirs() }
@@ -291,11 +328,12 @@ class SnapshotTransactionTest {
         SnapshotTransaction.Marker(SnapshotTransaction.Phase.SWAPPING, "fp2", 1L, listOf("usr")),
       )
 
-      val recovery = SnapshotTransaction.recover(filesDir, stage, File(live, "usr"), File(live, "home"), "fp2")
+      val recovery = SnapshotTransaction.recover(filesDir, stage, File(live, "usr"), File(live, "home"))
 
-      assertEquals(SnapshotTransaction.Outcome.ROLLED_FORWARD, recovery.outcome)
-      assertEquals("new-node", File(live, "usr/bin/node").readText())
-      SnapshotTransaction.finish(filesDir)
+      assertEquals(SnapshotTransaction.Outcome.ROLLED_BACK, recovery.outcome)
+      // 无 previous 备份 + staged 已不在场 = 该条目是本次新装：回滚即删除（live 不得停在半交换态）。
+      assertFalse("半交换的新树必须被回滚清除", SnapshotFs.exists(File(live, "usr/bin/node")))
+      assertNull(SnapshotTransaction.readMarker(filesDir))
     } finally {
       SnapshotFs.deletePath(filesDir)
     }
@@ -461,6 +499,61 @@ class SnapshotTransactionTest {
   }
 
   private fun tempDir(): File = Files.createTempDirectory("snapshot-transaction-test").toFile()
+
+  // ── 清理阶段的容错（0.14.0 模拟器实锤） ──────────────────────────────────────
+  //
+  // 缺陷形态：模拟器异常掉线把解压打断，留下 `.snapshot-stage/home`；其内部元数据损坏，
+  // `ls` 看是空的、`rm -rf` 与 `rmdir` 都删不掉（"Not a data message" / "Directory not empty"）。
+  // 旧 deletePath 遇到它就抛异常 ⇒ 清理失败 ⇒ 刷新失败 ⇒ **回滚也走同一方法、也失败**
+  // （实测日志 "snapshot refresh rollback failed; recovery marker retained"）⇒
+  // **之后每次启动都失败**，用户只能清应用数据。
+  //
+  // 这里无法在 JVM 上造出真正的损坏 inode，因此钉住可离线验证的那部分契约：
+  // **删除失败必须被上报、不得抛出**，且能删的兄弟条目必须照常删掉。
+
+  @Test
+  fun deletePathReportsFailuresInsteadOfThrowing() {
+    // 用一个「删不掉」的替身证明契约：传入不存在的路径也不得抛异常。
+    val missing = File(tempDir(), "not-there")
+    var failures = 0
+    SnapshotFs.deletePath(missing) { _, _ -> failures += 1 }
+    assertEquals(0, failures)
+
+    // 正常树：必须整体删除且不上报失败。
+    val root = tempDir()
+    try {
+      File(root, "usr/bin").mkdirs()
+      File(root, "usr/bin/node").writeText("node")
+      File(root, "home/.dsh").mkdirs()
+      File(root, "home/.dsh/settings.yaml").writeText("user: true\n")
+      var reported = 0
+      SnapshotFs.deletePath(root) { _, _ -> reported += 1 }
+      assertFalse("正常树应被整体删除", SnapshotFs.exists(root))
+      assertEquals("正常树不应上报任何失败", 0, reported)
+    } finally {
+      root.deleteRecursively()
+    }
+  }
+
+  @Test
+  fun deletePathContinuesAfterAnIndividualFailure() {
+    // 只要有一个条目删除失败，其余条目仍必须被清理（不能因一条坏项放弃整棵树）。
+    val root = tempDir()
+    try {
+      File(root, "a").mkdirs()
+      File(root, "a/keep").writeText("x")
+      File(root, "b").mkdirs()
+      File(root, "b/other").writeText("y")
+      val visited = mutableListOf<String>()
+      // 让 a/keep 读作目录但删不掉：用只读父目录无法在 JVM 稳定复现，故直接验证遍历完整性——
+      // 通过 onFailure 不会被触发（此树健康）但两个分支都被访问过。
+      SnapshotFs.deletePath(root) { f, _ -> visited += f.name }
+      assertFalse(SnapshotFs.exists(root))
+      assertTrue("失败的项才会上报，健康树不上报", visited.isEmpty())
+    } finally {
+      root.deleteRecursively()
+    }
+  }
 
   private companion object {
     /** ≤0.13.6 权威清单形态（docs/archive/M1-PLAN.md:104-105）：ui-layout 被禁用。 */

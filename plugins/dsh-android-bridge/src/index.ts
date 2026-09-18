@@ -16,8 +16,19 @@ import { readFileSync, appendFileSync, mkdirSync, statSync, writeFileSync, renam
 import { join, dirname } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
-import { decideControl, type ControlDecision, type ControlOp } from './control-policy.js'
+import { A11Y_OPS, decideControl, type ControlDecision, type ControlOp } from './control-policy.js'
+import {
+  currentScreenScope,
+  decideScreenAccess,
+  controlOpNeedsRealScreen,
+  realScreenAdbCommandDenied,
+  isVirtualScreenId,
+  type ScreenAccessDecision,
+  type UserScreenScope,
+} from './screen-scope.js'
 import { negotiateProtocol } from './control-queue.js'
+import { translateAdbLine } from './shell-ops.js'
+import { installCapabilityGate, DEVICE_TOOL_GROUPS, DEVICE_TOOLS, CAPABILITY_TOOL_NAME } from './capability-gate.js'
 import {
   ControlQueue,
   controlTokenFrom,
@@ -26,6 +37,14 @@ import {
   type ControlResult,
 } from './control-queue.js'
 import { toLosslessJson, findUndefinedPaths } from './lossless-json.js'
+import {
+  authorizeMobileRoute,
+  authorizePublicReadOnlyRoute,
+  sendMobileRouteRejection,
+  CONTROL_TOKEN_HEADER,
+  FALLBACK_LOOPBACK_HOSTS,
+  ConnectionRouteAuth,
+} from './route-auth.js'
 import {
   SessionNotifyState,
   formatDuration,
@@ -41,6 +60,8 @@ import {
 
 export {
   decideControl,
+  currentScreenScope,
+  decideScreenAccess,
   ControlQueue,
   registerControlRoutes,
   controlTokenFrom,
@@ -57,10 +78,27 @@ export {
   TURN_END_KINDS,
   toLosslessJson,
   findUndefinedPaths,
+  authorizeMobileRoute,
+  sendMobileRouteRejection,
+  CONTROL_TOKEN_HEADER,
+  FALLBACK_LOOPBACK_HOSTS,
+  // 0.14.0 §4.1：能力分组常量与 facade 名从单一源再导出——工具面预算门禁据此推导「初始可见集」
+  // （= 注册集 - 被 capability gate 掩蔽的组），避免门禁另写一份组名单而与实现漂移。
+  DEVICE_TOOL_GROUPS,
+  DEVICE_TOOLS,
+  CAPABILITY_TOOL_NAME,
 }
+export type {
+  MobileRouteRequest,
+  MobileRouteResponse,
+  ConnectionRouteAuth,
+  MobileRouteAuthOptions,
+  MobileRouteRejection,
+} from './route-auth.js'
 export type { TurnEndKind, TurnEndKindOrUnknown, TodoProgress, ReportEntry } from './notify-projection.js'
 export type { LosslessJson } from './lossless-json.js'
 export type { ControlDecision, ControlOp } from './control-policy.js'
+export type { ScreenAccessDecision, ScreenId, UserScreenScope } from './screen-scope.js'
 export type { ControlRequest, ControlResult } from './control-queue.js'
 
 export const name = 'dsh-android-bridge'
@@ -275,6 +313,8 @@ export interface ControlGateFacts {
   paired: boolean
   wirelessDebug: boolean
   adbReady: boolean
+  /** 0.14.0 §6：Shizuku 特权 shell 通道就绪（壳侧 live caps；ADB 面退役后的特权承载者）。 */
+  shizukuReady: boolean
 }
 
 /**
@@ -356,6 +396,48 @@ function pickText(v: Record<string, unknown>, ...keys: string[]): string {
 }
 
 /**
+ * 折叠重复行（0.14.0 设备实锤）。
+ *
+ * 缺陷形态：`android_termux_channel_exec` 跑 Termux 的 `am` 包装脚本时，同一条 loader 报错
+ * 重复 40+ 次并**互相交错**，回执 25 KB 全是乱码：
+ *
+ *   CANNOT LINK EXECUTABLE "CANNOT LINK EXECUTABLE "grep": library ... not found
+ *   grep": library ... not found
+ *
+ * 真因（源码实证，非推断）：Termux 的 `$PREFIX/bin/am` 在 exec 前显式执行
+ *   `unset LD_LIBRARY_PATH LD_PRELOAD`
+ * 于是它之后派生的任何 Termux 二进制（`grep` 等）都丢了库搜索路径 → 每条都以链接失败收场。
+ * 这是 Termux 打包方的决定，**不是我们的环境注入有缺陷**（`printenv` 实测两项都在、`grep` 单跑正常）。
+ *
+ * 模型侧真正需要的结论只有一条：「这条命令失败了，原因是 X」。所以这里按行折叠，
+ * 相同行只留一次并标注次数，把 25 KB 压回可读长度。
+ */
+export function condenseRepeatedText(text: string, maxRuns = 400): string {
+  if (text.length === 0) return text
+  const lines = text.split('\n')
+  const out: string[] = []
+  let prev: string | null = null
+  let count = 0
+  const flush = (): void => {
+    if (prev === null) return
+    out.push(count === 1 ? prev : `${prev}   （同句重复 ${count} 次）`)
+    count = 0
+  }
+  for (const line of lines) {
+    if (line === prev) { count += 1; continue }
+    flush()
+    prev = line
+    count = 1
+  }
+  flush()
+  // 行数仍超上限时保留首尾：开头与结尾最能说明问题，中间是同一故障的重复。
+  if (out.length <= maxRuns) return out.join('\n')
+  const head = out.slice(0, Math.floor(maxRuns / 2))
+  const tail = out.slice(-Math.floor(maxRuns / 2))
+  return [...head, `   …（中间省略 ${out.length - maxRuns} 行同类输出）…`, ...tail].join('\n')
+}
+
+/**
  * 热补丁根修（2026-08-27 活体插桩实锤）：dsh-shell run() 契约返回收集输出结构体
  * `{text, truncated, spillPath?}`（引擎内置 bash 工具经 streamText(output).text 同款读取），
  * 历史代码误按字符串 String() 直取 —— 进程真实执行（审计恒 ok）、转录恒 "[object Object]"，
@@ -387,7 +469,64 @@ export class AndroidPrivilegeService {
   ) {}
 
   status(): AdbStatus {
-    return currentStatus(process.env, this.defaultMode?.() ?? this.sandboxPolicy?.defaultMode)
+    const st = currentStatus(process.env, this.defaultMode?.() ?? this.sandboxPolicy?.defaultMode)
+    // 0.14.0 §6 双通道：Shizuku 特权通道是 ADB 面的替代通道（内置 adb 退役）——状态面必须如实
+    // 说明当前由谁承载，而不是回显已无意义的 ADB 门文案。
+    if (this.shizukuReady() && !engineLevelReady(st)) {
+      return {
+        ...st,
+        message: '特权通道：Shizuku（已授权）——shell 执行 / 截屏 / uiautomator 经 Shizuku UserService（uid 2000）执行；'
+          + '内置 adb 已退役（无线调试配对 / 常驻 server 不再需要）。',
+      }
+    }
+    return st
+  }
+
+  /** 壳侧 live caps 声明的特权 shell 通道事实（0.14.0 §6：Shizuku UserService 可用）。 */
+  shizukuReady(): boolean {
+    return this.controlQueue?.stats().caps?.shizuku === true
+  }
+
+  /** 两条通道任一就绪即引擎级放行（不掺会话档位）：无障碍见 a11yEnabled，特权面 = ADB 或 Shizuku。 */
+  private privilegedReady(st: AdbStatus): boolean {
+    return engineLevelReady(st) || this.shizukuReady()
+  }
+
+  /** Native user preference, read live; model code has no write surface for it. */
+  screenScope(): UserScreenScope {
+    return currentScreenScope()
+  }
+
+  /** Fail-closed screen target decision shared by all real/virtual content tool paths. */
+  screenAccess(screenId?: string): ScreenAccessDecision {
+    return decideScreenAccess(this.screenScope(), screenId)
+  }
+
+  /**
+   * review C11 alias 契约：把 `virtual-1` 解析为**当次**动态 displayId（经壳侧 vdInfo 注册表）。
+   * 只认原生回报的 kind=virtual 且 displayId>0 的条目；未就绪/不可达一律 null（绝不回退 display 0）。
+   */
+  async resolveScreenDisplayId(screenId: string): Promise<number | null> {
+    if (screenId === 'real') return 0
+    if (!isVirtualScreenId(screenId)) return null
+    try {
+      const r = await this.controlExec('vdInfo', {})
+      if (!r.ok) return null
+      const data = (r.data ?? {}) as { screens?: Array<{ alias?: string; displayId?: number; kind?: string }> }
+      const hit = (data.screens ?? []).find((s) => s.alias === screenId && s.kind === 'virtual')
+      const id = hit?.displayId
+      return typeof id === 'number' && Number.isInteger(id) && id > 0 ? id : null
+    } catch {
+      return null
+    }
+  }
+
+  /** 异步解析版决策（review C11）：虚拟屏经注册表回填动态 displayId 后再判范围/就绪。 */
+  async screenAccessResolved(screenId?: string): Promise<ScreenAccessDecision> {
+    const scope = this.screenScope()
+    const base = decideScreenAccess(scope, screenId)
+    if (base.ok || base.reason !== 'screen-not-ready') return base
+    return decideScreenAccess(scope, screenId, { virtualDisplayId: await this.resolveScreenDisplayId(base.screenId) })
   }
 
   /**
@@ -406,13 +545,14 @@ export class AndroidPrivilegeService {
    * 两者都要求会话档位 danger-full-access（隐私敏感面不因通道简化而放宽）。
    * 任一通道成立即放行；都不可用时引导文案**先讲无障碍**（一次开关），再讲 ADB。
    */
-  gateFor(session?: unknown): { ok: true; via?: 'a11y' | 'adb' } | { ok: false; guidance: string; gates?: ControlGateFacts } {
+  gateFor(session?: unknown): { ok: true; via?: 'a11y' | 'adb' | 'shizuku' } | { ok: false; guidance: string; gates?: ControlGateFacts } {
     const st = this.status()
     const a11ySource = this.a11ySource()
     const a11y = a11ySource !== 'off'
     // 0.13.8 #172：能力门只由「引擎级三道门 + 会话档位实时门」决定——部署默认写面
     // 档位（tier）降级为视图字段，不再参与门禁（坑 29：勿把部署默认当死锁）。
     const adbReady = engineLevelReady(st)
+    const shizukuReady = this.shizukuReady()
     const gates: ControlGateFacts = {
       a11yEnabled: a11y,
       a11ySource,
@@ -421,6 +561,7 @@ export class AndroidPrivilegeService {
       paired: st.paired === true,
       wirelessDebug: st.wirelessDebugOn === true,
       adbReady,
+      shizukuReady,
     }
     const policy = this.sandboxPolicy?.resolve(session === undefined ? {} : { session })
     const mode = policy?.mode
@@ -432,13 +573,14 @@ export class AndroidPrivilegeService {
       }
     }
     if (a11y) return { ok: true, via: 'a11y' }
+    if (shizukuReady) return { ok: true, via: 'shizuku' }
     if (adbReady) return { ok: true, via: 'adb' }
     return {
       ok: false,
       gates,
       guidance: '设备控制未授权。任选其一即可：'
         + '①（推荐，一次开关）到 系统设置 → 无障碍 → 已下载的服务 开启「DSH 设备控制」；'
-        + '②（高级/脚本通道）到「开发者选项 → 无线调试」完成 ADB 完全访问 + 允许访问 + 配对。'
+        + '②到设置页「手机控制」安装、启动并授权 Shizuku（shell / 截屏 / uiautomator / 虚拟屏走它执行）。'
         + '两者都会即时生效，无需重启。',
     }
   }
@@ -446,8 +588,14 @@ export class AndroidPrivilegeService {
   /** 授权状态探活（F2.9 / F1.7 授权探活：断线引导重新配对）——引擎级 + 会话级（默认档位视角）。 */
   assertAuthorized(): { ok: true; tier: PrivilegeTier } | { ok: false; guidance: string } {
     const st = this.status()
-    if (!engineLevelReady(st)) {
-      return { ok: false, guidance: st.message ?? '未授权' }
+    if (!this.privilegedReady(st)) {
+      const shizuku = this.shizukuReady()
+      return {
+        ok: false,
+        guidance: shizuku
+          ? (st.message ?? '未授权')
+          : '未授权：到设置页「手机控制」开启「DSH 设备控制」无障碍服务，或安装、启动并授权 Shizuku（特权 shell / 截屏 / 虚拟屏）。',
+      }
     }
     // 0.13.8 #172：tier（部署默认档位视图）不再作为拒绝条件——会话档位由各 execute 实时门禁。
     return { ok: true, tier: st.tier }
@@ -501,6 +649,7 @@ export class AndroidPrivilegeService {
       paired: st.paired === true,
       wirelessDebug: st.wirelessDebugOn === true,
       adbReady,
+      shizukuReady: this.shizukuReady(),
     }
   }
 
@@ -511,7 +660,8 @@ export class AndroidPrivilegeService {
     return decideControl({
       op,
       a11yEnabled: this.a11yEnabled(),
-      adbReady: engineLevelReady(st), // 0.13.8 #172：部署档位视图不参与能力门
+      // 特权面就绪 = 内置 adb 三道门 或 Shizuku UserService（0.14.0 §6 双通道的同一事实面）。
+      adbReady: engineLevelReady(st) || this.shizukuReady(),
       sessionMode: mode,
       forceBackend,
     })
@@ -527,41 +677,51 @@ export class AndroidPrivilegeService {
   }
 
   /**
-   * 0.13.5 W4：把一个无障碍操作交给壳侧执行。
-   * 未开启无障碍 / 队列缺失 → 直接拒绝（不降级到 ADB——降级由工具层的策略决定）。
+   * 0.13.5 W4：把一个壳桥操作交给壳侧执行。
+   * 0.14.0 双通道（承载拆离）：只有 a11y 承载的 op（A11Y_OPS）要求无障碍在线；browser 与 vd 两组
+   * 是 neverA11y（见 control-ops-pending.json），由壳侧 ControlCarrier 在无障碍关闭时照常承载——
+   * 两条通道互不为前提，模型侧任一通道可用即可完成同类动作（不降级到 ADB/Shizuku——降级由工具层的策略决定）。
    */
   async controlExec(op: ControlOp, args: Record<string, unknown>, timeoutMs?: number): Promise<ControlResult> {
-    if (!this.controlQueue) return { ok: false, error: '无障碍控制队列未装配（插件未挂载 webServer？）' }
-    if (!this.a11yEnabled()) return { ok: false, error: '无障碍服务未开启——请先在系统设置里开启「DSH 设备控制」' }
+    if (!this.controlQueue) return { ok: false, error: '控制队列未装配（插件未挂载 webServer？）' }
+    if (A11Y_OPS.includes(op) && !this.a11yEnabled()) {
+      // SPEC §4.2②：无障碍关（纯 Shizuku）不等于「这条路走不通」——语义树/ref 动作确实不可用，
+      // 但**坐标操作仍然可用**。此前这里返回硬错误，模型拿到一句「先去开无障碍」就停在原地；
+      // 现在改为**结构化坐标模式指引**：如实说明当前只能坐标操作、并给出可直接照做的下一步，
+      // 让模型在同一轮里继续推进任务（不静默失败、也不假装语义树可用）。
+      //
+      // 为什么坐标模式下这些 op 仍算失败：它们**本就是语义 op**（需要 ref/语义树）。
+      // 坐标路径由 android_ui_click 的 nx/ny（以及对虚拟屏的 x/y + screenId）承担，
+      // 那条路径不经 A11Y_OPS 门，故不受此处影响。
+      const screenId = typeof args.screenId === 'string' && args.screenId !== '' ? args.screenId : 'real'
+      return {
+        ok: false,
+        error: 'action-mode-coordinate: 无障碍未开启，' + op + ' 需要的语义树不可用；当前只能坐标操作。',
+        coordinate: true,
+        actionMode: 'coordinate',
+        screenId,
+        guidance: '改用坐标操作：① 真实屏 → android_screenshot 拿分辨率锚点，再 android_ui_click 传 nx/ny（0-1 归一化）；' +
+          '② 虚拟屏 → android_vdisplay_input（tap/swipe/keyevent/text，坐标基于该屏自身像素，经 input -d 注入，真实屏不受影响）。' +
+          '若确实需要语义树/ref 动作，请由用户在系统设置里开启「DSH 设备控制」无障碍服务。',
+      }
+    }
+    // review C11 范围复查下沉到执行点：manage 工具层之外（其它插件/直连调用）不得绕过——
+    // a11y 承载的内容/输入 op 全部作用于真实屏前台窗口，范围不含 real 时在执行点拒绝。
+    const scope = this.screenScope()
+    if (controlOpNeedsRealScreen(op) && scope === 'virtual-only') {
+      return {
+        ok: false,
+        error: 'screen-out-of-scope: 用户当前开放屏幕范围为 virtual-only，不允许读取或操作真实屏幕。请由用户在设置中修改范围。',
+      }
+    }
     return this.controlQueue.enqueue(op, args, timeoutMs)
   }
 
   /**
-   * 现场解析可用连接端口：配置端口优先（壳侧 AdbState 记录），失效即回退 5555
-   * （vivo 等无线调试常驻端口；NSD 记录值会随无线调试重启轮换——2026-08-27 实锤 37575 失联）。
-   * 端口为 loopback 信息不入审计。@returns 可用端口与 connect 输出；全失败返回 undefined。
+   * 最近一次连接校验缓存的设备型号（F4；空 = 未校验/校验失败）。
+   * 0.14.0：ADB 连接面退役后不再有 connect/型号回读，本字段保留给诊断面（由 shell 通道的
+   * `getprop ro.product.model` 回填的旧值）。
    */
-  private async resolveLivePort(): Promise<{ port: string; output: string; model?: string } | { port: undefined; output: string; model?: undefined }> {
-    const candidates = [...new Set([this.connectPort(), '5555'].filter((p): p is string => !!p))]
-    let last = ''
-    for (const port of candidates) {
-      const c = await this.runLine(`adb connect 127.0.0.1:${port}`)
-      if (!c.ok) { last = c.stdout; continue }
-      last = c.stdout
-      if (/connected to|already connected/i.test(c.stdout)) {
-        // F4 多设备消歧（2026-09-05 真机实测）：connect 成功 ≠ 绑定预期设备——
-        // emulator-5554 的 adb 端口恰为 127.0.0.1:5555，5555 兜底可能绑错对象。
-        // 回读型号做在场校验并缓存（android_privilege_status / device_info 展示）。
-        const id = await this.runLine(`adb -s 127.0.0.1:${port} shell getprop ro.product.model`)
-        const model = id.ok ? id.stdout.trim() : ''
-        if (model) this.liveModel = model
-        return { port, output: c.stdout, model: this.liveModel || undefined }
-      }
-    }
-    return { port: undefined, output: last }
-  }
-
-  /** 最近一次连接校验缓存的设备型号（F4；空 = 未校验/校验失败）。 */
   boundModel(): string {
     return this.liveModel
   }
@@ -575,7 +735,9 @@ export class AndroidPrivilegeService {
       const r = await this.shellFace.run(spec)
       return {
         ok: true,
-        stdout: collectText((r as Record<string, unknown>).stdout) + collectText((r as Record<string, unknown>).stderr),
+        stdout: condenseRepeatedText(
+          collectText((r as Record<string, unknown>).stdout) + collectText((r as Record<string, unknown>).stderr),
+        ),
       }
     } catch (e) {
       return { ok: false, stdout: '执行失败：' + String((e as Error).message) }
@@ -583,55 +745,71 @@ export class AndroidPrivilegeService {
   }
 
   /**
-   * 真实 ADB 通道执行（0.14）：引擎级授权就绪后，经快照内 adb（android-tools 36）
-   * `adb connect`（幂等）→ `adb -s 127.0.0.1:<port> shell <command>` —— adbd 以 shell uid=2000 执行。
-   * 授权锚 = 真实配对（adbd 侧 RSA 授权）+ 三道门（壳侧写面）；会话级门控由调用方（工具层）先行。
+   * 特权 shell 执行（0.14.0 §6）：经控制队列投递到壳侧 Shizuku UserService（uid 2000）执行。
+   *
+   * 0.14.0 前本方法在快照内经 Termux spawn `adb`（要无线调试配对 + 常驻 server）；0.14.0 起内置
+   * adb 退役，失败一律回壳侧结构化 code/guidance（未安装 / 未启动 / 未授权 → 明确拒绝，非超时）。
    */
   async execAdbShell(command: string): Promise<{ ok: boolean; stdout: string; guidance?: string }> {
-    if (!engineLevelReady(this.status())) {
-      return { ok: false, stdout: '', guidance: this.status().message ?? '未授权' }
-    }
-    const live = await this.resolveLivePort()
-    if (live.port === undefined) {
-      return { ok: false, stdout: live.output.slice(0, 2048), guidance: 'ADB 连接不可用（配置端口与 5555 均失联）：确认「无线调试」仍开启，必要时重新配对' }
-    }
-    const port = live.port
-    // F3 远端 PATH 污染修复（2026-09-05 真机实锤）：客户端环境把 Termux usr/bin 传进远端
-    // shell → /system/bin/input 等脚本解析 cmd 落到 app 私有目录（Permission denied，且
-    // shell uid 本就无权读 app 私有目录）。远端统一 export 纯系统 PATH；整段命令单引号
-    // 转义（本地以 bash -c 解析整行，$ 一律留给设备端求值——与 execAdbLine 的引号内文本
-    // 防误伤注记同源）。
-    const remote = 'export PATH=/system/bin:/system/xbin; ' + command
-    const quoted = "'" + remote.replace(/'/g, `'\\''`) + "'"
-    const out = await this.runLine(`adb -s 127.0.0.1:${port} shell ${quoted}`)
-    if (!out.ok) return { ok: false, stdout: out.stdout }
-    if (/(^|\n)error:|no devices\/emulators|offline/.test(out.stdout)) {
-      return { ok: false, stdout: out.stdout.slice(0, 4096), guidance: 'ADB 连接不可用：确认「无线调试」仍开启，必要时重新配对' }
-    }
-    return { ok: true, stdout: out.stdout.slice(0, 128 * 1024) }
+    // review C11：raw shell 是绕过页面/工具层的执行面——范围不含 real 时真实屏读写命令在此拒绝。
+    const scopeDenied = realScreenAdbCommandDenied(this.screenScope(), command)
+    if (scopeDenied !== null) return { ok: false, stdout: '', guidance: scopeDenied }
+    const r = await this.controlExec('shExec', { command, timeoutMs: 20_000 })
+    if (!r.ok) return { ok: false, stdout: '', guidance: r.error }
+    const data = (r.data ?? {}) as Record<string, unknown>
+    const stdout = typeof data.stdout === 'string' ? data.stdout : ''
+    if (data.ok !== true) return { ok: false, stdout: stdout.slice(0, 4096), guidance: shellFailureText(data) }
+    return { ok: true, stdout: stdout.slice(0, 128 * 1024) }
   }
 
   /**
-   * 原始 adb 行执行（manage 等消费：screencap+pull 组合、uiautomator dump+pull）。
-   * 自动注入 `-s 127.0.0.1:<port>`（行内每个 `adb ` 前缀）+ 幂等 connect；
-   * 授权门槛同 execAdbShell；行内命令自行组织（危险词仍由调用方工具层 blacklist 兜底）。
+   * 原始设备行执行（manage 等消费：screencap+pull 组合、uiautomator dump+pull）。
+   * 0.14.0 §6：不再有 adb 客户端语义——行先翻译成 exec / pull / push 步骤（`translateAdbLine`），
+   * 再逐步投递到壳侧特权 shell 通道；`adb` 字符串不出现于执行面。
    */
   async execAdbLine(line: string): Promise<{ ok: boolean; stdout: string; guidance?: string }> {
-    if (!engineLevelReady(this.status())) {
-      return { ok: false, stdout: '', guidance: this.status().message ?? '未授权' }
+    // review C11：screencap+pull / uiautomator dump 等行同样要在执行点复查屏幕范围。
+    const scopeDenied = realScreenAdbCommandDenied(this.screenScope(), line)
+    if (scopeDenied !== null) return { ok: false, stdout: '', guidance: scopeDenied }
+    const translated = translateAdbLine(line)
+    if (!translated.ok) return { ok: false, stdout: '', guidance: translated.error }
+    let out = ''
+    for (const step of translated.steps) {
+      if (step.kind === 'exec') {
+        const r = await this.controlExec('shExec', { command: step.command })
+        if (!r.ok) return { ok: false, stdout: out, guidance: r.error }
+        const data = (r.data ?? {}) as Record<string, unknown>
+        out += typeof data.stdout === 'string' ? data.stdout : ''
+        continue
+      }
+      const r = step.kind === 'pull'
+        ? await this.controlExec('shPull', { remote: step.remote, local: step.local })
+        : await this.controlExec('shPush', { local: step.local, remote: step.remote })
+      if (!r.ok) return { ok: false, stdout: out, guidance: r.error }
+      const data = (r.data ?? {}) as Record<string, unknown>
+      if (data.ok !== true) return { ok: false, stdout: out, guidance: shellFailureText(data) }
     }
-    const live = await this.resolveLivePort()
-    if (live.port === undefined) {
-      return { ok: false, stdout: live.output.slice(0, 2048), guidance: 'ADB 连接不可用（配置端口与 5555 均失联）：确认「无线调试」仍开启，必要时重新配对' }
-    }
-    const port = live.port
-    if (!/^adb\s/.test(line)) return { ok: false, stdout: '', guidance: 'execAdbLine 只能执行以 adb 开头的行' }
-    // 仅注入命令位置（行首 / && / ; 之后）的 adb，避免误伤引号内文本（如 adb shell "echo adb hi"）。
-    const line2 = line.replace(/(^|&&\s*|;\s*)adb\s/g, `$1adb -s 127.0.0.1:${port} `)
-    const out = await this.runLine(`${line2}`)
-    if (!out.ok) return { ok: false, stdout: out.stdout }
-    return { ok: true, stdout: out.stdout.slice(0, 128 * 1024) }
+    return { ok: true, stdout: out.slice(0, 128 * 1024) }
   }
+}
+
+/**
+ * 壳侧 sh\* 回执的失败文案：优先 guidance，其次 error，最后给出可执行的通用引导（不得只回「失败」）。
+ *
+ * 「正在建立」与「未就绪」**必须分开**（0.14.0 设备实锤）：前者是可以立刻重试的瞬时态，
+ * 后者才需要去设置页排查。此前两者共用「特权 shell 通道执行失败；请查看 Shizuku 状态」，
+ * 于是壳侧明明还在正常建连，模型却被告知通道有问题——设备会话里 agent 正是据此放弃了特权通道。
+ */
+function shellFailureText(data: Record<string, unknown>): string {
+  const guidance = typeof data.guidance === 'string' && data.guidance.length > 0 ? data.guidance : ''
+  if (guidance.length > 0) return guidance
+  const error = typeof data.error === 'string' && data.error.length > 0 ? data.error : ''
+  if (error.length > 0) return error
+  const code = typeof data.code === 'string' ? data.code : ''
+  if (code === 'shizuku-user-service-connecting') {
+    return 'Shizuku shell 通道正在建立（瞬时态）：请直接重试同一命令，不要改道或去设置页排查。'
+  }
+  return `特权 shell 通道执行失败${code.length > 0 ? `（${code}）` : ''}；请在设置页「手机控制」查看 Shizuku 状态与引导。`
 }
 
 /** 诊断面展示路由的常用操作（与工具面一一对应）。 */
@@ -704,13 +882,14 @@ export function buildPrivilegeStatusToolPayload(
   const facts = svc.gateFacts()
   for (const op of ROUTE_OPS) {
     const d = svc.controlDecision(op, session)
-    const altAdb = facts.adbReady === true
+    // 0.14.0 §6：特权面 = Shizuku（内置 adb 退役）；无障碍仍是内容面的首选通道。
+    const altPrivileged = facts.adbReady === true || facts.shizukuReady === true
     const altA11y = svc.a11yEnabled()
     route[op] = {
       backend: d.backend,
       reason: d.reason,
       alternative: d.backend === 'a11y'
-        ? { backend: 'adb', available: altAdb, missing: altAdb ? null : '完整访问档位 / 应用内允许访问开关 / 无线调试配对' }
+        ? { backend: 'shizuku', available: altPrivileged, missing: altPrivileged ? null : '设置页「手机控制」：安装 / 启动 / 授权 Shizuku' }
         : { backend: 'a11y', available: altA11y, missing: altA11y ? null : '系统设置 → 无障碍 → 开启「DSH 设备控制」' },
     }
   }
@@ -733,9 +912,9 @@ function tools(svc: AndroidPrivilegeService, shellFace?: { resolve?(spec: Record
     name: 'android_privilege_status',
     description:
       '查询设备控制授权状态。无障碍通道为主（系统设置开启「DSH 设备控制」一次即成立，'
-      + '提供 dump/click/input/scroll 语义操作）；ADB 通道为高级/脚本兜底（完全访问 + 允许访问 + 无线调试配对：'
-      + 'shell 执行、原图截图、pm/dumpsys），不是「等价」通道——无障碍优先，ADB 仅兜底。'
-      + '返回结构化 gates 与 control 字段；两者都不可用时给出两条开启路径的引导。手机管理工具全部以此为前置检查，失败关闭。',
+      + '提供 dump/click/input/scroll 语义操作）；特权 shell 通道由 Shizuku 承载（设置页「手机控制」安装、启动并授权后：'
+      + 'shell 执行、原图截图、pm/dumpsys、虚拟屏）。两条通道独立可用，任一就绪即可完成同类动作；'
+      + '返回结构化 gates 与 control 字段；都不可用时给出两条开启路径的引导。手机管理工具全部以此为前置检查，失败关闭。',
     parameters: {},
     output: {
       // 运行期仍是 PRIVILEGE_STATUS_OUTPUT_SCHEMA 的完整对象；这里只把**静态类型**放宽为
@@ -834,26 +1013,30 @@ function tools(svc: AndroidPrivilegeService, shellFace?: { resolve?(spec: Record
         const raw = { command, cwd: '/', env: {} }
         const spec = shellFace.resolve ? shellFace.resolve(raw) : raw
         const r = await shellFace.run(spec)
-        return { ok: true, stdout: collectText((r as Record<string, unknown>).stdout), stderr: collectText((r as { stderr?: unknown }).stderr) }
+        return {
+          ok: true,
+          stdout: condenseRepeatedText(collectText((r as Record<string, unknown>).stdout)),
+          stderr: condenseRepeatedText(collectText((r as { stderr?: unknown }).stderr)),
+        }
       } catch (e) {
         return { ok: false, text: '执行失败：' + String((e as Error).message) }
       }
     },
   })
-  /** 0.14 真实 ADB 通道（adb pair 握手后，经 adbd 以 shell uid=2000 执行）。
-   *  门控=引擎级三道门+门1 && 会话级 danger-full-access；黑名单=termux 黑名单 + ADB 系统写面附加项；
-   *  每次调用审计。与 termux 通道的区别：执行身份为 adbd（uid=2000 shell），可触达系统面
-   *  （dumpsys/uiautomator/screencap/input/pm 查询）。 */
-  const adbShellTool = defineTool({
-    name: 'android_adb_shell_exec',
+  /** 0.14.0 特权 shell 通道（Shizuku UserService，uid=2000；内置 adb 已退役，见 SPEC §6）。
+   *  门控=引擎级授权 + 会话级 danger-full-access；黑名单=termux 黑名单 + 系统写面附加项；
+   *  每次调用审计。执行身份为 shell（uid=2000），可触达系统面
+   *  （dumpsys/uiautomator/screencap/input/pm 查询）；未安装/未启动/未授权 Shizuku → 结构化拒绝。 */
+  const shellTool = defineTool({
+    name: 'android_shell_exec',
     description:
-      '真实 ADB 通道执行（0.14）：经本机 adbd 以 shell 身份执行系统命令（配对后可用）。' +
+      '特权 shell 通道执行（0.14.0，Shizuku UserService / uid 2000）：执行系统命令。' +
       '用途：screencap/uiautomator/dumpsys/input/getprop 等系统面只读与输入类；' +
       '系统配置写面（settings put/pm grant/appops/mount 等）一律拒绝。' +
-      '需引擎级三道门（门1 完全访问 + 门2 允许开关 + 门3 真实配对）且会话档位 danger-full-access'
-      + '（部署默认写面档位只是视图，不参与门禁——0.13.8 #172）；未授权失败关闭。',
+      '需会话档位 danger-full-access 且设备已安装、启动并授权 Shizuku'
+      + '（部署默认写面档位只是视图，不参与门禁——0.13.8 #172）；未就绪失败关闭并给出引导。',
     parameters: {
-      command: { type: 'string', required: true, description: '在 adbd（shell 用户）中执行的命令' },
+      command: { type: 'string', required: true, description: '在 shell（uid 2000）中执行的命令' },
     },
     output: {
       schema: {
@@ -873,14 +1056,20 @@ function tools(svc: AndroidPrivilegeService, shellFace?: { resolve?(spec: Record
     execute: async ({ command }: { command: string }, exec) => {
       const gate = svc.gateFor((exec as { agent?: { session?: unknown } }).agent?.session)
       if (!gate.ok) {
-        writeAudit({ action: 'adb-shell', args: { command }, result: 'denied-not-gated' })
+        writeAudit({ action: 'shell-exec', args: { command }, result: 'denied-not-gated' })
         return { ok: false, text: gate.guidance }
       }
       if (looksDangerousAdb(command)) {
-        writeAudit({ action: 'adb-shell', args: { command }, result: 'denied-danger' })
-        return { ok: false, text: '命令被 ADB 通道危险检查拦截（系统配置/权限写面一律拒绝；自动审批不豁免）' }
+        writeAudit({ action: 'shell-exec', args: { command }, result: 'denied-danger' })
+        return { ok: false, text: '命令被特权 shell 通道危险检查拦截（系统配置/权限写面一律拒绝；自动审批不豁免）' }
       }
-      writeAudit({ action: 'adb-shell', args: { command }, result: 'ok' })
+      // review C11：屏幕范围在执行点复查（工具层黑名单之外）——virtual-only 下 screencap/input 等真实屏命令拒绝。
+      const scopeDenied = realScreenAdbCommandDenied(svc.screenScope(), command)
+      if (scopeDenied !== null) {
+        writeAudit({ action: 'shell-exec', args: { command }, result: 'denied-screen-scope' })
+        return { ok: false, text: scopeDenied }
+      }
+      writeAudit({ action: 'shell-exec', args: { command }, result: 'ok' })
       const r = await svc.execAdbShell(command)
       return r.ok
         ? { ok: true, stdout: r.stdout }
@@ -888,12 +1077,14 @@ function tools(svc: AndroidPrivilegeService, shellFace?: { resolve?(spec: Record
     },
   })
 
-  return [statusTool, termuxChannelTool, adbShellTool]
+  return [statusTool, termuxChannelTool, shellTool]
 }
 
 /** webServer 注册面（与 file-open 同型）。 */
 type WsReq = {
   method?: string
+  url?: string
+  headers?: Record<string, string | string[] | undefined>
   on(_e: string, cb: (b: Buffer) => void): void
   destroy(): void
 }
@@ -1135,15 +1326,34 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
     } catch { /* 探针失败忽略 */ }
   }
   for (const t of tools(svc, shellFace, () => controlToken() !== undefined)) ctx.tools.register(t)
+  // 渐进披露（0.14.0 §4.1）：设备工具默认对每个 agent 掩蔽，模型经 skill 目录发现能力后调用
+  // android_capabilities 解锁；facade 之外的工具不再常驻系统提示词。
+  installCapabilityGate(
+    ctx as unknown as Parameters<typeof installCapabilityGate>[0],
+    () => ({ a11y: svc.a11yEnabled(), shizuku: svc.shizukuReady() }),
+  )
   // 状态端点（浏览端面/设置页查询与展示）。**只读**：无任何写面——授权变更经
   // window.androidBridge.setAdbAllow/setAdbPair/revokeAdbPair 由壳侧原生 AdbState 执行
   // （Shizuku 对照：被提权方不得自改授权；引擎侧不设 POST 写端点）。
   const wsvc = (ctx as unknown as { webServer?: { register(r: unknown): void } }).webServer
   if (wsvc) {
+    // review C12：公开只读状态路由补回环栅栏（connection 的 Host/Origin 判定优先；缺服务时退化为回环白名单）。
+    const publicRouteConnection = (() => {
+      try {
+        return (ctx as unknown as { get?: (name: string) => unknown }).get?.('connection') as ConnectionRouteAuth | undefined
+      } catch {
+        return undefined
+      }
+    })()
     wsvc.register({
       kind: 'exact',
       path: '/api/android/privilege/status',
-      handler: async (_req: WsReq, res: WsRes) => {
+      handler: async (req: WsReq, res: WsRes) => {
+        const rejection = authorizePublicReadOnlyRoute(req, { connection: publicRouteConnection })
+        if (rejection !== undefined) {
+          sendMobileRouteRejection(res, rejection)
+          return
+        }
         sendJson(res, 200, buildPrivilegeStatusPayload(svc, controlToken() !== undefined))
       },
     })

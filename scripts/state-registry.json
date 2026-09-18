@@ -33,10 +33,10 @@
     },
     {
       "id": "all-files-access",
-      "holder": "壳侧（AdbState / AndroidBridge）",
-      "writePath": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/AdbState.kt",
+      "holder": "壳侧（AndroidBridge + prefs）",
+      "writePath": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:hasAllFilesAccess/requestAllFilesAccess",
       "sourceOfTruth": "Environment.isExternalStorageManager()（系统事实）",
-      "syncPath": "getter 每次现读系统事实；onResume 另调 AdbState.syncFullAccess 收敛壳内缓存（ST-01）",
+      "syncPath": "getter 每次现读系统事实（0.14.0：ADB 退役后不再有 syncFullAccess 壳内缓存与回前台收敛）",
       "evidence": {
         "kind": "grep",
         "file": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt",
@@ -56,15 +56,15 @@
       }
     },
     {
-      "id": "adb-authorization",
-      "holder": "壳侧（AdbState）",
-      "writePath": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/AdbState.kt",
-      "sourceOfTruth": "三道人门（fullAccess / allowSwitch / paired）",
-      "syncPath": "桥 getAdbState() 每次现读三道门并合成 JSON，不做跨调用缓存",
+      "id": "shizuku-privileged-channel",
+      "holder": "壳侧（ShizukuTransport / ShizukuUserService）+ 插件 dsh-android-bridge",
+      "writePath": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/ShizukuTransport.kt",
+      "sourceOfTruth": "Shizuku 管理器授权 + UserService 绑定（live；授权只由 Shizuku 管理器写，应用不自授）",
+      "syncPath": "控制队列 caps.shizuku 实时上报（ControlCarrier，5s TTL）；引擎侧 shizukuReady() 现读 caps，不做启动期快照（0.14.0：内置 adb 三条门随 AdbState 退役）",
       "evidence": {
         "kind": "grep",
-        "file": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt",
-        "pattern": "fun getAdbState"
+        "file": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/ControlCarrier.kt",
+        "pattern": "shizuku"
       }
     },
     {

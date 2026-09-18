@@ -44,6 +44,11 @@ function saveImpl(target, vendorRoot) {
   writeFileSync(join(vendorRoot, target), IMPL_state[target])
 }
 
+// F7 v1 双占位形态（0.14.0-preview 实锤坏资产；review C1）：publish 站先内联 open("wx") 占位、
+// 随后又调 helper 占位 → 同一路径第二次 O_EXCL 必得 EEXIST → publishCurrentExclusive 恒 return false。
+// 该串是坏形态的唯一特征（v2 正确形态只在模块级 helper 内出现一次，且变量名是 targetPath）。
+const F7_LEGACY_INLINE = 'const claim = await open(currentPath, "wx");'
+
 const IMPLS = {
   // ── marketplace A：pre-execute 守卫（全工具崩溃修复）──
   'market-A': {
@@ -137,6 +142,34 @@ const IMPLS = {
   },
 
   // ── marketplace D-client：兼容徽章 + 仅移动端复选框 ──
+  // ── market-route-auth-U2：商城 exact 路由不绕过 /api 信任栅栏（apk #222 衍生审计）──
+  // vendor 的 search/install 都以 exact 路由注册在 /api/dshmarketplace/*；在 webserver 的 exact-first
+  // 分派下同样不经过 client-connection 的 /api prefix。商城安装会改 profile，故两个端点一律要求
+  // connection 的 Host/Origin/browser-session 栅栏；缺 connection 也必须 401，不得乐观放行。
+  'market-route-auth-U2': {
+    file: 'dshmarketplace-plugin/lib/index.js',
+    check: (s) => s.includes('dsh-mobile marketplace route auth (U2)') && s.includes('dsh-mobile marketplace no-store (U2)'),
+    apply: (s) => {
+      const AUTH_OLD = 'let dshMobileMarketplaceRouteAuthorized=(n,e)=>{/* dsh-mobile marketplace route auth (U2) */let r=401;try{let s=t.get?.("connection");typeof s?.requestRejection==="function"&&(r=s.requestRejection(n))}catch{}if(r===void 0)return!0;e.writeHead(r===403?403:401);e.end();return!1};'
+      const AUTH_NEW = `let dshMobileMarketplaceRouteAuthorized=(n,e)=>{/* dsh-mobile marketplace route auth (U2); dsh-mobile marketplace no-store (U2) */let r=401;try{let s=t.get?.("connection");typeof s?.requestRejection==="function"&&(r=s.requestRejection(n))}catch{}if(r===void 0)return!0;if(r===403){e.writeHead(403,{"cache-control":"no-store"});e.end()}else{e.writeHead(401,{"content-type":"application/json; charset=utf-8","cache-control":"no-store"});e.end('{"ok":false,"error":"unauthorized"}')}return!1};`
+      if (s.includes(AUTH_NEW)) return s
+      if (s.includes(AUTH_OLD)) return s.replace(AUTH_OLD, AUTH_NEW)
+      const SEARCH_OLD = 'let r=A();r&&t.skills.register(r),t.webServer.register({kind:"exact",path:Q,handler:async(n,e)=>{'
+      const SEARCH_NEW = [
+        'let r=A();r&&t.skills.register(r);',
+        AUTH_NEW,
+        't.webServer.register({kind:"exact",path:Q,handler:async(n,e)=>{if(!dshMobileMarketplaceRouteAuthorized(n,e))return;',
+      ].join('')
+      const INSTALL_OLD = 't.webServer.register({kind:"exact",path:V,handler:b({install:n=>p(n,T()),onInstalled:f})})'
+      const INSTALL_NEW = 't.webServer.register({kind:"exact",path:V,handler:async(n,e)=>{if(!dshMobileMarketplaceRouteAuthorized(n,e))return;return b({install:s=>p(s,T()),onInstalled:f})(n,e)}})'
+      if (!s.includes(SEARCH_OLD)) throw new Error('market-route-auth 锚点未命中：search route 起点已变')
+      if (!s.includes(INSTALL_OLD)) throw new Error('market-route-auth 锚点未命中：install route 已变')
+      s = s.replace(SEARCH_OLD, SEARCH_NEW).replace(INSTALL_OLD, INSTALL_NEW)
+      if (!s.includes('dsh-mobile marketplace route auth (U2)')) throw new Error('market-route-auth 复核失败——不写回')
+      return s
+    },
+  },
+
   'market-D-client': {
     file: 'dshmarketplace-plugin/lib/client.js',
     check: (s) => s.includes('dshm-compat'),
@@ -276,6 +309,81 @@ const IMPLS = {
     },
   },
 
+  // ── undo-api-auth-U1：/api/undo 更长 prefix 不得绕过 /api 信任栅栏（apk #222）──
+  // 上游 webserver 先匹配 exact、随后 longest-prefix；/api/undo 因此不会进入 client-connection
+  // 注册的 /api prefix handler。此补丁在 undo handler 的**第一条语句**重建同一 Host/Origin/cookie
+  // 栅栏，并允许壳侧共享 controlToken 供本机投递；未认证读写均在读取 body/快照之前失败关闭。
+  'undo-api-auth-U1': {
+    file: 'dsh-undo-savepoint/lib/index.js',
+    check: (s) => s.includes('dsh-mobile undo route auth (U1)') && s.includes('dsh-mobile undo no-store (U1)'),
+    apply: (s) => {
+      const SEND_OLD = "      res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });"
+      const SEND_NEW = "      res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }); // dsh-mobile undo no-store (U1)"
+      if (!s.includes('dsh-mobile undo no-store (U1)')) {
+        if (!s.includes(SEND_OLD)) throw new Error('undo-api-auth 锚点未命中：REST send() 响应头已变')
+        s = s.replace(SEND_OLD, SEND_NEW)
+      }
+      if (s.includes('dsh-mobile undo route auth (U1)')) return s
+      const AUTH_ANCHOR = '    const readJson = (req) => new Promise((resolve) => {'
+      const AUTH = [
+        '    // dsh-mobile undo route auth (U1): /api/undo is a longer prefix than /api, so it must',
+        '    // enforce the same Host/Origin/browser-session fence before every read or mutation.',
+        '    const dshMobileUndoHeader = (req, name) => {',
+        '      const value = req?.headers?.[name];',
+        "      return typeof value === 'string' ? value : (Array.isArray(value) ? value[0] : undefined);",
+        '    };',
+        '    const dshMobileUndoControlToken = () => {',
+        "      const valid = (value) => typeof value === 'string' && value.length >= 8 ? value : undefined;",
+        '      const prefsPath = process.env.DSH_ADB_PREFS_PATH',
+        "        ?? ((process.env.TERMUX__PREFIX && process.env.DSH_HOME) ? '/data/user/0/com.dsharnessmobile.shell/shared_prefs/dsh-adb.xml' : undefined);",
+        '      let fromPrefs;',
+        '      if (prefsPath) {',
+        "        try { fromPrefs = valid(/<string\\s+name=\"controlToken\">([^<]*)<\\/string>/.exec(readFileSync(prefsPath, 'utf8'))?.[1]); }",
+        '        catch { /* Android prefs unavailable: the browser-session path below remains fail-closed. */ }',
+        '      }',
+        "      const testMode = process.env.DSH_CONTROL_TOKEN_TEST;",
+        "      return testMode === '1' || testMode === 'true' ? valid(process.env.DSH_CONTROL_TOKEN) ?? fromPrefs : fromPrefs;",
+        '    };',
+        '    const dshMobileUndoAuthorize = (req) => {',
+        '      let connection;',
+        "      try { connection = ctx.get?.('connection'); } catch { connection = undefined; }",
+        "      if (typeof connection?.requestRejection === 'function') {",
+        '        try {',
+        '          const rejection = connection.requestRejection(req);',
+        '          if (rejection === undefined) return undefined;',
+        '          if (rejection === 403) return { status: 403 };',
+        '          const controlToken = dshMobileUndoControlToken();',
+        "          return controlToken !== undefined && controlToken === dshMobileUndoHeader(req, 'x-dsh-control-token') ? undefined : { status: 401 };",
+        '        } catch { return { status: 401 }; }',
+        '      }',
+        "      const host = dshMobileUndoHeader(req, 'host')?.trim().toLowerCase();",
+        "      if (host !== '127.0.0.1:3080' && host !== 'localhost:3080') return { status: 403 };",
+        "      if (dshMobileUndoHeader(req, 'sec-fetch-site')?.toLowerCase() === 'cross-site') return { status: 403 };",
+        "      const origin = dshMobileUndoHeader(req, 'origin');",
+        "      if (origin && origin.toLowerCase() !== 'http://127.0.0.1:3080' && origin.toLowerCase() !== 'http://localhost:3080') return { status: 403 };",
+        '      const controlToken = dshMobileUndoControlToken();',
+        "      return controlToken !== undefined && controlToken === dshMobileUndoHeader(req, 'x-dsh-control-token') ? undefined : { status: 401 };",
+        '    };',
+        '    const dshMobileUndoReject = (res, rejection) => {',
+        "      if (rejection.status === 403) { res.writeHead(403, { 'cache-control': 'no-store' }); res.end(); return; }",
+        "      res.writeHead(401, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });",
+        "      res.end(JSON.stringify({ ok: false, error: 'unauthorized' }));",
+        '    };',
+      ].join('\n')
+      if (!s.includes(AUTH_ANCHOR)) throw new Error('undo-api-auth 锚点未命中：REST readJson() 片段已变')
+      s = s.replace(AUTH_ANCHOR, AUTH + '\n' + AUTH_ANCHOR)
+      const HANDLER = '      handler: async (req, res) => {'
+      const GUARD = [
+        '        const rejection = dshMobileUndoAuthorize(req);',
+        '        if (rejection !== undefined) { dshMobileUndoReject(res, rejection); return; }',
+      ].join('\n')
+      if (!s.includes(HANDLER)) throw new Error('undo-api-auth 锚点未命中：REST handler 起点已变')
+      s = s.replace(HANDLER, HANDLER + '\n' + GUARD)
+      if (!s.includes('dsh-mobile undo route auth (U1)')) throw new Error('undo-api-auth 复核失败——不写回')
+      return s
+    },
+  },
+
   // ── flock-android-F3：Android 无预编译 flock 绑定（0.13.7 追上游 0.1.5）──
   // 0.1.5 的 dsh-session-persistence-jsonl 用 @deepseek-ai/node-addon-system/flock 做
   // 会话目录写锁（session.lock，跨进程互斥）；dsh-sandbox-local 用同包的 landlock-run
@@ -406,33 +514,75 @@ const IMPLS = {
     },
   },
 
-  // ── attach-durable-F2：附件持久化祖先 fsync 的 Android 守卫（2026-09-10 实测，scope=engine）──
-  // 根因：attachment-local 的 ensureDurableDirectory 从 DSH_HOME 一路 fsync 到文件系统根
-  // （boundary = parse(home).root），而 Android 应用私有路径的祖先 /data/user/0 对应用不可读
-  // → open('/data/user/0') EACCES → 任何图片上传（session/prompt 的 image 内容）在准入阶段抛错，
-  // api-proxy 兜底映射为 session/agent-busy（details.reason=EACCES open '/data/user/0'）；
-  // 同一根因也是 read_image 读任何路径都报同一 EACCES 的原因（附件提交在读取之后）。
-  // 不变量：打不开的祖先不再致命——上层目录由平台负责持久化。
+  // ── attach-durable-F2：附件持久化 Android 三件套（0.13.7 重出对齐，scope=engine）──
+  // ① 祖先 fsync 守卫（2026-09-10 实测）：attachment-local 的 ensureDurableDirectory 从 DSH_HOME
+  //    一路 fsync 到文件系统根（boundary = parse(home).root），而 Android 应用私有路径的祖先
+  //    /data/user/0 对应用不可读 → open('/data/user/0') EACCES → 任何图片上传（session/prompt 的
+  //    image 内容）在准入阶段抛错，api-proxy 兜底映射为 session/agent-busy；read_image 同理。
+  //    不变量：打不开的祖先不再致命——上层目录由平台负责持久化。
+  // ② 两处 link(2) → rename 回退（publishImmutableAlias.source / publishStagedObject.staged.path）：
+  //    与 spj-migration-link-F5 同源根因（Android 应用域 SELinux 拒 hardlink，EACCES 被 dontaudit）。
+  // ③ publishStagedObject 主链 unlink(staged.path) 容忍 ENOENT：回退 rename 已消费 staged 文件。
+  // review C1（2026-09-14）：② ③ 此前只在运行时 asset 里（快照缺）——资产↔快照逐字节同源判据要求
+  // 快照侧补齐，否则重出资产时必须二选一：丢修复或保持分叉（两者都不可接受）。
   'attach-durable-F2': {
     file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-attachment-local/lib/index.js',
     scope: 'engine',
-    check: (s) => s.includes('dsh-mobile durable-walk guard'),
+    check: (s) => s.includes('dsh-mobile durable-walk guard')
+      && (s.match(/dsh-mobile link->rename fallback/g) || []).length === 2
+      && s.includes('dsh-mobile: a link->rename fallback already consumed the staged file.'),
     apply: (s) => {
-      if (s.includes('dsh-mobile durable-walk guard')) return s
-      const OLD = 'const parent = dirname(level);\n\t\tawait syncDirectory(parent);'
-      const NEW = [
-        'const parent = dirname(level);',
-        '\t\ttry { await syncDirectory(parent); } catch (error) {',
-        '\t\t\t// dsh-mobile durable-walk guard: Android app-private ancestors (/data/user/0) are not readable by the app.',
-        "\t\t\tif (error && (error.code === 'EACCES' || error.code === 'EPERM')) return;",
-        '\t\t\tthrow error;',
-        '\t\t}',
-      ].join('\n')
-      if (!s.includes(OLD)) {
-        throw new Error('attach-durable 锚点未命中：syncDirectory(parent) 循环——引擎升级后请人工核对 ensureDurableDirectory')
+      // ① durable-walk guard
+      if (!s.includes('dsh-mobile durable-walk guard')) {
+        const OLD = 'const parent = dirname(level);\n\t\tawait syncDirectory(parent);'
+        const NEW = [
+          'const parent = dirname(level);',
+          '\t\ttry { await syncDirectory(parent); } catch (error) {',
+          '\t\t\t// dsh-mobile durable-walk guard: Android app-private ancestors (/data/user/0) are not readable by the app.',
+          "\t\t\tif (error && (error.code === 'EACCES' || error.code === 'EPERM')) return;",
+          '\t\t\tthrow error;',
+          '\t\t}',
+        ].join('\n')
+        if (!s.includes(OLD)) {
+          throw new Error('attach-durable 锚点未命中：syncDirectory(parent) 循环——引擎升级后请人工核对 ensureDurableDirectory')
+        }
+        s = s.replace(OLD, NEW)
       }
-      s = s.replace(OLD, NEW)
-      if (!s.includes('dsh-mobile durable-walk guard')) throw new Error('attach-durable 复核失败——不写回')
+      // ② link(2) 回退两站（缩进随站点；与 asset 逐字节同源由 check-runtime-assets 守）
+      const linkFallback = (from, to, indent) => [
+        indent + `await link(${from}, ${to}).catch(async (error) => {`,
+        indent + '\t/* dsh-mobile link->rename fallback: Android app-private dirs reject link(2) (EACCES). */',
+        indent + '\tif (!(error instanceof Error && "code" in error && (error.code === "EACCES" || error.code === "EPERM" || error.code === "ENOTSUP"))) throw error;',
+        indent + `\tawait rename(${from}, ${to});`,
+        indent + '});',
+      ].join('\n')
+      const SITE_A = '\t\t\tawait link(source, target);'
+      const SITE_B = '\t\t\tawait link(staged.path, target);'
+      if (s.includes(SITE_A)) s = s.replace(SITE_A, linkFallback('source', 'target', '\t\t\t'))
+      else if (!s.includes('dsh-mobile link->rename fallback')) {
+        throw new Error('attach-durable 锚点未命中：publishImmutableAlias 的 link(source, target)')
+      }
+      if (s.includes(SITE_B)) s = s.replace(SITE_B, linkFallback('staged.path', 'target', '\t\t\t'))
+      else if (!s.includes('dsh-mobile link->rename fallback')) {
+        throw new Error('attach-durable 锚点未命中：publishStagedObject 的 link(staged.path, target)')
+      }
+      // ③ unlink ENOENT 容忍
+      const SITE_C = '\t\tawait unlink(staged.path);'
+      if (s.includes(SITE_C)) {
+        s = s.replace(SITE_C, [
+          '\t\tawait unlink(staged.path).catch((error) => {',
+          '\t\t\t/* dsh-mobile: a link->rename fallback already consumed the staged file. */',
+          '\t\t\tif (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;',
+          '\t\t});',
+        ].join('\n'))
+      } else if (!s.includes('already consumed the staged file')) {
+        throw new Error('attach-durable 锚点未命中：publishStagedObject 的 unlink(staged.path)')
+      }
+      if (!s.includes('dsh-mobile durable-walk guard')
+        || (s.match(/dsh-mobile link->rename fallback/g) || []).length !== 2
+        || !s.includes('dsh-mobile: a link->rename fallback already consumed the staged file.')) {
+        throw new Error('attach-durable 复核失败——不写回')
+      }
       return s
     },
   },
@@ -504,9 +654,38 @@ const IMPLS = {
     scope: 'engine',
     check: (s) => s.includes('dsh-mobile exclusive publish (F7)')
       && s.includes('dsh-mobile exclusive materialize (F7)')
-      && (s.match(/dshMobileClaimExclusive\(/g) || []).length >= 3,
+      && (s.match(/dshMobileClaimExclusive\(/g) || []).length >= 3
+      // 0.14.0-preview 实锤（review C1）：v1 双占位形态既满足上面的 marker/计数，又恒恒失败——
+      // 必须显式判为未收敛，否则「已应用」的幂等判定会把坏文件永远留在原地。
+      && !s.includes(F7_LEGACY_INLINE),
     apply: (s) => {
-      if (s.includes('dsh-mobile exclusive materialize (F7)')) return s
+      // ⓪ 收敛 v1 双占位形态（0.14.0-preview 坏资产的修复必由路径；无该形态则 no-op）。
+      //    边界 = 旧块注释起、到紧随其后的 helper 占位调用止；helper 占位调用是 v2 正确形态，保留。
+      if (s.includes(F7_LEGACY_INLINE)) {
+        const markIdx = s.indexOf(F7_LEGACY_INLINE)
+        let legacyStart = s.lastIndexOf('/* dsh-mobile exclusive publish (F7)', markIdx)
+        // 把旧块注释行前的缩进一并切除（v1 插入的注释带多余 tab；留下会让收敛输出与快照构建差 2 字节）
+        while (legacyStart > 0 && (s[legacyStart - 1] === '\t' || s[legacyStart - 1] === ' ')) legacyStart -= 1
+        const legacyEndMark = s.indexOf('if (!(await dshMobileClaimExclusive(currentPath))) return false;', markIdx)
+        if (legacyStart < 0 || legacyEndMark < 0) {
+          throw new Error('publish-exclusive 收敛失败：v1 双占位块边界未命中（人工核对 publishCurrentExclusive）')
+        }
+        // 切到「占位调用行行首」为止——切点已含该行原有缩进（坏资产里就是规范的 \t\t）→ 右半原样接回。
+        // 校验该行缩进为规范 \t\t，否则收敛输出与快照构建不会逐字节一致（宁抛错不写差异字节）。
+        let legacyEnd = legacyEndMark
+        while (legacyEnd > 0 && s[legacyEnd - 1] !== '\n') legacyEnd -= 1
+        if (!s.startsWith('\t\tif (!(await dshMobileClaimExclusive(currentPath))) return false;', legacyEnd)) {
+          throw new Error('publish-exclusive 收敛失败：占位调用行缩进非 \\t\\t（人工核对）')
+        }
+        const region = s.slice(legacyStart, legacyEnd)
+        if (!region.includes(F7_LEGACY_INLINE) || region.includes('dshMobileReleaseClaim')) {
+          throw new Error('publish-exclusive 收敛失败：v1 双占位块区间含非预期内容')
+        }
+        s = s.slice(0, legacyStart) + s.slice(legacyEnd)
+      }
+      if (s.includes('dsh-mobile exclusive materialize (F7)')
+        && (s.match(/dshMobileClaimExclusive\(/g) || []).length >= 3
+        && !s.includes(F7_LEGACY_INLINE)) return s
       const MARK = '/* dsh-mobile link->rename fallback: Android app-private dirs reject link(2) (EACCES). */'
       const idx = s.indexOf(MARK, s.indexOf('isEEXIST(error)) return false;'))
       // 锚点缺失 = 目标文件不是 F5 打过补丁的那份（例如补丁测试用的合成夹具）→ 不改写直接返回。
@@ -556,7 +735,9 @@ const IMPLS = {
       const ANCHOR_FN = 'async function publishCurrentExclusive(staged, currentPath, internals) {'
       const fnIdx = s.indexOf(ANCHOR_FN)
       if (fnIdx < 0) throw new Error('publish-exclusive 锚点未命中：publishCurrentExclusive 函数头')
-      s = s.slice(0, fnIdx) + HELPERS + s.slice(fnIdx)
+      if (!s.includes('async function dshMobileClaimExclusive(')) {
+        s = s.slice(0, fnIdx) + HELPERS + s.slice(fnIdx)
+      }
 
       // 站①：publishCurrentExclusive —— 占位失败 return false；rename 失败回收
       const PUBLISH_OLD = '\t\tawait rename(staged, currentPath);'
@@ -570,9 +751,11 @@ const IMPLS = {
         '\t\t}',
       ].join('\n')
       // 重新定位（helpers 插入后索引变化）
-      const pubIdx = s.indexOf(PUBLISH_OLD, s.indexOf(ANCHOR_FN))
-      if (pubIdx < 0) throw new Error('publish-exclusive 锚点未命中：publish 站 rename(staged, currentPath)')
-      s = s.slice(0, pubIdx) + PUBLISH_NEW + s.slice(pubIdx + PUBLISH_OLD.length)
+      if (!s.includes('if (!(await dshMobileClaimExclusive(currentPath))) return false;')) {
+        const pubIdx = s.indexOf(PUBLISH_OLD, s.indexOf(ANCHOR_FN))
+        if (pubIdx < 0) throw new Error('publish-exclusive 锚点未命中：publish 站 rename(staged, currentPath)')
+        s = s.slice(0, pubIdx) + PUBLISH_NEW + s.slice(pubIdx + PUBLISH_OLD.length)
+      }
 
       // 站②：materializePosix —— 同一占位函数；输家得 EEXIST 抛出（不静默覆盖）；rename 失败回收
       const MAT_OLD = '\t\t\tawait rename(tmp, finalPath);'
@@ -591,13 +774,74 @@ const IMPLS = {
         '\t\t\t}',
       ].join('\n')
       const matIdx = s.indexOf(MAT_OLD, s.indexOf(ANCHOR_FN))
-      if (matIdx < 0) throw new Error('publish-exclusive 锚点未命中：materialize 站 rename(tmp, finalPath)')
-      s = s.slice(0, matIdx) + MAT_NEW + s.slice(matIdx + MAT_OLD.length)
+      if (matIdx < 0 && !s.includes('dsh-mobile exclusive materialize (F7)')) {
+        throw new Error('publish-exclusive 锚点未命中：materialize 站 rename(tmp, finalPath)')
+      }
+      if (!s.includes('dsh-mobile exclusive materialize (F7)')) {
+        s = s.slice(0, matIdx) + MAT_NEW + s.slice(matIdx + MAT_OLD.length)
+      }
 
       if (!s.includes('dsh-mobile exclusive publish (F7)') || !s.includes('dsh-mobile exclusive materialize (F7)')
-        || (s.match(/dshMobileClaimExclusive\(/g) || []).length < 3) {
+        || (s.match(/dshMobileClaimExclusive\(/g) || []).length < 3 || s.includes(F7_LEGACY_INLINE)) {
         throw new Error('publish-exclusive 复核失败——不写回')
       }
+      return s
+    },
+  },
+
+  // ── external-draft-conversation-seam-J1：向旧 public conversation face 补最小文件草稿入口 ──
+  // ui-conversation 原有的 addFiles closure 是 ComposerBar 私有注入面；外部打开不能伪造
+  // input/change 或自己建第二条上传通道。该方法把同一 createDrafts → shell.addAttachments →
+  // refusal release 逻辑放到 ConversationController 上，仍只接受已经由 Session controller
+  // 确认可寻址的 sessionId。
+  'external-draft-conversation-seam-J1': {
+    file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-conversation/lib/client.js',
+    check: (s) => s.includes('dsh-mobile external draft addFiles seam (J1)'),
+    apply: (s) => {
+      if (s.includes('dsh-mobile external draft addFiles seam (J1)')) return s
+      const anchor = '\t\t\t/**\n\t\t\t* Restart one failed file upload.'
+      if (!s.includes(anchor)) throw new Error('external draft seam 锚点未命中：ui-conversation createDrafts 后续注释已变')
+      const method = [
+        '\t\t\t/** dsh-mobile external draft addFiles seam (J1): reuse the normal composer attachment path. */',
+        '\t\t\taddFiles(sessionId, files) {',
+        '\t\t\t\tconst shell = this.input.shell(sessionId);',
+        '\t\t\t\tconst drafts = this.createDrafts(sessionId, files);',
+        '\t\t\t\tif (shell.addAttachments(drafts.map((draft) => draft.id)) === false) {',
+        '\t\t\t\t\tthis.releaseDraftAttachments(drafts);',
+        '\t\t\t\t\treturn false;',
+        '\t\t\t\t}',
+        '\t\t\t\treturn true;',
+        '\t\t\t}',
+        '',
+      ].join('\n')
+      const out = s.replace(anchor, method + anchor)
+      if (!out.includes('dsh-mobile external draft addFiles seam (J1)') || !out.includes('this.input.shell(sessionId)')) {
+        throw new Error('external draft seam 复核失败——不写回')
+      }
+      return out
+    },
+  },
+
+  // ── arkweb-resource-protocol-H1：ArkWeb 丢失 dsh-resource authority（apk #221）──
+  // HarmonyOS/ArkWeb 对 non-special scheme 可报告 dsh-resource: 协议却把 hostname 留空；标准
+  // Chromium 的 hostname 仍优先使用。仅在 hostname 为空时按 DSH 自有地址文法恢复 type，拒绝
+  // userinfo、空 authority 与非 resource scheme，绝不 monkey-patch 全局 URL。
+  'arkweb-resource-protocol-H1': {
+    file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-resources/lib/client.js',
+    scope: 'engine',
+    check: (s) => s.includes('dsh-mobile ArkWeb resource authority fallback (H1)'),
+    apply: (s) => {
+      if (s.includes('dsh-mobile ArkWeb resource authority fallback (H1)')) return s
+      const ORIGINAL = /(if \(parsed\.protocol !== `dsh-resource:`\) return void 0;)(\r?\n)([ \t]*)return parsed\.hostname === "" \? void 0 : parsed\.hostname\.toLowerCase\(\);/
+      if (!ORIGINAL.test(s)) throw new Error('arkweb-resource-protocol 锚点未命中：protocolOf hostname 返回语句已变')
+      s = s.replace(ORIGINAL, (_whole, protocolCheck, eol, indent) => [
+        protocolCheck,
+        indent + 'if (parsed.hostname !== "") return parsed.hostname.toLowerCase();',
+        indent + '// dsh-mobile ArkWeb resource authority fallback (H1): ArkWeb loses the non-special-scheme hostname.',
+        indent + 'const authority = /^dsh-resource:\\/\\/([A-Za-z][A-Za-z0-9-]*)(?:[/?#]|$)/i.exec(address);',
+        indent + 'return authority === null ? void 0 : authority[1].toLowerCase();',
+      ].join(eol))
+      if (!s.includes('dsh-mobile ArkWeb resource authority fallback (H1)')) throw new Error('arkweb-resource-protocol 复核失败——不写回')
       return s
     },
   },
@@ -842,6 +1086,288 @@ const IMPLS = {
       s = s.replace(ASSIGN_OLD, ASSIGN_NEW)
       if ((s.match(/dsh-mobile patchReload normalization \(N1\)/g) || []).length !== 2) {
         throw new Error('perf-patch-reload 复核失败——不写回')
+      }
+      return s
+    },
+  },
+
+  // ── combo-lazy-A4：compose() 延迟 + 去重（0.14.0 启动性能 P1-1，scope=engine）──
+  // 背景（docs/ANDROID-RUNTIME-PERF-2026-09-12.md §R1/§4.A4）：装配期每次 internal/plugin 事件
+  // 都触发 flush → compose() 全表重建 90 条 combo（单次 1.8-3.1 s，启动期 9-14 次，占 LISTEN
+  // 墙钟 88%）。上游构造函数还先 compose 一次、再 flush 一次（同数据纯重复）。修法：
+  //   ① 构造函数不再抢先 compose；
+  //   ② flush 只置脏（composeDirty），首个读者（graph()/index-inject/bundle 路由/rebuilt）触发
+  //      唯一一次全量 compose——boot 期间的多次表变更因此收敛为一次；
+  //   ③ 图已存在后的 flush（运行期插件挂载/HMR）保持即时重算 + notify，行为不变（HMR rebuilt()
+  //      路径原样，只补清脏标记）。
+  // 与 A3 叠加：唯一那次 compose 里逐条查构建期缓存。
+  'combo-lazy-A4': {
+    file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-modules/lib/index.js',
+    scope: 'engine',
+    check: (s) => (s.match(/dsh-mobile combo lazy \(A4\)/g) || []).length === 2
+      && s.includes('\tensureComposed() {')
+      && !s.includes('\t\tthis.composed = this.compose();\n\t\tconst failures = [];'),
+    apply: (s) => {
+      if ((s.match(/dsh-mobile combo lazy \(A4\)/g) || []).length === 2 && s.includes('\tensureComposed() {')) return s
+      const FIELD_OLD = '\tflushQueued = false;\n\tcomposed;'
+      const FIELD_NEW = '\tflushQueued = false;\n\tcomposed;\n\tcomposeDirty = false; /* dsh-mobile combo lazy (A4): a flush deferred the composed graph */'
+      if (!s.includes(FIELD_OLD)) throw new Error('combo-lazy 锚点未命中：类字段 flushQueued/composed')
+      s = s.replace(FIELD_OLD, FIELD_NEW)
+      const CTOR_OLD = '\t\tthis.composed = this.compose();\n\t\tconst failures = [];'
+      const CTOR_NEW = [
+        '\t\t/* dsh-mobile combo lazy (A4): the initial composition is deferred to the first graph',
+        '\t\t * reader (or the first post-serve table change), so every boot-time flush coalesces. */',
+        '\t\tconst failures = [];',
+      ].join('\n')
+      if (!s.includes(CTOR_OLD)) throw new Error('combo-lazy 锚点未命中：构造函数抢先 compose（引擎升级后请人工核对 ClientModuleRegistry）')
+      s = s.replace(CTOR_OLD, CTOR_NEW)
+      const FLUSH_OLD = '\t\tif (!changed) return;\n\t\tlet composed;'
+      const FLUSH_NEW = [
+        '\t\tif (!changed) return;',
+        '\t\tthis.composeDirty = true;',
+        '\t\tif (this.composed === void 0) return; /* defer the first composition to the graph reader (A4) */',
+        '\t\tlet composed;',
+      ].join('\n')
+      if (!s.includes(FLUSH_OLD)) throw new Error('combo-lazy 锚点未命中：flush 提前返回')
+      s = s.replace(FLUSH_OLD, FLUSH_NEW)
+      const FLUSH_SET_OLD = '\t\tthis.composed = composed;\n\t\tthis.notifyGraphChanged();'
+      const FLUSH_SET_NEW = '\t\tthis.composed = composed;\n\t\tthis.composeDirty = false;\n\t\tthis.notifyGraphChanged();'
+      if (!s.includes(FLUSH_SET_OLD)) throw new Error('combo-lazy 锚点未命中：flush 写回 + notify')
+      s = s.replace(FLUSH_SET_OLD, FLUSH_SET_NEW)
+      const GRAPH_OLD = '\tgraph() {\n\t\treturn this.composed;\n\t}'
+      const GRAPH_NEW = [
+        '\tgraph() {',
+        '\t\treturn this.ensureComposed();',
+        '\t}',
+        '\t/**',
+        '\t* Compose on demand: the first reader after any table change pays the single full pass;',
+        '\t* later readers reuse the stable graph object. Boot-time flushes only mark dirty, so the',
+        '\t* 9-14 startup compositions collapse into the first read (perf A4).',
+        '\t* @returns the current composed entry graph.',
+        '\t*/',
+        '\tensureComposed() {',
+        '\t\tif (this.composed !== void 0 && !this.composeDirty) return this.composed;',
+        '\t\tconst composed = this.compose();',
+        '\t\tthis.composed = composed;',
+        '\t\tthis.composeDirty = false;',
+        '\t\treturn composed;',
+        '\t}',
+      ].join('\n')
+      if (!s.includes(GRAPH_OLD)) throw new Error('combo-lazy 锚点未命中：graph()')
+      s = s.replace(GRAPH_OLD, GRAPH_NEW)
+      const INJECT_OLD = '\t\t\ttable.push(...bootInjections(this.composed));'
+      const INJECT_NEW = '\t\t\ttable.push(...bootInjections(this.ensureComposed()));'
+      if (!s.includes(INJECT_OLD)) throw new Error('combo-lazy 锚点未命中：index-inject 行')
+      s = s.replace(INJECT_OLD, INJECT_NEW)
+      const RESOURCE_OLD = '\tbundleResource(method, url) {\n\t\tif (method !== "GET" && method !== "HEAD") return { status: 405 };'
+      const RESOURCE_NEW = '\tbundleResource(method, url) {\n\t\tthis.ensureComposed();\n\t\tif (method !== "GET" && method !== "HEAD") return { status: 405 };'
+      if (!s.includes(RESOURCE_OLD)) throw new Error('combo-lazy 锚点未命中：bundleResource')
+      s = s.replace(RESOURCE_OLD, RESOURCE_NEW)
+      const REBUILT_OLD = '\t\tthis.composed = this.compose();\n\t\tfor (const notify of this.rebuildListeners) try {'
+      const REBUILT_NEW = '\t\tthis.composed = this.compose();\n\t\tthis.composeDirty = false;\n\t\tfor (const notify of this.rebuildListeners) try {'
+      if (!s.includes(REBUILT_OLD)) throw new Error('combo-lazy 锚点未命中：rebuilt() 即时重算')
+      s = s.replace(REBUILT_OLD, REBUILT_NEW)
+      if ((s.match(/dsh-mobile combo lazy \(A4\)/g) || []).length !== 2 || !s.includes('\tensureComposed() {')) {
+        throw new Error('combo-lazy 复核失败——不写回')
+      }
+      return s
+    },
+  },
+
+  // ── combo-cache-A3：combo 构建期预计算 + 运行时查表（0.14.0 启动性能 P1-2，scope=engine）──
+  // 契约（与 scripts/lib/combo-precompute.mjs、scripts/check-combo-cache.mjs 三处同源，勿单边演进）：
+  //   键 = sha256(client.js 原始字节)；值 = { id, source, lines, map }；
+  //   清单 = $DSH_HOME/profiles/web/.combo-cache/{client-combos.json,client-combos.inject.json}（按序合并，
+  //   后者为注入段增量）；未命中/损坏/id 不符/文件不可读一律回退现场生成并计数（fail-open）。
+  // 命中路径跳过的正是热点：comboSource 的 utf8 解码与正则、newlineCount 逐字符扫描、
+  // identitySectionMap（mappings 拼接 + sourcesContent 全文进 map）。HMR rebuilt() 时 bundle 已变，
+  // sha 天然不匹配 → 回退现场生成（行为与不装缓存一致）。
+  'combo-cache-A3': {
+    file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-modules/lib/index.js',
+    scope: 'engine',
+    check: (s) => s.includes('dsh-mobile combo cache (A3)')
+      && s.includes('dsh-mobile combo cache hit (A3)')
+      && s.includes('dsh-mobile combo cache report (A3)'),
+    apply: (s) => {
+      if (s.includes('dsh-mobile combo cache (A3)')
+        && s.includes('dsh-mobile combo cache hit (A3)')
+        && s.includes('dsh-mobile combo cache report (A3)')) return s
+      const HELPERS = [
+        '/* dsh-mobile combo cache (A3): precomputed identity-combo sections keyed by sha256(client.js',
+        ' * bytes), shipped under <DSH_COMBO_CACHE || $DSH_HOME/profiles/web/.combo-cache>. Every lookup',
+        ' * failure (absent manifest, corrupt JSON, id mismatch, unreadable map file) falls back to the',
+        ' * live composition and is counted for the boot probe (fail-open, P-AC-05). */',
+        'const DSH_MOBILE_COMBO_CACHE_STATS = { state: "unloaded", entries: 0, hits: 0, misses: 0 };',
+        'Object.defineProperty(globalThis, "__dshMobileComboCacheStats", { value: DSH_MOBILE_COMBO_CACHE_STATS, configurable: true });',
+        'let dshMobileComboCache = null;',
+        'let dshMobileComboCacheWarned = false;',
+        'let dshMobileComboCacheReported = false;',
+        'const dshMobileComboCacheMemo = /* @__PURE__ */ new WeakMap();',
+        'function dshMobileComboCacheWarn(message) {',
+        '\tif (dshMobileComboCacheWarned) return;',
+        '\tdshMobileComboCacheWarned = true;',
+        '\tconsole.warn(`client-modules: combo cache (A3) fell back to live composition: ${message}`);',
+        '}',
+        'function dshMobileComboCacheLoad() {',
+        '\tif (dshMobileComboCache !== null) return dshMobileComboCache;',
+        '\tconst home = process.env.DSH_HOME;',
+        '\tconst dir = process.env.DSH_COMBO_CACHE !== void 0 && process.env.DSH_COMBO_CACHE !== "" ? process.env.DSH_COMBO_CACHE',
+        '\t\t: home === void 0 || home === "" ? void 0 : join(home, "profiles", "web", ".combo-cache");',
+        '\tconst cache = { dir: dir ?? "", entries: /* @__PURE__ */ new Map() };',
+        '\tif (dir === void 0) {',
+        '\t\tDSH_MOBILE_COMBO_CACHE_STATS.state = "no-dsh-home";',
+        '\t\tdshMobileComboCache = cache;',
+        '\t\treturn cache;',
+        '\t}',
+        '\tlet manifests = 0;',
+        '\tfor (const name of ["client-combos.json", "client-combos.inject.json"]) {',
+        '\t\tconst path = join(dir, name);',
+        '\t\tif (!existsSync(path)) continue;',
+        '\t\tmanifests += 1;',
+        '\t\ttry {',
+        '\t\t\tconst manifest = JSON.parse(readFileSync(path, "utf8"));',
+        '\t\t\tconst entries = manifest === null || typeof manifest !== "object" ? void 0 : manifest.entries;',
+        '\t\t\tif (entries === null || typeof entries !== "object") throw new Error(`${name}: entries missing`);',
+        '\t\t\tfor (const [key, value] of Object.entries(entries)) {',
+        '\t\t\t\tif (value === null || typeof value !== "object") continue;',
+        '\t\t\t\tif (typeof value.id !== "string" || typeof value.source !== "string" || typeof value.lines !== "number" || typeof value.map !== "string") continue;',
+        '\t\t\t\tcache.entries.set(key, value);',
+        '\t\t\t}',
+        '\t\t} catch (error) {',
+        '\t\t\tdshMobileComboCacheWarn(`${name}: ${error instanceof Error ? error.message : String(error)}`);',
+        '\t\t}',
+        '\t}',
+        '\tDSH_MOBILE_COMBO_CACHE_STATS.state = manifests === 0 ? "absent" : cache.entries.size === 0 ? "empty" : "loaded";',
+        '\tDSH_MOBILE_COMBO_CACHE_STATS.entries = cache.entries.size;',
+        '\tdshMobileComboCache = cache;',
+        '\treturn cache;',
+        '}',
+        'function dshMobileComboCacheLookup(record) {',
+        '\tif (record.sourceMap !== void 0) return void 0;',
+        '\tconst memo = dshMobileComboCacheMemo.get(record);',
+        '\tif (memo !== void 0 && memo.bundle === record.bundle) return memo.value;',
+        '\tconst cache = dshMobileComboCacheLoad();',
+        '\tlet value;',
+        '\tconst entry = cache.entries.get(createHash("sha256").update(record.bundle).digest("hex"));',
+        '\tif (entry !== void 0 && entry.id === record.entry.id) {',
+        '\t\ttry {',
+        '\t\t\tvalue = {',
+        '\t\t\t\tsource: entry.source,',
+        '\t\t\t\tlines: entry.lines,',
+        '\t\t\t\tsection: JSON.parse(readFileSync(join(cache.dir, entry.map), "utf8"))',
+        '\t\t\t};',
+        '\t\t\tDSH_MOBILE_COMBO_CACHE_STATS.hits += 1;',
+        '\t\t} catch (error) {',
+        '\t\t\tdshMobileComboCacheWarn(`map read failed for ${entry.id}: ${error instanceof Error ? error.message : String(error)}`);',
+        '\t\t\tvalue = void 0;',
+        '\t\t}',
+        '\t}',
+        '\tif (value === void 0) DSH_MOBILE_COMBO_CACHE_STATS.misses += 1;',
+        '\tdshMobileComboCacheMemo.set(record, { bundle: record.bundle, value });',
+        '\treturn value;',
+        '}',
+        'function dshMobileComboCacheReport() {',
+        '\tif (dshMobileComboCacheReported) return;',
+        '\tdshMobileComboCacheReported = true;',
+        '\tconst stats = DSH_MOBILE_COMBO_CACHE_STATS;',
+        '\tconsole.log(`client-modules: combo cache (A3) state=${stats.state} entries=${stats.entries} hits=${stats.hits} misses=${stats.misses}`);',
+        '}',
+      ].join('\n')
+      const HELPERS_ANCHOR = '/** sha1 content hash shortened to 12 hex chars (combo / graph / rebuilt-artifact rev). */'
+      if (!s.includes(HELPERS_ANCHOR)) throw new Error('combo-cache 锚点未命中：shortHash JSDoc（引擎升级后请人工核对 dsh-client-modules）')
+      s = s.replace(HELPERS_ANCHOR, HELPERS + '\n' + HELPERS_ANCHOR)
+      const LOOP_OLD = [
+        '\tfor (const record of records) {',
+        '\t\tconst prepared = comboSource(record);',
+        '\t\tconst section = record.sourceMap === void 0 ? identitySectionMap(prepared.source, prepared.fallbackSource) : comboSectionMap(record);',
+      ].join('\n')
+      const LOOP_NEW = [
+        '\tfor (const record of records) {',
+        '\t\tconst mobileCached = dshMobileComboCacheLookup(record); /* dsh-mobile combo cache hit (A3) */',
+        '\t\tif (mobileCached !== void 0) {',
+        '\t\t\tsections.push({',
+        '\t\t\t\toffset: {',
+        '\t\t\t\t\tline,',
+        '\t\t\t\t\tcolumn: 0',
+        '\t\t\t\t},',
+        '\t\t\t\tmap: mobileCached.section',
+        '\t\t\t});',
+        '\t\t\tsource += mobileCached.source + ";\\n";',
+        '\t\t\tline += mobileCached.lines;',
+        '\t\t\tcontinue;',
+        '\t\t}',
+        '\t\tconst prepared = comboSource(record);',
+        '\t\tconst section = record.sourceMap === void 0 ? identitySectionMap(prepared.source, prepared.fallbackSource) : comboSectionMap(record);',
+      ].join('\n')
+      if (!s.includes(LOOP_OLD)) throw new Error('combo-cache 锚点未命中：buildCombo 逐条装配循环')
+      s = s.replace(LOOP_OLD, LOOP_NEW)
+      const REPORT_OLD = [
+        '\t\tconst batches = artifacts.map((artifact) => artifact.descriptor);',
+        '\t\treturn {',
+        '\t\t\trev: shortHash(JSON.stringify({',
+        '\t\t\t\tentries,',
+        '\t\t\t\tbatches',
+        '\t\t\t})),',
+        '\t\t\tentries,',
+        '\t\t\tbatches',
+        '\t\t};',
+      ].join('\n')
+      const REPORT_NEW = [
+        '\t\tconst batches = artifacts.map((artifact) => artifact.descriptor);',
+        '\t\tdshMobileComboCacheReport(); /* dsh-mobile combo cache report (A3) */',
+        '\t\treturn {',
+        '\t\t\trev: shortHash(JSON.stringify({',
+        '\t\t\t\tentries,',
+        '\t\t\t\tbatches',
+        '\t\t\t})),',
+        '\t\t\tentries,',
+        '\t\t\tbatches',
+        '\t\t};',
+      ].join('\n')
+      if (!s.includes(REPORT_OLD)) throw new Error('combo-cache 锚点未命中：compose 返回处')
+      s = s.replace(REPORT_OLD, REPORT_NEW)
+      if (!s.includes('dsh-mobile combo cache (A3)') || !s.includes('dsh-mobile combo cache hit (A3)') || !s.includes('dsh-mobile combo cache report (A3)')) {
+        throw new Error('combo-cache 复核失败——不写回')
+      }
+      return s
+    },
+  },
+
+  // ── perf-compile-cache-flush-N2：NODE_COMPILE_CACHE 主动落盘（2026-09-14 缓存审计，scope=engine）──
+  // 背景（2026-09-14 设备实测 + Node v24 文档）：Node 只在**进程正常退出**时把编译缓存写盘；
+  // 壳侧停引擎是有界宽限的 SIGTERM→SIGKILL（EngineManager.killExistingEngine），Android 还会整进程
+  // 回收——设备上 09-12 23:07 之后零新增条目，而 09-14 三次快照刷新换过引擎树，换掉的模块每次冷启
+  // 都重新编译。修法：入口 bin.js 周期 flush（40 s 首刷 + 5 min）并在 exit 兜底；不注册信号处理，
+  // 不改变任何命令的退出语义。flush 是同步调用，失败按 Node 契约静默忽略。
+  'perf-compile-cache-flush-N2': {
+    file: 'usr/lib/node_modules/@deepseek-ai/dsh/lib/bin.js',
+    scope: 'engine',
+    check: (s) => s.includes('dsh-mobile compile cache flush (N2)') && s.includes('dshMobileFlushCompileCacheQuietly'),
+    apply: (s) => {
+      if (s.includes('dsh-mobile compile cache flush (N2)') && s.includes('dshMobileFlushCompileCacheQuietly')) return s
+      const IMPORT_OLD = 'import { readFileSync } from "node:fs";'
+      const BLOCK = [
+        'import { flushCompileCache as dshMobileFlushCompileCache } from "node:module";',
+        '/* dsh-mobile compile cache flush (N2): Node persists NODE_COMPILE_CACHE entries only when the',
+        ' * process exits normally; the Android shell stops the engine with a bounded SIGTERM grace and',
+        ' * the OS may reclaim the app process outright, so each boot would discard the code cache for',
+        ' * the module graph it just compiled. Persist periodically (and at exit) instead of relying on',
+        ' * a graceful shutdown. The API is best-effort by contract; failures are ignored. */',
+        'const dshMobileFlushCompileCacheQuietly = () => {',
+        '\ttry {',
+        '\t\tdshMobileFlushCompileCache();',
+        '\t} catch {',
+        '\t\t/* a failed flush must never affect the engine (Node compile-cache contract) */',
+        '\t}',
+        '};',
+        'setTimeout(dshMobileFlushCompileCacheQuietly, 40000).unref();',
+        'setInterval(dshMobileFlushCompileCacheQuietly, 300000).unref();',
+        'process.on("exit", dshMobileFlushCompileCacheQuietly);',
+      ].join('\n')
+      if (!s.includes(IMPORT_OLD)) throw new Error('compile-cache-flush 锚点未命中：bin.js 头部 import（引擎升级后请人工核对根包）')
+      s = s.replace(IMPORT_OLD, IMPORT_OLD + '\n' + BLOCK)
+      if (!s.includes('dsh-mobile compile cache flush (N2)') || !s.includes('dshMobileFlushCompileCacheQuietly')) {
+        throw new Error('compile-cache-flush 复核失败——不写回')
       }
       return s
     },

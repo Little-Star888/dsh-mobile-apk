@@ -20,6 +20,12 @@ export function instrumentCompose(mod, options = {}) {
     throw new Error('COMBO_LIB 不导出 ClientModuleRegistry.prototype.compose（引擎结构已变，请核对 dsh-client-modules）')
   }
   const stats = { calls: 0, totalMs: 0, instances: new Set(), firstAt: null }
+  /** A3 combo 缓存统计（引擎树补丁 combo-cache-A3 在模块装载时挂到 globalThis）。 */
+  const cacheStats = () => globalThis.__dshMobileComboCacheStats
+  const cacheLine = () => {
+    const c = cacheStats()
+    return c === undefined ? '' : ` comboCache=${c.state} hits=${c.hits} misses=${c.misses}`
+  }
   const t0 = performance.now()
   const orig = proto.compose
   proto.compose = function (...args) {
@@ -30,10 +36,10 @@ export function instrumentCompose(mod, options = {}) {
     const result = orig.apply(this, args)
     const dt = performance.now() - start
     stats.totalMs += dt
-    log(`[perf] compose #${stats.calls} at=${(start - t0).toFixed(0)}ms dur=${dt.toFixed(0)}ms instances=${stats.instances.size} records=${this.table?.size ?? '?'}`)
+    log(`[perf] compose #${stats.calls} at=${(start - t0).toFixed(0)}ms dur=${dt.toFixed(0)}ms instances=${stats.instances.size} records=${this.table?.size ?? '?'}${cacheLine()}`)
     return result
   }
-  const summary = () => `[perf] TOTAL calls=${stats.calls} totalMs=${stats.totalMs.toFixed(0)} instances=${stats.instances.size} firstAt=${stats.firstAt === null ? 'n/a' : stats.firstAt.toFixed(0) + 'ms'}`
+  const summary = () => `[perf] TOTAL calls=${stats.calls} totalMs=${stats.totalMs.toFixed(0)} instances=${stats.instances.size} firstAt=${stats.firstAt === null ? 'n/a' : stats.firstAt.toFixed(0) + 'ms'}${cacheLine()}`
   return { stats, summary }
 }
 

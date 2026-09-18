@@ -18,6 +18,7 @@
     "test": "npm run build && node --test test/env-recipe-schema.test.mjs test/recipe-live.test.mjs test/toolchain-single-table.test.mjs"
   },
   "dependencies": {
+    "@dsh-android/dsh-android-bridge": "file:../dsh-android-bridge",
     "@dsh-android/dsh-shell-termux": "file:../../dsh-shell-termux"
   },
   "peerDependencies": {

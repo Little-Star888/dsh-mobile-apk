@@ -57,6 +57,12 @@
 - id: ui-open-in-app
   disabled: true
 
+# HMR / 插件热重载（review C12，2026-09-14）：上游 client-hmr 的 `/plugins/events` SSE 通道
+# 无任何鉴权（回环上任意本地应用可订阅构建事件流），且它在上游 bundle 里恒挂载；移动侧没有
+# live reload 收益（patchReload 已归一为 startup，见 perf-patch-reload-N1），整行禁用收口端口面。
+- id: client-hmr
+  disabled: true
+
 # 手机管理授权桥（0.13.0 F1.7，M3.2）：dsh-android-bridge——授权状态机/失败关闭/审计；
 # 门控限死为完全访问档位（自动审批模式不构成开放条件）。
 - insert:

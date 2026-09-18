@@ -14,7 +14,11 @@ android {
     // (the embedded engine, bash, and every child command would need linker64
     // wrappers); 34 keeps native exec working on Android 15/16 devices.
     targetSdk = 34
-    // 0.14.0-preview：versionCode 38（覆盖安装 0.13.8(37)）。本版主题（迭代计划
+    // 0.14.0 正式版：versionCode 39（覆盖安装 v0.14.0-preview(38)）。
+    // 注意 vc 必须轮换：上一版 preview 已用 38 发布过，同 code 装不上（无法覆盖安装）。
+    // 本版主题 = 虚拟屏与 AI 浏览器达到可用线 + 附件入口分流 + 快照升级健壮性。
+    // 演进：0.13.8(37) → 0.14.0-preview(38) → 0.14.0(39)。
+    // 下列 0.14.0-preview 主题（迭代计划
     // docs/NEXT-ITERATION-PLAN-2026-09-12.md 的切片 1 = B0+B1+B2）：
     // ① B0 发布阻断项清零：android_ui_dump schema 族与返回面脱钩（#204）、控制协议 V2 行句柄
     //    口径（#206.1，载荷行下标 → 原始行号）、file-incoming 三条 exact 路由无鉴权（#205）；
@@ -22,12 +26,12 @@ android {
     //    临时工作区 R1-R3；
     // ③ B2 门禁与发布链：新增门禁接进唯一接线面（本地构建链 / 两仓 CI / 发布组装链三处），
     //    快照指纹对账、工具返回值 schema 自检、控制 op 六处登记链、SKIP 计数。
-    versionCode = 38
+    versionCode = 39
     // Snapshot builds append a suffix (e.g. -SN-1-RC13) via -PversionNameSuffix; release builds pass none.
     val snapshotSuffix = providers.gradleProperty("versionNameSuffix").getOrElse("")
     // 版本号单一来源：UI（GuidePageRenderer）、桥（androidBridge.version）、诊断日志、引擎环境变量
     // （DSH_APP_VERSION，见 EngineManager.engineEnv）全部读这里，禁止任何地方再硬编码版本字面量。
-    versionName = "0.14.0-preview" + snapshotSuffix
+    versionName = "0.14.0" + snapshotSuffix
     buildConfigField("String", "TERMUX_VERSION", "\"0.118.3\"")
     // 0.14.0-preview：虚拟屏 P0 建屏矩阵走仪器测试入口（app UID 下运行 = P0-6 要测的调用者身份），
     // 不新增任何产品面（Activity/Bridge/Manifest 均不动）。见 .deploy-tmp/iter-0140/vdisplay-p0.md §8.8。
@@ -111,6 +115,9 @@ dependencies {
   implementation("dev.rikka.shizuku:api:13.1.5")
   implementation("dev.rikka.shizuku:provider:13.1.5")
   implementation("androidx.activity:activity-ktx:1.10.1")
+  // 隔离浏览器身份面（0.14.0 正式轮）：document-start 脚本注入（platform/触摸/屏幕，无竞态）
+  // 与 UA-CH（WebView >= 116 能力门）。无该库时只能用 onPageStarted 注入（有竞态）。
+  implementation("androidx.webkit:webkit:1.12.1")
   // androidx.core: FileProvider (external-reader open, issue #52); ViewCompat/
   // WindowInsetsCompat were previously satisfied transitively via activity-ktx.
   implementation("androidx.core:core-ktx:1.15.0")

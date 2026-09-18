@@ -29,11 +29,19 @@ const GATES = [
   { script: 'check-patch-mirror.mjs', ci: true, needsSnapshot: false },
   { script: 'check-manifest-hardening.mjs', ci: true, needsSnapshot: false },
   { script: 'check-bounded-io.mjs', ci: true, needsSnapshot: false },
+  // #222：所有 mobile-owned /api exact/prefix 路由必须在登记表中，并有本地 auth guard 或窄公开白名单。
+  { script: 'check-api-route-auth.mjs', ci: true, needsSnapshot: false },
   { script: 'check-snapshot-fingerprint.mjs', ci: true, needsSnapshot: true },
   { script: 'check-tool-output-schema.mjs', ci: true, needsSnapshot: false },
   { script: 'check-protocol-v2.mjs', ci: true, needsSnapshot: false },
   { script: 'check-control-ops.mjs', ci: true, needsSnapshot: false },
   { script: 'check-runtime-assets.mjs', ci: false, needsSnapshot: true },
+  // 机密门禁（review C3）：归档不可读/成员为空 = 硬失败（旧实现垃圾文件也 PASS 的假绿）；严格档 --require。
+  { script: 'check-snapshot-secrets.mjs', ci: false, needsSnapshot: true },
+  // 适配层契约（review C6）：上游 bundle 行引用 / 注入包构建产物 / 客户端槽位 / 版本钉台账。
+  // 上游 `dsh/` 与基线 node_modules 是 gitignore 的本机只读产物——CI 与云端自包含树跑不全
+  // （SKIP 计数），由两条构建链与发布链（--run --require，强制 SKIP=0）实际执行。
+  { script: 'check-contract.mjs', ci: false, needsSnapshot: false },
   // 0.13.8-b B2（ST-25/26/31 + §7.2 度量）：制度性门禁与性能度量入口一并进声明集合，
   // 由本聚合入口保证两条链 + 两仓 CI 都跑到（接线面只此一处）。
   { script: 'check-state-registry.mjs', ci: true, needsSnapshot: false },
@@ -49,6 +57,13 @@ const GATES = [
   { script: 'check-build-chain-abort.mjs', ci: true, needsSnapshot: false },
   // 剥离清单后置断言（ST-16）：清单项在产物里必须不存在 + 反 no-op（基座命中的必须消失）。
   { script: 'check-strip-noop.mjs', ci: false, needsSnapshot: true },
+  // combo 缓存覆盖（0.14.0 启动性能 P1-2 / 引擎树补丁 combo-cache-A3）：注入后快照的每条
+  // client.js 必须有 sha256 命中的缓存条目，否则运行期回退现场生成会吞掉全部启动收益。
+  { script: 'check-combo-cache.mjs', ci: false, needsSnapshot: true },
+  // 模型面工具 wire 预算（0.14.0 §4.1 渐进披露）：注册集（解锁后上限）+ 初始可见集（模型第一眼）
+  // 双口径。掩蔽组名单从 capability-gate 实现导出，门禁不另写一份（防清单漂移假绿）。
+  // 离线可跑（真跑各插件 apply()，只需 plugins/*/lib 构建产物）-> CI 与两条链都跑。
+  { script: 'check-tool-surface-budget.mjs', ci: true, needsSnapshot: false },
 ]
 const CI_GATES = GATES.filter((g) => g.ci).map((g) => g.script)
 const ALL_GATES = GATES.map((g) => g.script)
@@ -197,7 +212,7 @@ const snapshotTar = (abi) => join(resolve(snapshotDir), 'snapshot-' + abi + '.ta
 for (const gate of ALL_GATES) {
   const argvFor = [join('scripts', gate)]
   // 严格档（发布链 --require）：凡支持 --require 的门禁一律传，SKIP 即失败（ST-31：发布链 SKIP=0）。
-  if (STRICT && ['check-snapshot-fingerprint.mjs', 'check-perf-instrumentation.mjs'].includes(gate)) argvFor.push('--require')
+  if (STRICT && ['check-snapshot-fingerprint.mjs', 'check-perf-instrumentation.mjs', 'check-snapshot-secrets.mjs', 'check-contract.mjs'].includes(gate)) argvFor.push('--require')
   if (gate === 'check-runtime-assets.mjs') {
     if (snapshotDir && abis.length > 0) {
       for (const abi of abis) runGate([join('scripts', gate), abi, '--require', '--snapshot', snapshotTar(abi)], gate + '(' + abi + ')')
@@ -207,9 +222,33 @@ for (const gate of ALL_GATES) {
     }
     argvFor.push(...(abis.length > 0 ? [abis[0]] : ['arm64']), ...(STRICT ? ['--require'] : []))
   }
+  if (gate === 'check-snapshot-secrets.mjs') {
+    if (snapshotDir && abis.length > 0) {
+      for (const abi of abis) runGate([join('scripts', gate), snapshotTar(abi), ...(STRICT ? ['--require'] : [])], gate + '(' + abi + ')')
+      ran += 1
+      console.log('PASS  ' + gate + '（' + abis.join(', ') + '）')
+      continue
+    }
+    if (STRICT) {
+      console.error('CHECK-RELEASE-GATES FAILED：' + gate + ' 需要 --snapshot-dir 的快照面，严格发布档不得只验空集')
+      process.exit(1)
+    }
+  }
+  if (gate === 'check-api-route-auth.mjs') {
+    if (snapshotDir && abis.length > 0) {
+      for (const abi of abis) runGate([join('scripts', gate), '--snapshot', snapshotTar(abi)], gate + '(' + abi + ')')
+      ran += 1
+      console.log('PASS  ' + gate + '（' + abis.join(', ') + ' post-injection artifact）')
+      continue
+    }
+    if (STRICT) {
+      console.error('CHECK-RELEASE-GATES FAILED：' + gate + ' 需要 --snapshot-dir 的双 ABI 注入产物，严格发布档不得只验证源码')
+      process.exit(1)
+    }
+  }
   // 需要「产物 tar」的门禁（P0 注入完整性 / 剥离清单后置断言）：发布链有快照面时按 ABI 跑；
   // 没有则计一条 SKIP —— 严格档随后判红（不得以 SKIP 结案）。
-  if (['check-inject-completeness.mjs', 'check-strip-noop.mjs'].includes(gate)) {
+  if (['check-inject-completeness.mjs', 'check-strip-noop.mjs', 'check-combo-cache.mjs'].includes(gate)) {
     if (snapshotDir && abis.length > 0) {
       for (const abi of abis) runGate([join('scripts', gate), snapshotTar(abi)], gate + '(' + abi + ')')
       ran += 1

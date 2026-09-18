@@ -31,6 +31,13 @@
       "marker": "function Wc("
     },
     {
+      "id": "market-route-auth-U2",
+      "target": "dshmarketplace-plugin/lib/index.js",
+      "summary": "为商城 search/install exact 路由接入 client-connection 的 Host/Origin/浏览器会话栅栏；缺连接服务也拒绝",
+      "provenance": "0.14.0 apk #222 全量 /api 路由审计：商城 install 会改 profile，不能依赖被 exact-first 分派绕过的 /api prefix",
+      "marker": "dsh-mobile marketplace route auth (U2)"
+    },
+    {
       "id": "market-D-client",
       "target": "dshmarketplace-plugin/lib/client.js",
       "summary": "卡片兼容徽章（dshm-compat 四色）+ 搜索框「仅移动端可用」复选框",
@@ -94,6 +101,13 @@
       "marker": "dsh-mobile dot-only badge"
     },
     {
+      "id": "undo-api-auth-U1",
+      "target": "dsh-undo-savepoint/lib/index.js",
+      "summary": "为 /api/undo 更长 prefix 重建 Host/Origin、浏览器会话和壳侧 controlToken 鉴权；所有读写在 body/快照操作前失败关闭",
+      "provenance": "0.14.0 apk #222：exact 先于 prefix、longest-prefix 路由分派使 /api/undo 绕过 client-connection 的 /api 信任栅栏",
+      "marker": "dsh-mobile undo route auth (U1)"
+    },
+    {
       "id": "flock-android-F3",
       "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/node-addon-system/lib/flock.js",
       "scope": "engine",
@@ -109,14 +123,14 @@
       "provenance": "2026-09-10 模拟器实测；上游把孤儿锁回收定义为 operator action，Android 应用私有目录无 operator 可达（残留 .credentials.yaml.lock 等于永久起不来）",
       "marker": "dsh-mobile stale-lock recovery (F4)"
     },
-    {
-      "id": "attach-durable-F2",
-      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-attachment-local/lib/index.js",
-      "scope": "engine",
-      "summary": "附件持久化的祖先 fsync 在 Android 应用私有路径上失败即止步：/data/user/0 对应用不可读，原实现一路 sync 到文件系统根 → open EACCES → 所有图片上传被 api-proxy 兜底成 session/agent-busy",
-      "provenance": "2026-09-10 实测（模拟器 16416：上传图片发送 → prompt rejected (session/agent-busy)，details.reason=EACCES open '/data/user/0'）；同一根因解释 read_image 读任意路径都报同一 EACCES",
-      "marker": "dsh-mobile durable-walk guard"
-    },
+  {
+    "id": "attach-durable-F2",
+    "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-attachment-local/lib/index.js",
+    "scope": "engine",
+    "summary": "附件持久化 Android 三件套：① 祖先 fsync 在应用私有路径（/data/user/0）EACCES 即止步（原实现一路 sync 到文件系统根 → 所有图片上传被 api-proxy 兜底成 session/agent-busy）；② publishImmutableAlias.source 与 publishStagedObject.staged.path 两处 link(2) 在 EACCES/EPERM/ENOTSUP 时回退 rename（Android SELinux 拒 hardlink）；③ publishStagedObject 的 unlink(staged.path) 容忍 ENOENT（回退 rename 已消费 staged 文件）",
+    "provenance": "① 2026-09-10 实测（模拟器 16416：上传图片发送 → prompt rejected (session/agent-busy)，details.reason=EACCES open '/data/user/0'；同一根因解释 read_image 读任意路径都报同一 EACCES）；② ③ 2026-09-14 review C1（此前只在运行时 asset：资产↔快照逐字节同源判据落地时快照侧补齐）",
+    "marker": "dsh-mobile durable-walk guard"
+  },
     {
       "id": "spj-migration-link-F5",
       "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js",
@@ -132,7 +146,7 @@
       "summary": "发布独占语义找回 + 失败回收：F5 的 rename 回退会静默覆盖已存在的目标（link 的 EEXIST 语义在 Android 上成死代码）→ O_EXCL 原子占位抽成模块级小函数 dshMobileClaimExclusive()，F5 的两站（publishCurrentExclusive + materializePosix）共用：publish 站输家得 EEXIST 并 return false、materialize 站输家得 EEXIST 并抛出（该站上游只有抛错通道）；两站占位成功后 rename 失败一律 unlink 回收占位，防 0 字节残留让之后每次发布都输掉竞争",
       "provenance": "2026-09-12 apk issue #170 / FX-207.1+207.2（审计 F5 输出）；触发面 = 双引擎进程并发发布同一会话/同一日志；跨进程独占只剩原子发布是 flock-android-F3 stub 的后果",
       "requires": ["spj-migration-link-F5"],
-      "marker": "dsh-mobile exclusive publish (F7)"
+      "marker": "dsh-mobile exclusive materialize (F7)"
     },
     {
       "id": "perf-patch-reload-N1",
@@ -141,6 +155,48 @@
       "summary": "patchReload=startup 出厂默认 + 存量升级归一化：web 模板默认 live->startup（上游 live 档额外挂 timer/hmr 反复重算客户端 combo），并把 installation-owned 当前元组下已显式写入的旧默认 live 一并归一化（上游只在键缺失时写回模板默认，存量用户永不归一化）",
       "provenance": "0.13.8 性能 A1（docs/ANDROID-RUNTIME-PERF-2026-09-12.md §A1，实测冷启动 24.9s -> 16.6s）；验收 P-AC-23 全新安装 + P-AC-24 存量升级",
       "marker": "dsh-mobile patchReload normalization (N1)"
+    },
+    {
+      "id": "combo-lazy-A4",
+      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-modules/lib/index.js",
+      "scope": "engine",
+      "summary": "客户端 combo 装配延迟到首个图读者（graph()/index-inject/bundle 路由）+ 表脏标记：boot 期每次 flush 只标脏，9-14 次全表重算收敛为一次；图已就绪后的运行期变更与 HMR rebuilt() 仍即时重算",
+      "provenance": "0.14.0 启动性能 P1-1（docs/ANDROID-RUNTIME-PERF-2026-09-12.md §4.A4、docs/IMPLEMENTATION-ACCEPTANCE-PLAN-2026-09-12.md §5.2）；验收 P-AC-06 compose<=2 / P-AC-10",
+      "marker": "dsh-mobile combo lazy (A4)"
+    },
+    {
+      "id": "combo-cache-A3",
+      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-modules/lib/index.js",
+      "scope": "engine",
+      "requires": ["combo-lazy-A4"],
+      "summary": "identity combo 源码与 section map 按 sha256(client.js) 查构建期缓存（快照段 client-combos.json + 注入段 client-combos.inject.json，按序合并），未命中/损坏/id 不符一律回退现场生成并计数（fail-open）；预计算脚本 scripts/lib/combo-precompute.mjs，覆盖门禁 scripts/check-combo-cache.mjs",
+      "provenance": "0.14.0 启动性能 P1-2（同上方案 §4.A3 / 计划 §5.2 P1-2）；验收 P-AC-05 篡改回落 + 缓存覆盖门禁",
+      "marker": "dsh-mobile combo cache (A3)"
+    },
+    {
+      "id": "perf-compile-cache-flush-N2",
+      "target": "usr/lib/node_modules/@deepseek-ai/dsh/lib/bin.js",
+      "scope": "engine",
+      "summary": "NODE_COMPILE_CACHE 主动落盘：Node 只在正常退出时写编译缓存，而壳侧停引擎是有界宽限的 SIGTERM/SIGKILL、系统还会整进程回收，换树后的新条目长期写不进去——bin.js 周期 flush（40s 首刷 + 5min）+ exit 兜底，硬杀最多丢一个周期内的新增编译",
+      "provenance": "2026-09-14 缓存审计（docs/HANDOFF-COMBO-CACHE-2026-09-14.md §1；设备证据：09-12 23:07 后编译缓存零新增而 09-14 三次快照刷新）",
+      "marker": "dsh-mobile compile cache flush (N2)"
+    },
+    {
+      "id": "external-draft-conversation-seam-J1",
+      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-conversation/lib/client.js",
+      "scope": "engine",
+      "overlayCheck": false,
+      "summary": "向 ConversationController 补受控 addFiles(sessionId, files) seam：复用既有 createDrafts、InputHub shell.addAttachments 与 refusal release，不创建第二条上传或自动发送路径",
+      "provenance": "0.14.0 外部打开草稿：host queue/source 仍 opaque；客户端必须在新空会话可寻址后调用既有 composer 草稿链，不能直接 cast 私有 createDrafts 或伪造 input change",
+      "marker": "dsh-mobile external draft addFiles seam (J1)"
+    },
+    {
+      "id": "arkweb-resource-protocol-H1",
+      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-resources/lib/client.js",
+      "scope": "engine",
+      "summary": "ArkWeb 对 dsh-resource://<type>/... 丢失 hostname 时，局部按地址文法恢复 type；标准 URL 行为和其他 scheme 不变",
+      "provenance": "0.14.0 apk #221：HarmonyOS ArkWeb 令 protocolOf() 取不到 file provider，文件预览报资源服务不可用",
+      "marker": "dsh-mobile ArkWeb resource authority fallback (H1)"
     },
     {
       "id": "reference-drill-F6",

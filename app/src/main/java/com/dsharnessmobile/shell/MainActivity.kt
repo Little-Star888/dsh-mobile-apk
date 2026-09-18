@@ -48,6 +48,14 @@ class MainActivity : ComponentActivity() {
 
   internal lateinit var webView: WebView
     private set
+  /** Lazily-created untrusted BrowserHost surface, geometrically owned by the Files sidebar stage. */
+  private lateinit var browserHost: BrowserHost
+  /** Native SurfaceView output for the VirtualDisplay Files-sidebar stage. */
+  private lateinit var vdisplayHost: VdisplayHost
+  /** 虚拟屏空闲回收定时器（前台期间每 [VDISPLAY_REAP_INTERVAL_MS] 扫一次；退后台停掉）。 */
+  private var vdisplayReaper: android.os.Handler? = null
+  /** 0.14.0：退后台时把虚拟屏画面以小窗浮在系统上（只读；回前台立即隐藏并交还侧栏）。 */
+  private lateinit var vdisplayFloat: VdisplayFloat
   internal lateinit var guideView: LinearLayout
     private set
   /** True only after WebView reported a load error for the local engine origin. */
@@ -95,6 +103,8 @@ class MainActivity : ComponentActivity() {
 
   companion object {
     private const val TAG = "dsh-shell"
+    /** 虚拟屏空闲回收扫描间隔（判定阈值在 VdisplayController.IDLE_RECLAIM_MS = 10 分钟）。 */
+    private const val VDISPLAY_REAP_INTERVAL_MS = 2 * 60 * 1000L
     const val ACTION_UPDATE = "com.dsharnessmobile.shell.action.UPDATE"
 
     /** #120：显式拒绝哨兵路径前缀（引擎侧识别为拒绝而非取消，见 host-web-compat）。
@@ -170,6 +180,12 @@ class MainActivity : ComponentActivity() {
     guideView = guideRenderer.buildGuideView()
     root.addView(guideView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
     setContentView(root)
+    browserHost = BrowserHost(this, root, webView)
+    vdisplayHost = VdisplayHost(root, webView)
+    vdisplayFloat = VdisplayFloat(this)
+    // The accessibility control service carries the model-facing browser* ops; it reaches this
+    // Activity-owned isolated WebView only through the process-wide holder.
+    BrowserHostHolder.host = browserHost
     ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
       val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
       val cutout = insets.getInsets(WindowInsetsCompat.Type.displayCutout())
@@ -233,11 +249,9 @@ class MainActivity : ComponentActivity() {
 
   override fun onResume() {
     super.onResume()
-    // ST-01（真源收敛，F-APK-01）：设置页授予/撤销「所有文件访问」后回前台必须 ≤3s 收敛。
-    // 此前写路径只有 setAllowSwitch/setPaired/revokePair（全在「用户拨我方开关」的动作上），
-    // 在系统设置里改权限后回前台无人重写 KEY_FULLACCESS，引擎侧门1 读到陈旧值。
-    // 展示值 = stateJson 的活体 fullAccess()，判定值 = 引擎读 KEY_FULLACCESS，此处令两者同源。
-    AdbState.syncFullAccess(this)
+    if (::browserHost.isInitialized) browserHost.onActivityResumed()
+    // 0.14.0：内置 adb 退役——原 ST-01「回前台同步 All Files Access 偏好」随 ADB 授权面一并移除
+    // （特权面改由 Shizuku 承载，不再有需要回前台收敛的门1 prefs）。
     // ST-11：开发者日志回前台补启——EngineService 退出时采集器可能已停而偏好仍为开，
     // 「开关事实 = 偏好 && 在跑」由 DevLogControl 保证（幂等；偏好关时 no-op）。
     DevLogControl.ensureStarted(this)
@@ -265,12 +279,7 @@ class MainActivity : ComponentActivity() {
     // 0.13.2 W7 + ST-02：悬浮球开关已开且权限在场时补启。权限缺失时 OverlayController 把偏好
     // 回落 false，本行随即短路——不再每次回前台弹系统页；用户重新授予后需再点一次开关。
     OverlayController.ensureStarted(this)
-    // ADB 端口后台预取（配对页秒回，不再同步等 NSD——2026-08-27 报障修复；15s TTL 内不重扫）。
-    // F1 常驻预热同线程搭车：server 就绪 + 密钥生成移出配对关键路径（2026-08-27 配对窗口实锤修复）。
-    try {
-      Thread { AdbState.prewarm(engineManager); AdbState.prefetchPorts(this, engineManager) }.start()
-    } catch (_: Throwable) {
-    }
+    // 0.14.0：ADB 端口预取与 server 预热随内置 adb 退役（Shizuku UserService 自身常驻，无需预热）。
     // Back from the directory picker / Termux: re-route if the engine came up.
     // 仅当 WebView 未展示（引导页/首次启动）时才探测并重路由；相册/文件选择器
     // 返回时 WebView 已可见，探测超时会误触发 showWeb→reload，导致 JS 状态丢失。
@@ -329,8 +338,61 @@ class MainActivity : ComponentActivity() {
     if (hasFocus) ImmersiveMode.apply(this, ImmersiveMode.isEnabled(this))
   }
 
+  override fun onPause() {
+    // BrowserHost owns a separate renderer. Pause only that WebView; never call the global
+    // WebView.pauseTimers(), which would suspend the trusted DSH page as well.
+    if (::browserHost.isInitialized) browserHost.onActivityPaused()
+    super.onPause()
+  }
+
+  override fun onStart() {
+    super.onStart()
+    // 回前台：浮窗让位，侧栏查看器重新接管虚拟屏 Surface。
+    if (::vdisplayFloat.isInitialized) vdisplayFloat.hide()
+    if (::vdisplayHost.isInitialized) vdisplayHost.reattach()
+    startVdisplayReaper()
+  }
+
+  /**
+   * 虚拟屏空闲回收兜底（0.14.0 用户要求：「对话数分钟不运行且虚拟屏无操作则 kill 掉，
+   * 否则会一直占用资源」）。
+   *
+   * 为什么需要周期任务而不是只在 vd op 入口回收：面板关掉、AI 也不再调用之后，
+   * 就没有任何 vd op 会进来了——那条路永远不触发，屏会一直挂着。这里每 2 分钟扫一次，
+   * 由 [VdisplayController.reclaimIdle] 判定（阈值 10 分钟未使用）。
+   *
+   * 成本：仅比较时间戳；无屏时是一次空列表遍历。
+   */
+  private fun startVdisplayReaper() {
+    if (vdisplayReaper != null) return
+    val handler = android.os.Handler(android.os.Looper.getMainLooper())
+    val task = object : Runnable {
+      override fun run() {
+        try {
+          VdisplayController.reclaimIdle(applicationContext)
+        } catch (_: Throwable) {
+          // 回收是尽力而为：任何异常都不得影响界面（资源会在下次回收窗口再试）。
+        }
+        handler.postDelayed(this, VDISPLAY_REAP_INTERVAL_MS)
+      }
+    }
+    handler.postDelayed(task, VDISPLAY_REAP_INTERVAL_MS)
+    vdisplayReaper = handler
+  }
+
+  override fun onStop() {
+    // 退后台：停止回收定时器（进程存活期间由 vd op 入口路径兜底，避免后台空转）。
+    vdisplayReaper?.removeCallbacksAndMessages(null)
+    vdisplayReaper = null
+    // 退后台：侧栏 Surface 交还给浮窗（只读、小窗；开关/权限/无屏时 fail-closed 不显示）。
+    if (::vdisplayFloat.isInitialized && ::vdisplayHost.isInitialized && VdisplayPrefs.floatEnabled(this)) {
+      vdisplayHost.detachForBackground()
+      vdisplayFloat.show()
+    }
+    super.onStop()
+  }
+
   override fun onDestroy() {
-    super.onDestroy()
     // #128 L1：控制面不再持有已销毁 Activity 的 WebView。
     webViewRef = null
     // 悬浮球避让帧消费者清除（Service 侧持有引用，避免 Activity 泄漏）
@@ -346,10 +408,18 @@ class MainActivity : ComponentActivity() {
       }
     } catch (_: Exception) {
     }
+    // Tear down native stage owners before their trusted geometry source is destroyed.
+    if (::vdisplayFloat.isInitialized) vdisplayFloat.destroy()
+    if (::vdisplayHost.isInitialized) vdisplayHost.destroy()
+    if (::browserHost.isInitialized) {
+      browserHost.destroy()
+      if (BrowserHostHolder.host === browserHost) BrowserHostHolder.host = null
+    }
     if (::webView.isInitialized) {
       themeRetryRunnable?.let { webView.removeCallbacks(it) }
       webView.destroy()
     }
+    super.onDestroy()
     // EngineService owns the child lifecycle. An Activity can be recreated by
     // rotation, OEM memory policy, or a WebView transition without meaning that
     // the user asked to interrupt an active agent turn.
@@ -557,28 +627,38 @@ class MainActivity : ComponentActivity() {
         onOpenNativePath = { path -> FileIncoming.openWithExternalReader(this, path) },
         // 0.13.7：上游 0.1.5「在外部应用打开」的 Android 落点——系统选择器（MT 管理器 / 系统文件管理）。
         onOpenPathChooser = { path, mode -> PathOpen.openChooser(this, path, mode) },
-        onAdbShell = { cmd -> AdbState.adbShellExecute(this, engineManager, cmd) },
-        // F1 预热钩子：设置页每 3s 轮询此桥，服务掉线后 60s 节流内自动补热（prewarmDue 纯读，线程仅在到期时创建）。
-        onGetAdbState = {
-          if (AdbState.prewarmDue()) Thread { AdbState.prewarm(engineManager) }.start()
-          AdbState.stateJson(this)
-        },
-        onSetAdbAllow = { enable -> AdbState.setAllowSwitch(this, enable) },
+        // 0.14.0：内置 adb 退役——原 ADB 授权面（shell / 状态 / 允许开关 / 配对 / 端口发现）
+        // 的四个桥方法已从 AndroidBridge 移除；特权执行改由 Shizuku UserService（设置页「手机控制」）。
         // 0.13.2 W7：悬浮球开关（控制器处理 overlay 权限引导；onResume 补启已授权的开关）。
         onGetOverlayEnabled = { OverlayController.isEnabled(this) },
         onSetOverlayEnabled = { enable -> OverlayController.setEnabled(this, enable) },
-        // 0.14 真实配对：码值只经 adb argv（壳侧），端口取自系统「无线调试」弹窗；配对成功才写 paired。
-        // F3 结构化结果（JSON ok/reason/message）：前端按 reason 分流文案，拒绝「输什么都像码错」。
-        onSetAdbPair = { code, pairPort, connectPort ->
-          AdbState.pairWithCodeJson(this, engineManager, code, pairPort, connectPort)
-        },
-        onRevokeAdbPair = { AdbState.revokePair(this, engineManager) },
-        // 缓存优先（启动后台预取 + 15s TTL）；无缓存才同步扫——配对页不再卡 UI（2026-08-27 报障修复）。
-        onDiscoverAdbPorts = { AdbState.cachedPorts() ?: AdbState.discoverPorts(this, engineManager).toString() },
+        // 0.14：开放屏幕范围由用户设置面独占写入；默认 virtual-only，模型工具只读并由壳侧执行面强制。
+        onGetScreenScope = { ScreenScopePrefs.current(this).wire },
+        onSetScreenScope = { raw -> ScreenScopePrefs.set(this, raw).wire },
+        onIncomingWorkspacePath = { FileIncoming.tmpWorkspace(this).absolutePath },
+        onBrowserHostStatus = { browserHost.statusJson() },
+        onBrowserHostShow = { target -> browserHost.show(target) },
+        onBrowserHostHide = { browserHost.hide() },
+        onBrowserHostReload = { browserHost.reload() },
+        onBrowserHostBounds = { bounds -> browserHost.setStageBounds(bounds) },
+        onBrowserHostViewport = { viewport -> browserHost.setViewport(viewport) },
+        onBrowserHostClose = { browserHost.close() },
+        onBrowserHostIdentity = { payload -> browserHost.identity(payload) },
+        onVdisplayStatus = { VdisplayController.status(this).toString() },
+        onVdisplayCreate = { VdisplayController.create(this).toString() },
+        onVdisplayDestroy = { VdisplayController.destroy(this).toString() },
+        onVdisplayBounds = { bounds -> vdisplayHost.setStageBounds(bounds) },
+        onVdisplaySelect = { alias -> VdisplayController.select(this, alias).toString() },
+        onGetVdisplayScale = { VdisplayPrefs.scale(this) },
+        onSetVdisplayScale = { value -> VdisplayPrefs.setScale(this, value); VdisplayPrefs.scale(this) },
+        onGetVdisplayFloat = { VdisplayPrefs.floatEnabled(this) },
+        onSetVdisplayFloat = { enable -> VdisplayPrefs.setFloatEnabled(this, enable); VdisplayPrefs.floatEnabled(this) },
+        onForceDestroyVdisplay = { VdisplayController.forceDestroy(this).toString() },
         // 0.13.5 W4：无障碍控制通道（状态 + 系统设置引导 + Android 13 受限设置一键解锁）。
         onA11yStatus = { DeviceControlService.statusJson(this) },
         onOpenA11ySettings = { openAccessibilitySettings() },
-        onUnlockRestrictedSettings = { AdbState.unlockRestrictedSettings(this, engineManager) },
+        // 0.14.0：Android 13+ 侧载应用「受限设置」解锁改走 Shizuku shell（appops）——内置 adb 已退役。
+        onUnlockRestrictedSettings = { unlockRestrictedSettingsViaShizuku() },
       ),
       "androidBridge",
     )
@@ -828,30 +908,47 @@ class MainActivity : ComponentActivity() {
 
   /** Android 10（API 29）共享目录 raw 写解锁（docs/ANDROID10-SAF-ROUTING.md 方案 B）：
    *  SAF 授权只给本进程 DocumentFile 通路，引擎（bash/node）raw path 仍被 scoped
-   *  storage FUSE 拦截——经既有 ADB 授权通道跑 appop LEGACY_STORAGE allow（shell uid
-   *  持 MANAGE_APP_OPS_MODES），随做 /sdcard 写探测验证生效性。异步执行；未授权/
-   *  连接不可用/ROM 不认 appop 时仅记日志（storageMode 降级 saf-only 由 Phase 5
-   *  真机验证定案）。仅 API 29 调用（picker 回调处守卫）。 */
+   *  storage FUSE 拦截——经 Shizuku 特权 shell（uid 2000 持 MANAGE_APP_OPS_MODES）跑
+   *  appop LEGACY_STORAGE allow，随做 /sdcard 写探测验证生效性。异步执行；Shizuku 未就绪 /
+   *  ROM 不认 appop 时仅记日志（storageMode 降级 saf-only 由 Phase 5 真机验证定案）。
+   *  仅 API 29 调用（picker 回调处守卫）。 */
   internal fun unlockLegacyStorageApi29() {
     if (android.os.Build.VERSION.SDK_INT != 29) return
     Thread {
       try {
-        val out = AdbState.adbShellExecute(
-          this, engineManager,
+        val out = ShizukuTransport.runShell(
+          this,
           "appops set --user 0 $packageName LEGACY_STORAGE allow && appops get $packageName LEGACY_STORAGE",
-          requireFullAccess = false,
         )
-        LogCollector.log("dsh-saf", "appop LEGACY_STORAGE: " + out.take(300))
-        val probe = AdbState.adbShellExecute(
-          this, engineManager,
+        LogCollector.log("dsh-saf", "appop LEGACY_STORAGE: " + out.toString().take(300))
+        val probe = ShizukuTransport.runShell(
+          this,
           "touch /storage/emulated/0/.dsh-write-probe && rm -f /storage/emulated/0/.dsh-write-probe && echo PROBE_OK",
-          requireFullAccess = false,
         )
-        LogCollector.log("dsh-saf", "raw 写探测: " + probe.take(200))
+        LogCollector.log("dsh-saf", "raw 写探测: " + probe.toString().take(200))
       } catch (t: Throwable) {
         LogCollector.log("dsh-saf", "appop 解锁失败: " + t.message)
       }
     }.start()
+  }
+
+  /**
+   * Android 13+ 侧载应用「受限设置」一键解锁（设置页「无障碍 → 一键解锁」）：
+   * 经 Shizuku 特权 shell 跑 `appops set … ACCESS_RESTRICTED_SETTINGS allow`（0.14.0 内置 adb 退役后
+   * 的唯一执行面）。返回与旧实现同形的 JSON 文本 {ok, message}。
+   */
+  private fun unlockRestrictedSettingsViaShizuku(): String {
+    val result = ShizukuTransport.runShell(
+      this,
+      "appops set --user 0 $packageName ACCESS_RESTRICTED_SETTINGS allow",
+    )
+    val ok = result.optBoolean("ok")
+    val message = if (ok) {
+      "已解锁受限设置（Shizuku 特权 shell）"
+    } else {
+      result.optString("guidance").ifBlank { result.optString("error").ifBlank { "解锁失败" } }
+    }
+    return org.json.JSONObject().put("ok", ok).put("message", message).toString()
   }
 
   /** 进程级崩溃标记：记录未捕获异常摘要，交回默认 handler（不吞异常）。 */

@@ -23,10 +23,14 @@ class EngineService : Service() {
   private lateinit var engineManager: EngineManager
   private var watchdog: ScheduledExecutorService? = null
   private var nextRestartAllowedAt = 0L
+  private var lastDeathMirrorAt = 0L
   private val restartDeadConfirmations = 2
 
   override fun onCreate() {
     super.onCreate()
+    // review C9：userShutdown 是持久状态的进程内镜像——新进程必须先恢复磁盘上的真值，
+    // 否则开机/系统重启后（START_STICKY 重投递或 BootReceiver 拉起）「用户已手动关停」被遗忘。
+    userShutdown = isUserShutdownPersisted(this)
     // C1: reuse the process-level pick token (auth survives watchdog engine restarts, never blank-allow).
     engineManager = EngineManager(this, EngineManager.ensurePickToken())
     instance = this
@@ -35,6 +39,8 @@ class EngineService : Service() {
     // 落在这里而不是 OverlayService：通知必须**独立于悬浮球开关**生存（§6.0 风险 2）。
     NotifyStore.start(this)
     NotifyBridge.start(this)
+    // 0.14.0 承载拆离：控制队列随前台引擎服务起停——a11y 关着也能承载 browser*/vd*。
+    ControlCarrier.ensureStarted(this)
     // Dev log toggle on: persistent collection (logcat + engine.log → dshdata/log/, daily).
     if (MainActivity.DevLogPrefs.isEnabled(this)) LogCollector.start(this)
   }
@@ -71,6 +77,7 @@ class EngineService : Service() {
   }
 
   override fun onDestroy() {
+    ControlCarrier.stop()
     watchdog?.shutdownNow()
     watchdog = null
     WatchdogV2.releaseWakeLock()
@@ -83,7 +90,7 @@ class EngineService : Service() {
 
   /** User-requested shutdown: stop the watchdog + engine (no auto-restart). */
   fun requestShutdown() {
-    userShutdown = true
+    setUserShutdown(this, true)
     watchdog?.shutdownNow()
     watchdog = null
     try { engineManager.stopEngine() } catch (_: Exception) {
@@ -150,6 +157,12 @@ class EngineService : Service() {
                 if (plan.force) {
                   engineManager.mirrorDiagnosticsToShared("engine-boot-hung")
                   LogCollector.log("dsh-watchdog", "tracked child exceeded boot deadline; forcing one controlled restart")
+                } else if (now - lastDeathMirrorAt >= DEATH_MIRROR_INTERVAL_MS) {
+                  // review C5：确认死亡的常态重启也镜像现场（10 分钟节流）——后台崩溃循环下
+                  // 旧实现只在 force 档镜像，轮转几拍后原始 engine.log 已被滚掉，取证现场丢失。
+                  val dir = engineManager.mirrorDiagnosticsToShared("engine-died")
+                  if (dir != null) lastDeathMirrorAt = now
+                  LogCollector.log("dsh-watchdog", "engine death diagnostics: " + (dir?.absolutePath ?: "unavailable"))
                 }
                 val requested = engineManager.startEngine(force = plan.force)
                 val delayMs = WatchdogV2.nextDelayMs()
@@ -191,9 +204,37 @@ class EngineService : Service() {
 
   companion object {
     private const val NOTIFICATION_ID = 2
+    /** 常态死亡镜像的节流窗（review C5）：看门狗每 5s 一拍，崩溃循环下不能每拍都打包。 */
+    private const val DEATH_MIRROR_INTERVAL_MS = 10 * 60 * 1000L
+
+    /** 用户手动关停的持久真源（review C9）：BootReceiver 与 START_STICKY 重投递都必须尊重它。 */
+    private const val LIFECYCLE_PREFS = "engine_lifecycle"
+    private const val KEY_USER_SHUTDOWN = "user_shutdown"
+
     /** User-requested shutdown flag: after shutdown the watchdog/onStartCommand no longer raises the engine; the user must start it manually. */
     @Volatile
     var userShutdown = false
+
+    /** 写内存镜像 + 落盘（磁盘是唯一跨进程/跨重启的真源）。 */
+    fun setUserShutdown(context: android.content.Context, value: Boolean) {
+      userShutdown = value
+      try {
+        context.applicationContext
+          .getSharedPreferences(LIFECYCLE_PREFS, android.content.Context.MODE_PRIVATE)
+          .edit().putBoolean(KEY_USER_SHUTDOWN, value).apply()
+      } catch (_: Throwable) {
+      }
+    }
+
+    /** 读磁盘上的用户停机状态；系统在进程外重启时（开机/START_STICKY 新进程）用它恢复。 */
+    fun isUserShutdownPersisted(context: android.content.Context): Boolean = try {
+      context.applicationContext
+        .getSharedPreferences(LIFECYCLE_PREFS, android.content.Context.MODE_PRIVATE)
+        .getBoolean(KEY_USER_SHUTDOWN, false)
+    } catch (_: Throwable) {
+      false
+    }
+
     /** Currently running service instance (MainActivity's "Shut down" stops the watchdog via requestShutdown). */
     @Volatile
     var instance: EngineService? = null

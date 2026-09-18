@@ -201,9 +201,12 @@ internal object SnapshotTransaction {
    * - `cordis.patch.yml`：按 id 合并——live 内容为基，追加 live 缺失的工厂块；
    * - 其余双存条目：工厂权威（staged 覆盖）。
    *
-   * 原子性：合并失去 rename 的事务性，因此先把 live profiles **整目录拷贝**（非
-   * rename）到 previous，条目照常入 journal——失败/中断时 rollbackEntry 按既有
-   * 「displaced 存在即恢复」语义整目录回滚。
+   * 原子性（review C4 收紧）：合并失去 rename 的事务性，因此先整目录**深拷贝备份**再合并。
+   * 旧实现「先记 journal 后拷贝」：拷贝中途被杀 → journal 已声明 displaced 而 previous 只有半份，
+   * 恢复路径用半份覆盖 live（用户插件生态/node_modules 缺失）。现在顺序改为：
+   *   拷贝到 `profiles.copying` → 原子 rename 为 previous → **才**写 journal。
+   * 崩溃窗口只可能留下不带 journal 的 `.copying` 残渣（下次刷新清掉），恢复路径信任的
+   * previous 一律是完整备份；宁可本次刷新失败（marker 不被清、下次重试），绝不半份覆盖。
    */
   private fun mergeProfiles(
     filesDir: File,
@@ -216,12 +219,17 @@ internal object SnapshotTransaction {
     onEntry: (String) -> Unit,
     notes: MutableList<String>,
   ) {
-    // Journal + 整目录拷贝备份（拷贝失败即中止刷新——宁可不起树也不丢用户生态）
-    moved += "home/.dsh/profiles"
-    writeMarker(filesDir, Marker(Phase.SWAPPING, fingerprint, startedAt, moved.toList()))
+    // ① 备份先写临时名（拷贝失败/被杀 = live 与 journal 都不受影响）
+    val copying = File(previousProfiles.parentFile, previousProfiles.name + ".copying")
+    SnapshotFs.deletePath(copying)
     SnapshotFs.deletePath(previousProfiles)
     SnapshotFs.createDirectories(previousProfiles.parentFile ?: filesDir)
-    copyRecursivelyStrict(liveProfiles, previousProfiles)
+    copyRecursivelyStrict(liveProfiles, copying)
+    // ② 备份完整落位（同目录原子 rename）后才记账——此后 rollbackEntry 信任 previous
+    SnapshotFs.deletePath(previousProfiles)
+    SnapshotFs.move(copying, previousProfiles)
+    moved += "home/.dsh/profiles"
+    writeMarker(filesDir, Marker(Phase.SWAPPING, fingerprint, startedAt, moved.toList()))
     try {
       // 用户面 = 只有 **profile 根** 的两个清单（profiles/<name>/package.json 与 cordis.patch.yml）：
       // 用户 pin / 用户追加块只可能在这里。其下 node_modules 子树内的清单属工厂面——0.14.0 P0：
@@ -371,17 +379,16 @@ internal object SnapshotTransaction {
   /**
    * Resolves an interrupted transaction.
    *
-   * [currentFingerprint] is the content of the live fingerprint file: when it
-   * already equals the marker's target fingerprint the commit point was reached
-   * before the crash, so the transaction rolls forward instead of undoing a
-   * working runtime.
+   * review C13（2026-09-14）：提交只认 `phase == SWAPPED` 哨兵。旧实现把「指纹已等于目标」也当
+   * 提交证据——同版本重解压时指纹在交换**开始之前**就等于目标，交换中途被杀会被误判前滚，
+   * 而 live 可能只换了一半（缺 usr / profiles 未合并）。SWAPPING 一律回滚，由调用方在
+   * 下一次启动重新走完整刷新（指纹文件与树的短暂不一致由完整刷新收敛）。
    */
   fun recover(
     filesDir: File,
     stagedRoot: File,
     usrDir: File,
     homeDir: File,
-    currentFingerprint: String,
   ): Recovery {
     val marker = readMarker(filesDir) ?: return Recovery(Outcome.NONE)
     if (marker.phase == Phase.STAGED) {
@@ -390,9 +397,7 @@ internal object SnapshotTransaction {
       clearMarker(filesDir)
       return Recovery(Outcome.DISCARDED_STAGE)
     }
-    val committed = marker.phase == Phase.SWAPPED ||
-      (marker.fingerprint.isNotEmpty() && marker.fingerprint == currentFingerprint)
-    if (committed) {
+    if (marker.phase == Phase.SWAPPED) {
       return Recovery(Outcome.ROLLED_FORWARD, marker.fingerprint.ifEmpty { null })
     }
     rollback(filesDir, stagedRoot, usrDir, homeDir, marker)
@@ -470,7 +475,11 @@ internal object SnapshotTransaction {
     if (!SnapshotFs.exists(previousHome)) return
     for (entry in previousHome.listFiles() ?: emptyArray()) {
       if (entry.name == ".dsh") {
-        for (child in entry.listFiles() ?: emptyArray()) out += "home/.dsh/" + child.name
+        for (child in entry.listFiles() ?: emptyArray()) {
+          // review C4：`.copying` 是未完成的备份残渣（不完整），绝不参与回滚/恢复。
+          if (child.name.endsWith(".copying")) continue
+          out += "home/.dsh/" + child.name
+        }
       } else {
         out += "home/" + entry.name
       }

@@ -31,10 +31,9 @@
     },
     {
       "repo": "plugins/dsh-android-file-open",
-      "reason": "同 dsh-android-bridge：0.13.7 后未随版对齐（dev 钉 0.1.1-rc.2 / cordis 4.0.1）。",
+      "reason": "同 dsh-android-bridge：0.13.7 后未随版对齐（dev 钉 0.1.1-rc.2 / cordis 4.0.1）。dsh-llm 已对齐（@0.1.5-rc.1）故移出 accepted——桩条目保留会红（stale）。",
       "accepted": [
         "@deepseek-ai/cordis@4.0.1",
-        "@deepseek-ai/dsh-llm@0.1.1-rc.2",
         "@deepseek-ai/dsh-tools@0.1.1-rc.2"
       ]
     },
@@ -48,9 +47,8 @@
     },
     {
       "repo": "plugins/dsh-android-vdisplay",
-      "reason": "0.13.8 新插件（虚拟屏/Shizuku）：同 dsh-android-browser 的未对齐基线（dev 钉 0.1.1-rc.2 / cordis 4.0.1，另含 client-runtime / client-ui-slots）。",
+      "reason": "0.14.0 CI/CD 修复 C-4：cordis 已对齐 4.0.2（原钉 4.0.1，与引擎 overlay 的 4.0.2 冲突致 npm ci ERESOLVE——该组件的安装面此前从未真正跑通过）。余下三项属独立版本线 @deepseek-ai/dsh-client-runtime（该包只发到 0.1.1-rc.2，**不存在** 0.1.5-rc.1）+ 其同代 dsh-tools/client-ui-slots：客户端运行时的版本线与引擎主版本线不重合，物理上无法钉到 0.1.5-rc.1，运行时由快照引擎树实际版本兜底（构建期只做类型与打包）。",
       "accepted": [
-        "@deepseek-ai/cordis@4.0.1",
         "@deepseek-ai/dsh-client-runtime@0.1.1-rc.2",
         "@deepseek-ai/dsh-client-ui-slots@0.1.1-rc.2",
         "@deepseek-ai/dsh-tools@0.1.1-rc.2"

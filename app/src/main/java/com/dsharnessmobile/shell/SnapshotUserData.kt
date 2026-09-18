@@ -11,11 +11,18 @@ import java.nio.file.attribute.BasicFileAttributes
  * copied it back; a kill in the middle left `.dsh-backup` behind).
  *
  * The current refresh no longer creates that backup — [SnapshotTransaction] never
- * touches user-owned paths — so this restore is a one-time migration. It is
- * deliberately additive: only missing entries, truncated regular files and the small
- * singleton files captured before extraction are written, so a stale backup can never
- * roll back data the user created after the interrupted refresh. Broken symbolic links
- * are logged and skipped, and the live source tree is never mutated to make a copy work.
+ * touches user-owned paths — so this restore is a one-time migration (only reachable
+ * via a leftover `.dsh-backup` from ≤0.13.2).
+ *
+ * Boundary (review C14, comment corrected to match behavior): for the user-owned trees
+ * the restore is deliberately additive — only missing entries and truncated regular
+ * files are copied, so a stale backup can never roll back data the user created after
+ * the interrupted refresh. The small singletons in [replacedSingletons] are the
+ * exception: they are replaced wholesale, because the interrupted refresh could have
+ * overwritten them with factory content during extraction, which makes the
+ * pre-extraction backup the authoritative content for exactly those files.
+ * Broken symbolic links are logged and skipped, and the live source tree is never
+ * mutated to make a copy work.
  */
 internal object SnapshotUserData {
 

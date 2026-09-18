@@ -13,8 +13,8 @@
 
 ## 补丁清单（详见 registry.json）
 
-- **dshmarketplace-plugin 0.1.5**：A pre-execute 守卫（全工具崩溃）、B execPath 安全化（apk#83/#89 bad ELF magic）、C 不可安装置灰（soft：锚点失配仅告警不拒打包）、D 移动兼容徽章 + `mobile:` 过滤（server/client 两侧）
-- **dsh-undo-savepoint 0.3.8**：E1-E7 移动端裁剪（头部只留快照徽章、移除快捷键行与全局键盘监听、徽章宽度封顶）+ **E8 徽章折叠成小绿点**（2026-09-10 用户定例：360dp 竖屏头部已被模式徽章/打开方式/…/右栏键占满，文字徽章挤标题且更窄处错位；数量与含义挪进 title/aria-label，点击行为不变，20x20 圆形后置 CSS 覆盖胶囊样式——注意 E7 的 marker 串保持不动，改它会让 E7 误判未应用后二次施加失配）
+- **dshmarketplace-plugin 0.1.5**：A pre-execute 守卫（全工具崩溃）、B execPath 安全化（apk#83/#89 bad ELF magic）、C 不可安装置灰（soft：锚点失配仅告警不拒打包）、D 移动兼容徽章 + `mobile:` 过滤（server/client 两侧）、**U2 exact 路由鉴权**（search/install 复用 `connection.requestRejection()`，缺服务也 401）。
+- **dsh-undo-savepoint 0.3.8**：E1-E7 移动端裁剪（头部只留快照徽章、移除快捷键行与全局键盘监听、徽章宽度封顶）+ **E8 徽章折叠成小绿点**（2026-09-10 用户定例：360dp 竖屏头部已被模式徽章/打开方式/…/右栏键占满，文字徽章挤标题且更窄处错位；数量与含义挪进 title/aria-label，点击行为不变，20x20 圆形后置 CSS 覆盖胶囊样式——注意 E7 的 marker 串保持不动，改它会让 E7 误判未应用后二次施加失配）+ **U1 `/api/undo` 鉴权**（Host/Origin/浏览器会话或壳侧实时 controlToken，所有读写均在 body/快照操作前失败关闭）。
 
 ## 用法
 
@@ -65,3 +65,23 @@ node scripts/patches/apply-patches.mjs vendor --list
   一次受控回收：锁记录的 pid 已消失（`process.kill(pid,0)` ESRCH）且锁内容二次核验一致才删，
   每次获取最多回收一次；读取失败/内容非 pid/核验不一致/任何异常一律不动锁。
   行为回归 `node scripts/patches/tests/atomic-stale-lock.test.mjs`（fixture = 0.1.5-rc.1 产物）。
+
+## 2026-09-14 启动性能批（N2 / A4 / A3，scope=engine）
+
+- **新增 perf-compile-cache-flush-N2**（目标 `@deepseek-ai/dsh/lib/bin.js`）：Node 只在进程正常退出时
+  写 `NODE_COMPILE_CACHE`（v24 文档），而壳侧停引擎是有界宽限的 SIGTERM→SIGKILL、系统还会整进程
+  回收——设备实测编译缓存自 09-12 23:07 后零新增/零改写，09-14 三次快照刷新后换掉的模块每次冷启
+  都重新编译。补丁在入口 bin.js 周期 flush（40s 首刷 + 5min）+ exit 兜底；不注册信号处理，不改
+  任何命令的退出语义。回归 `scripts/patches/tests/compile-cache-flush-n2.test.mjs`。
+- **新增 combo-lazy-A4**（目标 `dsh-client-modules/lib/index.js`）：装配期每次 `internal/plugin`
+  事件都触发 `flush()` → `compose()` 对整张客户端插件表全量重算（0.13.8 实测单次 1.8-3.1s、
+  启动期 9-14 次、占 LISTEN 墙钟 88%）。补丁把首个图读者之前的 flush 收敛为「只标脏」，
+  唯一一次全量 compose 发生在 `graph()`/index-inject/bundle 路由首次读取；图已存在后的运行期
+  变更与 HMR `rebuilt()` 仍即时重算。回归 `scripts/patches/tests/combo-lazy-a4.test.mjs`。
+- **新增 combo-cache-A3**（同目标文件，`requires: combo-lazy-A4`）：identity combo 的 source 与
+  section map 与 rev 无关、对同一份 bundle 字节恒定，构建期由 `scripts/lib/combo-precompute.mjs`
+  预计算（键 = sha256(client.js)），运行时按表读取；未命中/损坏/id 不符一律回退现场生成（fail-open，
+  并计数/上报）。注入段的 4 条 client.js 由两条构建链补算为 `client-combos.inject.json`，
+  经 `inject-all.py --combo-cache-delta` 合入 tar；覆盖门禁 `scripts/check-combo-cache.mjs`。
+  字节等价回归 `scripts/patches/tests/combo-cache-a3.test.mjs`（命中/缺席/篡改/id 不符/批路径五向）。
+  fixture = 0.1.5-rc.1 产物（`tests/fixtures/dsh-client-modules-0.1.5-rc.1/`、`tests/fixtures/dsh-root-0.1.5-rc.1/`）。

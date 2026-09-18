@@ -42,13 +42,28 @@ class CallSiteContractTest {
     return rest.substring(0, cut)
   }
 
-  /** ST-01：onResume 必须重写门1 的 KEY_FULLACCESS（系统设置改权限后的同步路径）。 */
+  /**
+   * ST-01 已**随内置 adb 退役而退役**（0.14.0 §6）：门1 的 KEY_FULLACCESS prefs 与 `AdbState.kt`
+   * 一并删除，特权面改由 Shizuku 承载，不再有「回前台收敛权限判定值」这条路径。
+   *
+   * 本测试原样断言 `AdbState.syncFullAccess(this)`，在该文件删除后必然失败——属于**测试没跟着退役**
+   * （存量假红）。此处改为断言**退役事实**：onResume 里不得再出现该调用，且必须留下退役说明，
+   * 这样将来谁把 adb 判定偷偷加回来，这里会立刻报出来。
+   */
   @Test
-  fun onResumeSyncsFullAccess() {
-    val onResume = memberBody(codeOnly(source("MainActivity.kt")), "override fun onResume()")
+  fun onResumeNoLongerSyncsFullAccessAfterAdbRetirement() {
+    // 注意：`codeOnly` 会**剥掉注释**，所以「退役说明」要在原文上断言，
+    // 而「不得再出现调用」要在代码上断言——两者用不同视图（我第一版混用了，自己踩了一次）。
+    val raw = source("MainActivity.kt")
+    val code = codeOnly(raw)
+    val onResume = memberBody(code, "override fun onResume()")
+    assertFalse(
+      "ST-01 退役：内置 adb 已下线，onResume 不得再调 AdbState.syncFullAccess",
+      onResume.contains("AdbState.syncFullAccess"),
+    )
     assertTrue(
-      "ST-01：onResume 必须调一次 AdbState.syncFullAccess（否则授予/撤销权限后判定值陈旧）",
-      onResume.contains("AdbState.syncFullAccess(this)"),
+      "退役必须在源码里留下可核对的说明（防止无声回退）",
+      raw.contains("内置 adb 退役"),
     )
   }
 

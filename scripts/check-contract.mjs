@@ -1,5 +1,8 @@
 // check-contract.mjs — adapter-layer contract point check (core M1.4 adapter chain check).
-// Consumes scripts/contract.json; any broken point → non-zero exit + report. Usage: node scripts/check-contract.mjs
+// Consumes scripts/contract.json; any broken point → non-zero exit + report. Usage: node scripts/check-contract.mjs [--require]
+// review C6（2026-09-14）：本门禁此前未接任何链（存在但从不执行 = 假防线）；现接进聚合入口与两条构建链。
+// 上游 `dsh/` 只读 checkout 与基线 `node_modules` 都是**本机产物**（gitignore，CI/自包含树不在场）：
+// 对应小节以 SKIP 计数并打印汇总；`--require`（发布链）下任何 SKIP 即失败——发布环境必须齐全。
 import { readFileSync, existsSync, readdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -7,8 +10,15 @@ import { fileURLToPath } from 'node:url'
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const contract = JSON.parse(readFileSync(join(root, 'scripts/contract.json'), 'utf8'))
 const issues = []
+const REQUIRE = process.argv.slice(2).includes('--require')
+let skipped = 0
 const ok = (msg) => console.log('  OK  ' + msg)
 const fail = (msg) => { issues.push(msg); console.log('  FAIL ' + msg) }
+const skip = (msg) => {
+  skipped += 1
+  if (REQUIRE) issues.push('SKIP: ' + msg)
+  console.log('  SKIP(#' + skipped + ')  ' + msg + (REQUIRE ? ' —— --require 档不得 SKIP' : ''))
+}
 
 function dtsFiles(dir) {
   const out = []
@@ -21,13 +31,18 @@ function dtsFiles(dir) {
 }
 
 console.log('== 1. bundle 行引用 ==')
-for (const row of contract.rows) {
-  const patchFile = join(root, contract.upstreamRepo, 'packages/bundle', row.bundle, 'cordis.patch.yml')
-  if (!existsSync(patchFile)) { fail('bundle patch 缺失: ' + patchFile); continue }
-  const text = readFileSync(patchFile, 'utf8')
-  const hit = text.split('\n').find(l => l.trim() === '- id: ' + row.id)
-  if (hit === undefined) fail('行 ' + row.id + ' 在上游 ' + row.bundle + ' bundle 中不存在（patch 静默失效风险）')
-  else ok('行 ' + row.id + ' @ ' + row.bundle + ' 存在')
+const upstreamPackages = join(root, contract.upstreamRepo, 'packages')
+if (!existsSync(upstreamPackages)) {
+  skip('上游树 ' + contract.upstreamRepo + '/packages 不在场（只读 checkout；CI/自包含树不含）——bundle 行引用未执行')
+} else {
+  for (const row of contract.rows) {
+    const patchFile = join(upstreamPackages, 'bundle', row.bundle, 'cordis.patch.yml')
+    if (!existsSync(patchFile)) { fail('bundle patch 缺失: ' + patchFile); continue }
+    const text = readFileSync(patchFile, 'utf8')
+    const hit = text.split('\n').find(l => l.trim() === '- id: ' + row.id)
+    if (hit === undefined) fail('行 ' + row.id + ' 在上游 ' + row.bundle + ' bundle 中不存在（patch 静默失效风险）')
+    else ok('行 ' + row.id + ' @ ' + row.bundle + ' 存在')
+  }
 }
 
 console.log('== 2. 插入行包存在（仓库 + 构建产物） ==')
@@ -42,12 +57,16 @@ for (const ins of contract.inserted) {
 
 console.log('== 3. 继承符号（基线 node_modules 类型面） ==')
 const baseline = join(root, contract.symbols[0].repo, 'node_modules/@deepseek-ai')
-for (const sym of contract.symbols) {
-  const typesDir = join(baseline, sym.pkg, 'lib/types')
-  if (!existsSync(typesDir)) { fail('基线缺失 ' + sym.pkg + '/lib/types（先 npm install）'); continue }
-  const found = dtsFiles(typesDir).some(f => readFileSync(f, 'utf8').includes(sym.symbol))
-  if (found) ok(sym.pkg + ': ' + sym.symbol)
-  else fail(sym.pkg + ': 符号 ' + sym.symbol + ' 不在基线类型面（继承面断裂）')
+if (!existsSync(baseline)) {
+  skip('基线 node_modules 不在场（' + contract.symbols[0].repo + '/node_modules，先 npm install）——继承符号未执行')
+} else {
+  for (const sym of contract.symbols) {
+    const typesDir = join(baseline, sym.pkg, 'lib/types')
+    if (!existsSync(typesDir)) { fail('基线缺失 ' + sym.pkg + '/lib/types（先 npm install）'); continue }
+    const found = dtsFiles(typesDir).some(f => readFileSync(f, 'utf8').includes(sym.symbol))
+    if (found) ok(sym.pkg + ': ' + sym.symbol)
+    else fail(sym.pkg + ': 符号 ' + sym.symbol + ' 不在基线类型面（继承面断裂）')
+  }
 }
 
 // 0.2.0 起注入层不再替换上游框架：它组合进上游的座位，绝不注册 'root'。
@@ -131,6 +150,7 @@ for (const g of pinGaps) {
 }
 ok('版本钉检查完成')
 
+if (skipped > 0) console.log('SKIP=' + skipped)
 if (issues.length > 0) {
   console.error('')
   console.error('CONTRACT FAIL (' + issues.length + '):')
@@ -138,4 +158,4 @@ if (issues.length > 0) {
   process.exit(1)
 }
 console.log('')
-console.log('CONTRACT PASS')
+console.log('CONTRACT PASS（SKIP=' + skipped + '）')

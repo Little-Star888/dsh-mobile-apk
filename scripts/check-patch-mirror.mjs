@@ -27,6 +27,9 @@ const argv = process.argv.slice(2)
 const peerArgIdx = argv.indexOf('--peer')
 const PEER_OVERRIDE = peerArgIdx >= 0 ? argv[peerArgIdx + 1] : process.env.DSH_MIRROR_PEER
 const SELF_ONLY = argv.includes('--self')
+// review C7：CI 跨仓检出必须硬失败——对端缺席不得以 SKIP 结案（否则检出步骤一旦被软化，
+// 镜像防线静默消失）。CI / 发布链一律带 --require-peer。
+const REQUIRE_PEER = argv.includes('--require-peer')
 
 const failures = []
 // ST-31：任何 SKIP 必须计数（发布链要求 SKIP=0；本门禁的 SKIP 只有一种合法形态——
@@ -93,7 +96,12 @@ if (!SELF_ONLY) {
 }
 
 if (!SELF_ONLY && !peer) {
-  skip('镜像层：对端树不在场（CI 单仓场景请 checkout 对端后运行，或传 --peer/--self）')
+  if (REQUIRE_PEER) {
+    check('--require-peer：对端树必须在场（镜像比对不得以 SKIP 结案）', false,
+      'CI 跨仓检出失败或未做——先修检出（PAT）再谈镜像防线')
+  } else {
+    skip('镜像层：对端树不在场（CI 单仓场景请 checkout 对端后运行，或传 --peer/--self）')
+  }
 }
 if (peer) {
   console.log(`镜像对端: ${relative(dirname(ROOT), peer) || peer}`)
@@ -180,12 +188,25 @@ if (peer) {
     // robocopy src + package.json + lib 产物）。**目录级**比对（递归，排除 node_modules）——只点
     // package.json + lib/index.js 会在单边改 lib/facts.js、test/*.test.mjs、新导出面时假绿
     // （本轮实测：browser 副本曾落后 4 文件 / 5 文件内容不同；file-open 曾落后 test/auth.test.mjs）。
+    // **CI 面提醒（0.14.0 CI/CD 修复 C-1）**：dsh-host-web-compat / dsh-client-ui-responsive 是
+    // **独立 git 仓库**，在协调仓 .gitignore 里（净检出永远缺席）。因此 CI 必须在跑本门禁前把它们
+    // 检出到这两个路径（见 .github/workflows/pr-gate.yml 的「检出镜像对端三面」步骤）——否则首条
+    // 「镜像面源文件在场」即 FAIL，协调仓 main 自 2026-09-13 起一直红。本地工作树天然在场，无需处理。
+    // apk 仓那一侧同理（同名副本随 apk 仓提交，故 CI 检出 apk 仓即得）。
+    'dsh-host-web-compat',
+    'dsh-client-ui-responsive',
+    'plugins/dsh-android-bridge',
+    'plugins/dsh-android-linux-env',
     'plugins/dsh-android-browser',
     'plugins/dsh-android-vdisplay',
     'plugins/dsh-android-file-open',
     'scripts/build-release.ps1',
     'scripts/check-manifest-hardening.mjs',
     'scripts/check-bounded-io.mjs',
+    'scripts/check-api-route-auth.mjs',
+    'scripts/api-route-auth-policy.json',
+    'vendor/dsh-undo-savepoint/PATCHES.md',
+    'vendor/dshmarketplace-plugin/PATCHES.md',
     'scripts/check-protocol-v2.mjs',
     'scripts/check-runtime-assets.mjs',
     'scripts/check-snapshot-fingerprint.mjs',
@@ -197,6 +218,10 @@ if (peer) {
     'scripts/check-inject-completeness.mjs',
     'scripts/check-kotlin-comments.mjs',
     'scripts/check-strip-noop.mjs',
+    // combo 缓存（0.14.0 启动性能 P1-2 / A3）：预计算模块与覆盖门禁是双仓构建链的同一执行面——
+    // 云端自包含构建会用 apk 仓副本（单边演进 = 云端算出的缓存与协调仓门禁口径不一致）。
+    'scripts/lib/combo-precompute.mjs',
+    'scripts/check-combo-cache.mjs',
     // 云端链与 CI 都跑它（build-apk.mjs GATE_SCRIPTS），此前不在镜像面 = 单边演进可绕过（ST-17 顺路收口）
     'scripts/check-engine-overlay.mjs',
     'scripts/check-build-chain-abort.mjs',
@@ -204,6 +229,10 @@ if (peer) {
     'scripts/gen-protocol-v2-fixture.mjs',
     'scripts/profile-web.cordis.patch.yml',
     'scripts/snapshot-config/engine-overlay.json',
+    // 模型面工具 wire 预算门禁（0.14.0 §4.1）：脚本 + 基线双仓同源——只有一侧更新基线会让
+    // 另一侧以旧阈值判红/判绿（基线是「事实值」，单边演进即口径分裂）。
+    'scripts/check-tool-surface-budget.mjs',
+    'scripts/tool-surface-budget.json',
   ]
   /** 递归列出目录下所有文件（相对路径；node_modules/.git 排除）——目录级镜像面用。 */
   const walkAll = (dir, prefix = '') => {

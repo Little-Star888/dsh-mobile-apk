@@ -72,6 +72,227 @@ test('a11y 通道：ui_dump 走 controlExec 并把壳侧节点剪枝成同一节
   assert.equal(button.clickable, true)
 })
 
+
+// ── 0.14.0 真机实锤回归：screenId 必须同时进门（范围判定）与投递（壳侧执行）──
+
+test('ui_dump 带 screenId=virtual-1 时，范围门与壳侧载荷都必须看到它', async () => {
+  // 缺陷形态（用户两轮阻碍之一·实报）：模型传 screenId 却像没生效。
+  // 真因有两处、必须同时修好：
+  //   ① guard 收到的是**手搓子集**（历史上是 {}），screenId 在进门之前就被丢了 → 永远按 real 判定；
+  //   ② 即便门放行，a11y 载荷里没有 screenId → 壳侧照旧在真实屏执行。
+  // 只修一处会得到更糟的中间态：门按 virtual 放行、动作落在真实屏（比直接拒绝更难排查）。
+  const { face, calls } = makeFace({ backend: 'a11y' })
+  const seen = []
+  face.screenAccess = (screenId) => {
+    seen.push(screenId)
+    return { ok: true, screenId: screenId ?? 'real', displayId: screenId === 'virtual-1' ? 25 : 0, scope: 'all' }
+  }
+  const { byName } = applyManage(face)
+  const r = await byName('android_ui_dump').execute({ screenId: 'virtual-1' }, exec)
+  assert.equal(r.ok, true)
+  assert.deepEqual(seen, ['virtual-1'], '范围门必须看见模型传入的 screenId（而不是 undefined/real）')
+  assert.equal(calls.control[0].op, 'snapshot')
+  assert.equal(calls.control[0].args.screenId, 'virtual-1', '壳侧载荷必须带上 screenId（否则动作落在真实屏）')
+})
+
+test('不给 screenId 时不得凭空发键（保持真实屏语义与改造前逐字一致）', async () => {
+  const { face, calls } = makeFace({ backend: 'a11y' })
+  const seen = []
+  face.screenAccess = (screenId) => { seen.push(screenId); return { ok: true, screenId: 'real', displayId: 0, scope: 'all' } }
+  const { byName } = applyManage(face)
+  await byName('android_ui_dump').execute({}, exec)
+  assert.deepEqual(seen, [undefined], '缺省必须把 undefined 交给门（由门决定默认屏），不得工具层猜')
+  assert.equal('screenId' in calls.control[0].args, false, '缺省不得发 screenId 键')
+})
+
+
+test('虚拟屏必须走**异步**解析面：同步 screenAccess 解析不了 virtual-N，会误判「尚未就绪」', async () => {
+  // 缺陷形态（0.14.0 用户测试项目第一项实锤）：壳侧显示 displayId=32/state=active，
+  // 但 android_ui_dump { screenId: 'virtual-1' } 回「虚拟屏幕 virtual-1 尚未就绪」。
+  // 真因：虚拟屏别名 → 动态 displayId 的解析要问壳侧注册表（vdInfo），**只有异步面能做**；
+  // 工具层却调同步 screenAccess()，后者拿不到 resolved id，于是对任何 virtual-N 恒判 not-ready。
+  // 这条用「同步面必失败、异步面才成功」的夹具把该形态钉死：若有人改回同步，测试立刻变红。
+  const { face } = makeFace({ backend: 'a11y' })
+  face.screenAccess = (screenId) => (screenId === 'virtual-1'
+    ? { ok: false, reason: 'screen-not-ready', guidance: '虚拟屏幕 virtual-1 尚未就绪', scope: 'all', screenId: 'virtual-1' }
+    : { ok: true, screenId: 'real', displayId: 0, scope: 'all' })
+  let asyncCalls = 0
+  face.screenAccessResolved = async (screenId) => {
+    asyncCalls++
+    return screenId === 'virtual-1'
+      ? { ok: true, screenId: 'virtual-1', displayId: 32, scope: 'all' }
+      : { ok: true, screenId: 'real', displayId: 0, scope: 'all' }
+  }
+  const { byName } = applyManage(face)
+  const r = await byName('android_ui_dump').execute({ screenId: 'virtual-1' }, exec)
+  assert.ok(asyncCalls > 0, '必须调用异步解析面（否则 virtual-N 永远解析不出 displayId）')
+  assert.notEqual(r.denied, true, '异步面已放行时不得判 denied: ' + JSON.stringify(r).slice(0, 200))
+})
+test('范围门拒绝时必须短路：不得把被拒的 screenId 投递到壳侧', async () => {
+  const { face, calls } = makeFace({ backend: 'a11y' })
+  face.screenAccess = () => ({ ok: false, reason: 'screen-out-of-scope', guidance: '当前范围不允许', scope: 'real-only', screenId: 'virtual-1' })
+  const { byName } = applyManage(face)
+  const r = await byName('android_ui_dump').execute({ screenId: 'virtual-1' }, exec)
+  assert.equal(r.ok, false)
+  assert.equal(r.denied, true)
+  assert.equal(calls.control.length, 0, '被拒时不得触碰壳侧（fail-closed）')
+})
+
+test('screenId 必须覆盖到同族的每一条屏幕 op（不再有「碰巧抄进去了」的差异）', async () => {
+  // 这条防的是**回归成「逐个补字段」**：漏一处就退回「有的工具能路由、有的不能」。
+  // 断言对象 = 工具的 parameters 声明（模型可见面）；缺声明的工具直接不可用。
+  const { face } = makeFace({ backend: 'a11y' })
+  const { byName } = applyManage(face)
+  for (const name of ['android_screenshot', 'android_ui_dump', 'android_ui_click', 'android_ui_scroll', 'android_ui_input', 'android_ui_global', 'android_app_launch']) {
+    const tool = byName(name)
+    assert.ok(tool, name + ' 必须注册')
+    // 注册面是 JSON-schema 形状：参数名在 parameters.properties 下（不是顶层）。
+    const props = (tool.parameters ?? {}).properties ?? {}
+    assert.ok('screenId' in props, name + ' 必须声明 screenId 参数')
+  }
+})
+
+
+
+test('dump 缓存 TTL 必须容得下「模型思考时间」（30s 太短会变成 dump/过期死循环）', async () => {
+  // 0.14.0 模拟器实锤：审计时间戳显示 dump→click 间隔 57s（模型要读清单、比较、选目标），
+  // 而 TTL 只有 30s → 缓存先过期 → 工具回「没有最近的控件清单」→ 模型重新 dump → 再过期。
+  // 实测连续 6 轮卡死。正确性应由壳侧 gen 校验把关，墙钟 TTL 只是内存回收上限。
+  const { readFileSync } = await import('node:fs')
+  const src = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
+  const m = /const UI_CACHE_TTL = ([0-9_ *]+)/.exec(src)
+  assert.ok(m, 'UI_CACHE_TTL 必须存在')
+  const expr = m[1].trim()
+  const value = expr.includes('*')
+    ? expr.split('*').map((x) => Number(x.trim().replace(/_/g, ''))).reduce((a, b) => a * b, 1)
+    : Number(expr.replace(/_/g, ''))
+  assert.ok(value >= 5 * 60_000, 'TTL 必须 >= 5 分钟（实测模型思考耗时 57s，30s 会死循环）: ' + value)
+})
+test('虚拟屏上 nx/ny 必须被明确拒绝（归一化分母歧义会静默点到真屏）', async () => {
+  // 0.14.0 模拟器实锤：模型对 virtual-1 传 nx/ny，工具放行 → 壳侧按**真实屏**(900x1600)换算 →
+  // 实际注入 (203,1290)，点在真屏上；虚拟屏毫无变化，返回却说「已点击」。模型反复重试直到放弃。
+  // 宁可明确拒绝，也不要静默点到另一块屏——后者难排查得多。
+  const { face, calls } = makeFace({ backend: 'a11y' })
+  face.screenAccessResolved = async (screenId) => ({ ok: true, screenId: screenId ?? 'real', displayId: 38, scope: 'all' })
+  const { byName } = applyManage(face)
+  const r = await byName('android_ui_click').execute({ nx: 0.225, ny: 0.806, screenId: 'virtual-1' }, exec)
+  assert.equal(r.ok, false, '必须拒绝而不是放行: ' + JSON.stringify(r).slice(0, 200))
+  assert.match(String(r.text), /x\/y/, '必须把模型指向无歧义的 x/y')
+  assert.equal(calls.control.length, 0, '拒绝时不得触碰壳侧')
+})
+
+test('虚拟屏上绝对 x/y 走 vdInput（坐标基于该屏自身像素）', async () => {
+  const { face } = makeFace({ backend: 'a11y' })
+  face.screenAccessResolved = async (screenId) => ({ ok: true, screenId: screenId ?? 'real', displayId: 38, scope: 'all' })
+  const seen = []
+  face.controlExec = async (op, args) => { seen.push({ op, args }); return { ok: true, data: { ok: true, guidance: 'ok', displayId: 38, screenId: 'virtual-1' } } }
+  const { byName } = applyManage(face)
+  const r = await byName('android_ui_click').execute({ x: 180, y: 524, screenId: 'virtual-1' }, exec)
+  assert.equal(r.ok, true, JSON.stringify(r).slice(0, 200))
+  assert.equal(seen[0].op, 'vdInput')
+  assert.equal(seen[0].args.verb, 'tap')
+  assert.equal(seen[0].args.x, 180)
+  assert.equal(seen[0].args.y, 524)
+  assert.equal(seen[0].args.target, 'virtual-1')
+})
+test('android_app_launch 指定虚拟屏时走 vdLaunchApp（monkey -p 没有屏幕维度）', async () => {
+  // 缺口：`monkey -p <pkg>` 永远落在真实屏，于是「在虚拟屏里开应用」在工具面无法表达。
+  const { face, calls } = makeFace({ backend: 'adb' })
+  face.screenAccess = () => ({ ok: true, screenId: 'virtual-1', displayId: 25, scope: 'all' })
+  const control = []
+  face.controlExec = async (op, args) => { control.push({ op, args }); return { ok: true, data: { ok: true, guidance: '已在 virtual-1 拉起' } } }
+  const { byName } = applyManage(face)
+  const r = await byName('android_app_launch').execute({ pkg: 'com.example.app', screenId: 'virtual-1' }, exec)
+  assert.equal(r.ok, true)
+  assert.equal(control.length, 1, '必须经控制队列投递 vdLaunchApp')
+  assert.equal(control[0].op, 'vdLaunchApp')
+  assert.equal(control[0].args.pkg, 'com.example.app')
+  assert.equal(control[0].args.target, 'virtual-1')
+  assert.ok(!calls.adbShell.some((c) => /monkey/.test(c)), '虚拟屏路径不得用 monkey（无屏幕维度）')
+})
+
+test('android_screenshot 在 ADB 回落路径上必须带上目标 displayId（不再抓真实屏）', async () => {
+  // 0.14.0 设备实录：无障碍离线时截图走 ADB 回落，而该路径**完全忽略 screenId**——
+  // 无参 screencap 只抓 display 0，模型对虚拟屏截图却拿到真实屏画面，据此误判「设置没开在虚拟屏上」。
+  const { face, calls } = makeFace({ backend: 'adb' })
+  face.screenAccess = () => ({ ok: true, screenId: 'virtual-1', displayId: 25, scope: 'all' })
+  face.screenAccessResolved = async () => ({ ok: true, screenId: 'virtual-1', displayId: 25, scope: 'all' })
+  face.controlExec = async (op) => {
+    if (op === 'vdInfo') return { ok: true, data: { screens: [{ alias: 'virtual-1', kind: 'virtual', displayId: 25, width: 360, height: 640 }] } }
+    return { ok: true, data: { done: true } }
+  }
+  // 让截图像「已落地」：桩的 adbLine 回执需含文件名，否则工具走「未落地」分支提前返回。
+  face.execAdbLine = async (line) => {
+    calls.adbLine.push(line)
+    return { ok: true, stdout: '/tmp/dsh-shot-1.png\n-rw-rw-rw- 1 shell shell 1234 dsh-shot-1.png' }
+  }
+  const { byName } = applyManage(face)
+  const r = await byName('android_screenshot').execute({ screenId: 'virtual-1', textRedact: true }, exec)
+  const line = calls.adbLine.find((l) => /screencap/.test(l))
+  assert.ok(line, 'ADB 回落路径必须真的发起 screencap')
+  assert.match(line, /screencap -p -d 25/, '必须把目标 displayId 落到 screencap 上')
+  assert.match(String(r.text ?? ''), /360x640/, '分辨率锚点必须是目标虚拟屏自己的像素')
+})
+
+test('android_screenshot 不带 screenId 时抓默认屏（语义不变）', async () => {
+  const { face, calls } = makeFace({ backend: 'adb' })
+  const { byName } = applyManage(face)
+  await byName('android_screenshot').execute({ textRedact: true }, exec)
+  const line = calls.adbLine.find((l) => /screencap/.test(l))
+  assert.ok(line, '应发起 screencap')
+  assert.ok(!/-d \d+/.test(line), '未指定屏时不得注入 -d（保持真实屏默认语义）')
+})
+
+test('android_app_launch 漏传 screenId 时，兜底提示告知活跃虚拟屏与用法', async () => {
+  // 0.14.0 设备实录：模型看到 screenId 是个无说明的字符串，直接忽略，于是把想要开到虚拟屏的 App
+  // 拉到了真实屏，整轮在错误前提下排查。修法之一是**当场把另一种选择告诉它**，而不是等它事后读文档。
+  const { face, calls } = makeFace({ backend: 'adb' })
+  const control = []
+  face.controlExec = async (op, args) => {
+    control.push({ op, args })
+    if (op === 'vdInfo') {
+      return { ok: true, data: { screens: [{ alias: 'virtual-1', kind: 'virtual', displayId: 25 }] } }
+    }
+    return { ok: true, data: { done: true } }
+  }
+  const { byName } = applyManage(face)
+  const r = await byName('android_app_launch').execute({ pkg: 'com.example.app', waitMs: 500 }, exec)
+  assert.equal(r.ok, true, JSON.stringify(r).slice(0, 200))
+  assert.ok(calls.adbShell.some((c) => /monkey/.test(c)), '未传 screenId 时仍走 monkey（真实屏语义不变）')
+  assert.match(String(r.text), /virtual-1/, '必须点出活跃虚拟屏别名')
+  assert.match(String(r.text), /screenId/, '必须告诉模型怎么用该别名')
+})
+
+test('android_app_launch 无活跃虚拟屏时不追加兜底提示', async () => {
+  const { face } = makeFace({ backend: 'adb' })
+  face.controlExec = async (op) => {
+    if (op === 'vdInfo') return { ok: true, data: { screens: [{ alias: 'real', kind: 'physical', displayId: 0 }] } }
+    return { ok: true, data: { done: true } }
+  }
+  const { byName } = applyManage(face)
+  const r = await byName('android_app_launch').execute({ pkg: 'com.example.app', waitMs: 500 }, exec)
+  assert.equal(r.ok, true)
+  assert.doesNotMatch(String(r.text), /活跃虚拟屏/, '没有虚拟屏就不该提这件事')
+})
+
+test('android_app_launch 的 screenId 参数必须带 description（模型可发现性）', () => {
+  // 回归：此前 SCREEN_PARAM 刻意不写 description（wire 预算理由），结果模型完全忽略该参数。
+  const { byName } = applyManage(makeFace({ backend: 'adb' }).face)
+  const tool = byName('android_app_launch')
+  const desc = tool.parameters?.properties?.screenId?.description
+  assert.equal(typeof desc, 'string', 'screenId 必须有 description')
+  assert.ok(desc.length > 0, 'screenId description 不得为空')
+  assert.match(desc, /virtual-N/, 'description 必须点出虚拟屏别名取值')
+  assert.match(String(tool.description), /screenId/, '工具描述必须说明跨屏用法')
+
+  // 同一常量内联进多个工具：每个挂 screenId 的工具都要能看到取值，不能只修一处。
+  for (const name of ['android_ui_dump', 'android_ui_click', 'android_screenshot']) {
+    const t2 = byName(name)
+    const d2 = t2?.parameters?.properties?.screenId?.description
+    assert.equal(typeof d2, 'string', name + ' 的 screenId 也必须有 description')
+  }
+})
+
 test('a11y 通道：ui_click 按原始路径回指壳侧节点', async () => {
   const { face, calls } = makeFace({ backend: 'a11y' })
   const { byName } = applyManage(face)
@@ -160,6 +381,29 @@ test('a11y 通道：screenshot 走无障碍截屏（API 30+，不依赖 ADB scre
   assert.match(r.imagePath, /control-shots/)
   assert.equal(r.width, 900)
   assert.equal(calls.adbLine.length, 0, '不应走 adb screencap')
+})
+
+
+test('screen scope is enforced before either a11y or ADB can read the real screen', async () => {
+  const { face, calls } = makeFace({ backend: 'adb' })
+  face.screenScope = () => 'virtual-only'
+  face.screenAccess = () => ({
+    ok: false,
+    reason: 'screen-out-of-scope',
+    scope: 'virtual-only',
+    screenId: 'real',
+    guidance: 'real screen is outside the user scope',
+  })
+  const { byName } = applyManage(face)
+  const blocked = await byName('android_screenshot').execute({}, exec)
+  assert.equal(blocked.denied, true)
+  assert.match(blocked.text, /outside the user scope/)
+  assert.equal(calls.control.length, 0)
+  assert.equal(calls.adbLine.length, 0)
+  const listed = await byName('android_screen_list').execute({}, exec)
+  assert.equal(listed.scope, 'virtual-only')
+  assert.equal(listed.screens[0].inScope, false)
+  assert.equal(listed.screens[1].screenId, 'virtual-1')
 })
 
 test('无障碍通道失败时工具返回明确错误，不静默降级到 ADB', async () => {

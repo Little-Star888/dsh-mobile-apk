@@ -13,6 +13,14 @@ import { readFileSync, existsSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import {
+  authorizeMobileRoute,
+  sendMobileRouteRejection,
+  shellControlToken,
+  type ConnectionRouteAuth,
+  type MobileRouteRequest,
+  type MobileRouteResponse,
+} from '@dsh-android/dsh-android-bridge'
 // ST-17：工具链表**单一来源** = dsh-shell-termux 的导出（其 probe() 用同一张表）。
 // 不再在本插件维护第二份字面量清单。走该包**根导出**（已存在的稳定子路径）+ 只改既有文件，
 // 规避两个已踩过的启动即死形态（ERR_PACKAGE_PATH_NOT_EXPORTED / 注入链丢新增文件）。
@@ -257,6 +265,10 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
   for (const t of tools(ctx, svc)) ctx.tools.register(t)
   const wsvc = (ctx as unknown as { webServer?: { register(r: unknown): void } }).webServer
   if (wsvc) {
+    const authOptions = () => ({
+      token: shellControlToken,
+      connection: serviceOf<ConnectionRouteAuth>(ctx, 'connection'),
+    })
     for (const [path, builder] of [
       ['/api/android/env/status', () => toolchainStatus(svc?.status().tier, ctx)],
       ['/api/android/env/recipe', () => recipeExport(ctx)],
@@ -264,7 +276,21 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
       wsvc.register({
         kind: 'exact',
         path,
-        handler: async (_req: unknown, res: { writeHead(code: number, headers: Record<string, string>): void; end(body: string): void }) => {
+        handler: async (req: MobileRouteRequest, res: MobileRouteResponse) => {
+          const rejection = authorizeMobileRoute(req, authOptions())
+          if (rejection !== undefined) {
+            sendMobileRouteRejection(res, rejection)
+            return
+          }
+          if (req.method !== 'GET') {
+            res.writeHead(405, {
+              'content-type': 'application/json; charset=utf-8',
+              'cache-control': 'no-store',
+              allow: 'GET',
+            })
+            res.end(JSON.stringify({ ok: false, error: 'GET only' }))
+            return
+          }
           const body = JSON.stringify(builder())
           res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
           res.end(body)

@@ -50,7 +50,7 @@ let presetsEntries = 0
 // 引擎树补丁 marker 随门禁抽验（0.13.5 起登记表驱动）：scripts/patches/registry.json
 // 内每个 scope=engine 补丁，其 target 文件必须带该补丁的 marker——防「补丁未施加/版本漂移」
 // 的静默半成品（新增补丁自动纳入，无需再手改本文件）。
-for (const patch of PATCH_REGISTRY.patches.filter((p) => p.scope === 'engine')) {
+for (const patch of PATCH_REGISTRY.patches.filter((p) => p.scope === 'engine' && p.overlayCheck !== false)) {
   const marker = String(patch.marker ?? '').replace(/（.*$/, '').trim()
   if (marker.length === 0) continue
   want.set(patch.target, { kind: 'patch-marker', name: patch.id, version: null, marker })

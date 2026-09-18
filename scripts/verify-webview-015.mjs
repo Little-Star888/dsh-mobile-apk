@@ -4,19 +4,20 @@
 //             node -e "fetch('http://127.0.0.1:29225/json/list').then(r=>r.json()).then(j=>console.log(j[0].webSocketDebuggerUrl))"
 // 断言项对应 docs/UPSTREAM-0.1.5-ADAPT-2026-09-10.md §4 验收清单 1/3/8 的可在页内自证部分。
 const [, , wsUrl] = process.argv
-if (!wsUrl) { console.error('用法: node verify-015.mjs <ws-url>'); process.exit(2) }
+const wide = process.argv.includes('--wide')
+if (!wsUrl) { console.error('用法: node verify-015.mjs <ws-url> [--wide]'); process.exit(2) }
 
 const checks = [
-  ['移动形态标记 html[data-dsh-mobile-form]', "document.documentElement.hasAttribute('data-dsh-mobile-form')", true],
+  ['移动形态标记与 viewport 宽度一致', "document.documentElement.hasAttribute('data-dsh-mobile-form')", !wide],
   ['框架根已打标 [data-dsh-frame]', "!!document.querySelector('[data-dsh-frame]')", true],
   ['上游右栏列存在 [data-rightbar-col]', "!!document.querySelector('[data-rightbar-col]')", true],
   ['顶栏存在 [data-dsh-mobile-topbar]', "!!document.querySelector('[data-dsh-mobile-topbar]')", true],
   ['顶栏含侧栏开关按钮', "!!document.querySelector('[data-dsh-mobile-topbar] button')", true],
-  ['左栏为离屏 fixed 抽屉', "getComputedStyle(document.querySelector('[data-dsh-frame] > [class*=sidebarCol]')).position === 'fixed'", true],
-  ['拖拽手柄已隐藏', "[...document.querySelectorAll('[data-dsh-frame] [class*=handle]')].every(h => getComputedStyle(h).display === 'none')", true],
-  ['会话头部 corner 座位存在', "!!document.querySelector('[data-conversation-header-corner]')", true],
-  ['右栏展开键存在（corner 内按钮）', "!!document.querySelector('[data-conversation-header-corner] button')", true],
-  ['我们的「在文件中打开」入口存在', "!!document.querySelector('[aria-label=\"在文件中打开\"]')", true],
+  ['左栏 position 与 viewport 形态一致', "getComputedStyle(document.querySelector('[data-dsh-frame] > [class*=sidebarCol]')).position === 'fixed'", !wide],
+  ['拖拽手柄可见性与 viewport 形态一致', "[...document.querySelectorAll('[data-dsh-frame] [class*=handle]')].every(h => getComputedStyle(h).display === 'none')", (v) => wide ? typeof v === 'boolean' : v === true],
+  ['会话头部 corner 座位在手机形态存在', "!!document.querySelector('[data-conversation-header-corner]')", (v) => wide ? typeof v === 'boolean' : v === true],
+  ['右栏展开键在手机形态存在', "!!document.querySelector('[data-conversation-header-corner] button')", (v) => wide ? typeof v === 'boolean' : v === true],
+  ['我们的「在文件中打开」入口在手机形态存在', "!!document.querySelector('[aria-label=\"在文件中打开\"]')", (v) => wide ? typeof v === 'boolean' : v === true],
   ['桥 openPathChooser 已注入', "typeof window.androidBridge?.openPathChooser === 'function'", true],
   ['桥 downloadDebugLogs 已退役', "typeof window.androidBridge?.downloadDebugLogs === 'undefined'", true],
   ['桥 pickImage 已退役', "typeof window.androidBridge?.pickImage === 'undefined'", true],
@@ -66,10 +67,10 @@ const checks = [
   // 判据：抽屉必须被登记为层、且壳侧同步缓存为真（层数增减由下一条「消费」断言覆盖，避免点击幂等性带来的噪声）。
   ['抽屉成为层（kinds 含 drawer）且壳侧同步缓存为真',
     "(async () => { const sleep = (ms) => new Promise(r => setTimeout(r, ms)); const kinds = () => Array.isArray(window.__dshBackKinds) ? window.__dshBackKinds : []; if (!kinds().includes('drawer')) { const b = document.querySelector('[data-dsh-mobile-topbar] button'); if (!b) return 'no-topbar'; b.click(); await sleep(500); } return { depth: window.__dshBackDepth, kinds: kinds(), cached: window.dshBackBridge?.getBackAvailable?.() }; })()",
-    (v) => v && v.depth >= 1 && v.cached === true && Array.isArray(v.kinds) && v.kinds.includes('drawer')],
+    (v) => wide ? true : (v && v.depth >= 1 && v.cached === true && Array.isArray(v.kinds) && v.kinds.includes('drawer'))],
   ['层栈消费（__dshBack 弹出该层）→ 层数下降且壳侧缓存回读 false',
     "(async () => { const before = window.__dshBackDepth; const consumed = typeof window.__dshBack === 'function' ? window.__dshBack() : 'no-entry'; await new Promise(r => setTimeout(r, 400)); return { before, consumed, depth: window.__dshBackDepth, cached: window.dshBackBridge?.getBackAvailable?.() }; })()",
-    (v) => v && v.consumed === true && v.before >= 1 && v.depth === v.before - 1 && v.cached === (v.depth > 0)],
+    (v) => wide ? true : (v && v.consumed === true && v.before >= 1 && v.depth === v.before - 1 && v.cached === (v.depth > 0))],
   // ── 0.14.0-preview 追加：壳侧状态 getter 在场（计划 §4.3 ST-10/ST-11）──
   ['桥 getImmersiveMode 在场（ST-10 壳侧唯一真源）', "typeof window.androidBridge?.getImmersiveMode === 'function'", true],
   ['getImmersiveMode 返回布尔（回读壳侧偏好真值）', "typeof window.androidBridge?.getImmersiveMode?.() === 'boolean'", true],

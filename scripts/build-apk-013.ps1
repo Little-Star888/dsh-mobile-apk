@@ -22,12 +22,28 @@ if ($Fast) {
 $apkDir = Join-Path $Root "dsh-mobile-apk"
 if (-not (Test-Path $apkDir)) { $apkDir = $Root }
 
+# 统一 per-ABI 拒绝记账（坑 94 / review C2，2026-09-14）：曾有三处拒绝路径只 `continue` 不记账
+# （机密 / 运行时资产 / A1 出厂值）+ elf-check 退出码被丢弃 → 请求双 ABI 时只交付单 ABI 仍 exit 0。
+# 全部拒绝路径必须走本函数；check-build-chain-abort.mjs 静态锁「$rejectedAbis 只在本函数内自增」+
+# 「拒绝文案只在本函数内出现」（机器标识，不再 grep 中文文案——文案一改守卫就瞎）。
+function Deny-Abi([string]$Abi, [string]$Reason) {
+    Write-Host "拒绝打包（$Abi）：$Reason"
+    $script:rejectedAbis += $Abi
+}
+
 # 补丁镜像一致性门禁（0.13.8 PR-A1 / apk #171 残留）：scripts/patches 是双仓镜像面
 # （云端自包含构建用 apk 仓副本），单边演进 = 云端快照静默缺引擎补丁（幽灵缺陷）。
 # registry / apply-patches / README 逐字节 + tests 清单，差异即拒打包。
 Write-Host "== 补丁镜像一致性门禁 =="
 node (Join-Path $Root "scripts\check-patch-mirror.mjs") 2>&1
 if ($LASTEXITCODE -ne 0) { Write-Host "补丁镜像不一致，拒绝打包（先同步镜像 scripts/patches 到对端树）"; exit 1 }
+
+# 适配层契约门禁（review C6）：上游 bundle 行引用 / 注入包 lib 产物 / 客户端槽位 / 版本钉台账。
+# 本地链 --require 严格档（上游 dsh/ 与本机 node_modules 都在场）；云端自包含链无这些本机产物，
+# 对应小节按 SKIP 计数（check-release-gates --run --require 在发布链上强制齐全）。
+Write-Host "== 适配层契约门禁（严格）=="
+node (Join-Path $Root "scripts\check-contract.mjs") --require 2>&1
+if ($LASTEXITCODE -ne 0) { Write-Host "适配层契约失败（bundle 行/构建产物/版本钉），拒绝打包"; exit 1 }
 
 # 制度性门禁（0.13.8-b 批 B2 ST-25/26/31）：状态登记制、桥面对称性、SKIP 纪律与门禁覆盖清单化。
 # 三者都是离线静态断言（不依赖快照），与 CI 同源（pr-gate 亦调用）——本地链漏接即形同虚设。
@@ -67,6 +83,11 @@ if ($LASTEXITCODE -ne 0) { Write-Host "Kotlin 块注释嵌套，拒绝打包"; e
 Write-Host "== 有界读门禁 =="
 node (Join-Path $Root "scripts\check-bounded-io.mjs") 2>&1
 if ($LASTEXITCODE -ne 0) { Write-Host "无界读命中，拒绝打包"; exit 1 }
+
+# /api 路由鉴权门禁（0.14.0 #222）：exact/更长 prefix 不得绕过 browser auth；公开状态路由必须入白名单。
+Write-Host "== /api 路由鉴权门禁 =="
+node (Join-Path $Root "scripts\check-api-route-auth.mjs") 2>&1
+if ($LASTEXITCODE -ne 0) { Write-Host "/api 路由未登记或缺少本地鉴权，拒绝打包"; exit 1 }
 
 # 控制协议 V2 往返 + 体积门禁（0.13.8 批 F / DESIGN-PROTOCOL-V2.md §S6）
 Write-Host "== 协议 V2 门禁 =="
@@ -121,16 +142,16 @@ $producedAbis = @()
 foreach ($abi in @('arm64', 'x86_64')) {
     if ($OnlyAbi -and $OnlyAbi -ne $abi) { continue }
     # 自检钩子：强制该 ABI 走「拒绝打包」路径（默认空 = 永不触发），用于锁住「任一 ABI 被拒 → 整链非 0」。
-    if ($ForceRejectAbi -eq $abi) { Write-Host "自检：强制拒绝 $abi（构建链中止语义自检）"; $rejectedAbis += $abi; continue }
+    if ($ForceRejectAbi -eq $abi) { Write-Host "自检：强制拒绝 $abi（构建链中止语义自检）"; Deny-Abi $abi "自检钩子"; continue }
     $snap = Join-Path $Root ".deploy-tmp\snapshot-013\$abi\snapshot.tar.xz"
-    if (-not (Test-Path $snap)) { Write-Host "缺快照 $snap（先跑 build-snapshot-013.mjs）"; continue }
+    if (-not (Test-Path $snap)) { Deny-Abi $abi "缺快照 $snap（先跑 build-snapshot-013.mjs）"; continue }
     $work = Join-Path $Root ".deploy-tmp\build-\13-$abi"
     New-Item -ItemType Directory -Force -Path $work | Out-Null
 
     # 1b. 引擎 overlay 抽验门禁（0.13.3 W1）：登记表在快照内全量落位（版本精确断言 + presets 在场）
     Write-Host "== 引擎 overlay 抽验（$abi）=="
     node (Join-Path $Root "scripts\check-engine-overlay.mjs") $snap 2>&1
-    if ($LASTEXITCODE -ne 0) { Write-Host "引擎 overlay 抽验失败，拒绝打包（$abi）"; $rejectedAbis += $abi; continue }
+    if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "引擎 overlay 抽验失败"; continue }
 
     # 1. 插件注入（@dsh-android 专用 + 通用根级包）
     if (-not $SkipInject) {
@@ -143,34 +164,58 @@ foreach ($abi in @('arm64', 'x86_64')) {
         $undo = $externByName['dsh-undo-savepoint']
         $market = $externByName['dshmarketplace-plugin']
         $modelSync = $externByName['dsh-model-sync']
-        if (-not (Test-Path (Join-Path $undo "package.json"))) { Write-Host "缺 undo 注入源 $undo（git clone lire1131/dsh-undo-savepoint）"; continue }
-        if (-not (Test-Path (Join-Path $market "package.json"))) { Write-Host "缺 marketplace 注入源 $market（vendor 固化副本）"; continue }
-        if (-not (Test-Path (Join-Path $modelSync "lib\index.js"))) { Write-Host "缺 model-sync 注入源 $modelSync（vendor 固化副本）"; continue }
+        if (-not (Test-Path (Join-Path $undo "package.json"))) { Deny-Abi $abi "缺 undo 注入源 $undo（git clone lire1131/dsh-undo-savepoint）"; continue }
+        if (-not (Test-Path (Join-Path $market "package.json"))) { Deny-Abi $abi "缺 marketplace 注入源 $market（vendor 固化副本）"; continue }
+        if (-not (Test-Path (Join-Path $modelSync "lib\index.js"))) { Deny-Abi $abi "缺 model-sync 注入源 $modelSync（vendor 固化副本）"; continue }
         # 统一补丁门禁（Phase 2a）：marketplace A-D + undo E1-E7 幂等施加与校验，
         # 登记表 scripts/patches/registry.json。默认 ensure 语义（缺席即施加，锚点失配拒打包）。
         # 雷点 8：全量输出——Select-First 截断管道会杀 node 致误判失败
         node (Join-Path $Root "scripts\patches\apply-patches.mjs") (Join-Path $Root "vendor") 2>&1
-        if ($LASTEXITCODE -ne 0) { Write-Host "vendor 补丁校验/施加失败，拒绝打包（$abi）"; $rejectedAbis += $abi; continue }
+        if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "vendor 补丁校验/施加失败"; continue }
+        # combo 缓存注入段（A3 启动性能）：注入链的 client.js 不在快照段预计算范围内，这里对
+        # 注入源逐个补算为 client-combos.inject.json + <sha256>.map，经 inject-all --combo-cache-delta
+        # 作为新 tar 条目合入 home/.dsh/profiles/web/.combo-cache/。覆盖由注入后门禁 check-combo-cache 断言。
+        # 雷点 8：全量输出。
+        Write-Host "== combo 缓存注入段预计算（$abi）=="
+        $comboDelta = Join-Path $work "combo-cache-delta"
+        New-Item -ItemType Directory -Force -Path $comboDelta | Out-Null
+        $comboArgs = @()
+        foreach ($d in (@($pluginDirs) + @($undo, $market, $modelSync))) { $comboArgs += @("--scan", $d) }
+        node (Join-Path $Root "scripts\lib\combo-precompute.mjs") @comboArgs --out $comboDelta --manifest client-combos.inject.json --engine inject 2>&1
+        if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "combo 缓存注入段预计算失败"; continue }
         # 单 pass 注入（2c 提速 2026-09-05）：@dsh-android + 根级插件 + 权威 patch 覆盖合并
         # 为一次 tar 流处理——压缩/解压从 ×4 → ×1（原三步各自全量重压缩 ~743MB）。
         # 雷点 8：全量输出。
         Write-Host "== 单 pass 注入（@dsh-android + undo/market + 权威 patch）（$abi）=="
         # ST-05：--all-profiles = 权威 patch 与注入包覆盖全部真实装配 profile（web + headless；
         # 负控 profile headless-bad 由 inject-all.py 显式跳过）。此前只写 web，headless 停在旧值。
-        python (Join-Path $Root "scripts\inject-all.py") $snap (Join-Path $work "snap-final2.tar.xz") (Join-Path $Root "scripts\profile-web.cordis.patch.yml") --dsh-android @pluginDirs --external $undo $market $modelSync --all-profiles 2>&1
-        if ($LASTEXITCODE -ne 0) { Write-Host "注入失败，拒绝打包（$abi）"; $rejectedAbis += $abi; continue }
+        python (Join-Path $Root "scripts\inject-all.py") $snap (Join-Path $work "snap-final2.tar.xz") (Join-Path $Root "scripts\profile-web.cordis.patch.yml") --dsh-android @pluginDirs --external $undo $market $modelSync --all-profiles --combo-cache-delta $comboDelta 2>&1
+        if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "注入失败"; continue }
         # 防回归（审校 C4 2026-08-23）：patch 挂载集 ⊇ 注入集——缺条目（如 linux-env 漏挂）直接拒打包
         Write-Host "== 挂载集校验（$abi）=="
         node (Join-Path $Root "scripts\check-patch-mounts.mjs") (Join-Path $Root "scripts\profile-web.cordis.patch.yml") @pluginDirs $undo $market $modelSync 2>&1 | Select-Object -First 4
-        if ($LASTEXITCODE -ne 0) { Write-Host "patch 挂载集校验失败，拒绝打包（$abi）"; $rejectedAbis += $abi; continue }
+        if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "patch 挂载集校验失败"; continue }
         # 注入面成员完整性（P0：包内新增文件曾被静默丢弃 → tar 里 import 悬空 → 设备侧引擎启动即死）
         Write-Host "== 注入成员完整性门禁（$abi）=="
         node (Join-Path $Root "scripts\check-inject-completeness.mjs") (Join-Path $work "snap-final2.tar.xz") 2>&1
-        if ($LASTEXITCODE -ne 0) { Write-Host "注入产物成员不完整（新增文件丢失/import 悬空），拒绝打包（$abi）"; $rejectedAbis += $abi; continue }
+        if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "注入产物成员不完整（新增文件丢失/import 悬空）"; continue }
+        # combo 缓存覆盖（A3）：注入后 tar 的每条 client.js 必须有 sha256 命中的缓存条目（含注入段增量）
+        Write-Host "== combo 缓存覆盖门禁（$abi）=="
+        node (Join-Path $Root "scripts\check-combo-cache.mjs") (Join-Path $work "snap-final2.tar.xz") 2>&1
+        if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "combo 缓存覆盖不全（回退将吞掉全部启动收益）"; continue }
+        # 模型面工具 wire 预算（0.14.0 §4.1）：注册集 + 初始可见集双口径。真跑各插件 apply()，
+        # 需 plugins/*/lib 构建产物（本链前置已构建）。防「工具面无声膨胀」吃掉每会话固定预算。
+        Write-Host "== 工具面预算门禁（$abi）=="
+        node (Join-Path $Root "scripts\check-tool-surface-budget.mjs") 2>&1
+        if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "模型面工具 wire 超预算（新增工具须归组掩蔽或评审改基线）"; continue }
+        # #222：源文件 guard 不等于发行 tar guard；必须逐 profile 读取已注入 artifact 的 marker。
+        Write-Host "== 注入后 /api 路由鉴权门禁（$abi）=="
+        node (Join-Path $Root "scripts\check-api-route-auth.mjs") --snapshot (Join-Path $work "snap-final2.tar.xz") 2>&1
+        if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "注入后 /api 路由鉴权 marker 缺失"; continue }
         # 剥离清单后置断言（ST-16）：清单项在产物里必须不存在（防剥离静默 no-op）
         Write-Host "== 剥离清单后置断言（$abi）=="
         node (Join-Path $Root "scripts\check-strip-noop.mjs") (Join-Path $work "snap-final2.tar.xz") 2>&1
-        if ($LASTEXITCODE -ne 0) { Write-Host "剥离清单项仍在场（剥离未生效），拒绝打包（$abi）"; $rejectedAbis += $abi; continue }
+        if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "剥离清单项仍在场（剥离未生效）"; continue }
         $snapIn = Join-Path $work "snap-final2.tar.xz"
     } else {
         $snapIn = $snap
@@ -186,13 +231,13 @@ foreach ($abi in @('arm64', 'x86_64')) {
             # 发生在 inject-all.py 重打包时（dev 专档，禁止用于发布资产）。
             Write-Host "警告：-SkipInject 档快照未做权限归一化（dev 专档，禁止发布）"
         } else {
-            Write-Host "快照权限模式校验失败，拒绝打包（$abi）"; $rejectedAbis += $abi; continue
+            Deny-Abi $abi "快照权限模式校验失败"; continue
         }
     }
     # 第三方许可合规（GPL 义务 A1/A2 门禁 2026-08-23）：copyleft 包许可证全文须随快照分发，
     # 矩阵须覆盖 dpkg status 全部包；缺失直接拒绝打包（--- tar 视图：9p 权限不影响判定）。
     node (Join-Path $Root "scripts\check-third-party.mjs") (Join-Path $work "x") --tar $snapIn 2>&1 | Select-Object -First 4
-    if ($LASTEXITCODE -ne 0) { Write-Host "THIRD-PARTY CHECK FAILED，拒绝打包（$abi）"; $rejectedAbis += $abi; continue }
+    if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "THIRD-PARTY CHECK FAILED（许可合规）"; continue }
     # 许可资产（LICENSES 标准文本 + notices）打入 APK assets（A2：随包分发）
     $licAssets = Join-Path $apkDir "app\src\main\assets\licenses"
     New-Item -ItemType Directory -Force -Path $licAssets | Out-Null
@@ -202,13 +247,16 @@ foreach ($abi in @('arm64', 'x86_64')) {
     # 机密门禁单实现（0.13.8-b ST-06 / F-ENV-08 口径）：check-snapshot-secrets.mjs——跨平台 node
     # 实现，云端链 build-apk.mjs 调用的是同一份；退出码可靠（旧 .ps1 走 cmd /c tar，$LASTEXITCODE
     # 反映 cmd 尾命令而非脚本 exit 码，只能靠输出标记判定）。.ps1 实现已不再被任何链调用。
-    Write-Host "== 快照机密门禁（$abi）=="
-    node (Join-Path $Root "scripts\check-snapshot-secrets.mjs") $snapIn 2>&1
-    if ($LASTEXITCODE -ne 0) { Write-Host "SNAPSHOT_SECRET_CHECK_FAILED（$abi）：快照含机密，拒绝打包"; continue }
+    Write-Host "== 快照机密门禁（$abi，严格）=="
+    node (Join-Path $Root "scripts\check-snapshot-secrets.mjs") $snapIn --require 2>&1
+    if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "SNAPSHOT_SECRET_CHECK_FAILED：快照含机密或归档不可读"; continue }
     $wslPath = $snapIn.Replace('D:', '/mnt/d').Replace('\', '/')
     $wslCmd = "tar -tf `"$wslPath`" | grep -cE '^usr/bin/(node|bash|rg|python|perl|ruby|zip|vim|zsh|openssl|socat|busybox)$'; tar -tf `"$wslPath`" | grep -c '^-'"
     wsl -e bash -lc $wslCmd 2>$null | Select-Object -First 2
-    node (Join-Path $Root "scripts\elf-check.mjs") $snapIn $abi 2>&1 | Select-Object -First 3
+    $elfOut = node (Join-Path $Root "scripts\elf-check.mjs") $snapIn $abi 2>&1
+    $elfCode = $LASTEXITCODE
+    $elfOut
+    if ($elfCode -ne 0) { Deny-Abi $abi "ELF 架构校验失败（ABI 错配的 node？）"; continue }
 
     # 运行时补丁资产一致性门禁（0.13.8 收尾 / apk #170 复盘）：assets/patched/* 是引擎启动时
     # 覆盖运行树的预打补丁副本，必须与快照同源——否则「构建期 marker 全绿、设备上补丁被改回去」。
@@ -216,12 +264,12 @@ foreach ($abi in @('arm64', 'x86_64')) {
     # 变成门禁结果）。ST-06：本调用原先落在 foreach 之外（$abi 未定义恒走 x86_64 默认值）——已移进循环。
     Write-Host "== 运行时补丁资产门禁（$abi，严格）=="
     node (Join-Path $Root "scripts\check-runtime-assets.mjs") $abi --require 2>&1
-    if ($LASTEXITCODE -ne 0) { Write-Host "运行时补丁资产过期或缺失（$abi），拒绝打包（从快照重新生成 assets/patched）"; continue }
+    if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "运行时补丁资产过期或缺失（从快照重新生成 assets/patched）"; continue }
 
     # A1 出厂声明值对账（P-AC-01，--require 严格档）：注入后快照的 profile 清单必须带 patchReload 出厂值。
     Write-Host "== 性能度量入口与 A1 出厂值门禁（$abi，严格）=="
     node (Join-Path $Root "scripts\check-perf-instrumentation.mjs") --require --snapshot $snapIn --abi $abi 2>&1
-    if ($LASTEXITCODE -ne 0) { Write-Host "A1 出厂值/度量入口校验失败（$abi），拒绝打包"; continue }
+    if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "A1 出厂值/度量入口校验失败"; continue }
 
     # 3. 双 ABI APK（cp 快照 + 指纹 → gradle assembleDebug）
     Write-Host "== 构建 APK（$abi, suffix=$Suffix）=="
@@ -257,7 +305,7 @@ if ($ExportSnapshots) {
     foreach ($abi in @('arm64', 'x86_64')) {
         if ($OnlyAbi -and $OnlyAbi -ne $abi) { continue }
         $snapIn = Join-Path $Root ".deploy-tmp\build-\13-$abi\snap-final2.tar.xz"
-        if (-not (Test-Path $snapIn)) { Write-Host "缺注入后快照 $snapIn，跳过导出（$abi）"; continue }
+        if (-not (Test-Path $snapIn)) { Deny-Abi $abi "缺注入后快照 $snapIn（导出失败：发布资产不完整）"; continue }
         $outSnap = Join-Path $Out "snapshot-$abi.tar.xz"
         Copy-Item $snapIn $outSnap -Force
         Set-Content -Path (Join-Path $Out "snapshot-$abi.tar.xz.sha256") -Value ((Get-FileHash $outSnap -Algorithm SHA256).Hash.ToLower()) -NoNewline -Encoding ascii
@@ -265,7 +313,7 @@ if ($ExportSnapshots) {
         $apkOut = Join-Path $Out ("dsh-mobile-apk-v" + $GradleVer + $Suffix + "-" + $abi + ".apk")
         if (Test-Path $apkOut) {
             & (Join-Path $PSScriptRoot "check-snapshot-asset.ps1") -ApkPath $apkOut -SnapshotPath $outSnap
-            if ($LASTEXITCODE -ne 0) { Write-Host "快照资产一致性校验失败，拒绝发布组装（$abi）"; $rejectedAbis += $abi; continue }
+            if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "快照资产与 APK 内嵌不一致（拒绝发布组装）"; continue }
         } else {
             Write-Host "警告: 缺 APK $apkOut，跳过一致性校验（$abi）"
         }

@@ -339,10 +339,25 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
   }
 
   private fun copyGuideLog() {
-    val text = logSummary.text?.toString().orEmpty()
-    if (text.isBlank()) return
+    // 0.14.0（用户 2026-09-15）：一键复制当前代 engine.log 全文（不限大小）；绝不拼接
+    // engine.log.1/.2——当前文件即「最近一次启动至今」，不会混入上一次启动。出口脱敏
+    // 与展示同源（0.13.8 #184：令牌行不得进入外发文本）。
+    val text = readEngineLogFull()
+    if (text.isNullOrBlank()) return
     activity.copyTextNative(text)
     android.widget.Toast.makeText(activity, "日志已复制", android.widget.Toast.LENGTH_SHORT).show()
+  }
+
+  /** 当前代 engine.log 全文（脱敏后）；缺失/不可读回退尾部摘要（同样脱敏）。 */
+  private fun readEngineLogFull(): String? {
+    val f = File(activity.filesDir, "engine.log")
+    if (!f.exists()) return null
+    val raw = try {
+      f.readText(Charsets.UTF_8)
+    } catch (_: Throwable) {
+      tailEngineLog(400)
+    }
+    return EngineAuth.redact(raw)
   }
 
   fun showWeb() {

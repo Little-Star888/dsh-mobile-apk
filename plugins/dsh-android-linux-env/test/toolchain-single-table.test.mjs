@@ -9,13 +9,17 @@ import { join } from 'node:path'
 import { apply } from '../lib/index.js'
 import { PROBE_BINARIES, REQUIRED_TOOLCHAIN } from '@dsh-android/dsh-shell-termux'
 
-function makeCtx(services) {
+function makeCtx(services = {}) {
   const routes = new Map()
   const tools = []
+  const resolvedServices = {
+    connection: { requestRejection: () => undefined },
+    ...services,
+  }
   const target = {
     tools: { register(t) { tools.push(t) } },
     webServer: { register(route) { routes.set(route.path, route); return () => { routes.delete(route.path) } } },
-    get: (name) => services[name],
+    get: (name) => resolvedServices[name],
   }
   return { ctx: target, routes, tools }
 }
@@ -24,7 +28,7 @@ async function callRoute(harness, path) {
   const route = harness.routes.get(path)
   assert.ok(route, '路由必须注册：' + path)
   const res = { code: 0, body: '', headers: {}, writeHead(c, h) { this.code = c; this.headers = h ?? {} }, end(b) { this.body = b ?? '' } }
-  await route.handler({}, res)
+  await route.handler({ method: 'GET', headers: { host: '127.0.0.1:3080' } }, res)
   assert.equal(res.code, 200)
   return JSON.parse(res.body)
 }
