@@ -198,15 +198,13 @@ foreach ($abi in @('arm64', 'x86_64')) {
         New-Item -ItemType Directory -Force -Path (Join-Path $Root ".deploy-tmp\plugins") | Out-Null
         # undo-savepoint 注入源：vendor/dsh-undo-savepoint（固化移动端裁剪版——
         # 头部只留快照徽章、移除撤销/恢复快捷键行与全局键盘监听，见其 PATCHES.md 差异表）
-        # 三个根级注入源（undo / marketplace / model-sync）同样来自 plugin-dirs.json.externals：
+        # 两个根级注入源（undo / marketplace）同样来自 plugin-dirs.json.externals：
         # marketplace 是固化修复版（上游 0.1.5 pre-execute 守卫不调 next() 导致全工具崩溃，见其
-        # PATCHES.md）；model-sync 是 @aiwayds/dsh-model-sync 0.3.1 固化副本（0.13.3 W7）。
+        # PATCHES.md）；undo 是固化移动端裁剪版。model-sync 已于 0.14.1 摘除（见 profile-web patch 的注释）。
         $undo = $externByName['dsh-undo-savepoint']
         $market = $externByName['dshmarketplace-plugin']
-        $modelSync = $externByName['dsh-model-sync']
         if (-not (Test-Path (Join-Path $undo "package.json"))) { Deny-Abi $abi "缺 undo 注入源 $undo（git clone lire1131/dsh-undo-savepoint）"; continue }
         if (-not (Test-Path (Join-Path $market "package.json"))) { Deny-Abi $abi "缺 marketplace 注入源 $market（vendor 固化副本）"; continue }
-        if (-not (Test-Path (Join-Path $modelSync "lib\index.js"))) { Deny-Abi $abi "缺 model-sync 注入源 $modelSync（vendor 固化副本）"; continue }
         # 统一补丁门禁（Phase 2a）：marketplace A-D + undo E1-E7 幂等施加与校验，
         # 登记表 scripts/patches/registry.json。默认 ensure 语义（缺席即施加，锚点失配拒打包）。
         # 雷点 8：全量输出——Select-First 截断管道会杀 node 致误判失败
@@ -233,17 +231,17 @@ foreach ($abi in @('arm64', 'x86_64')) {
         New-Item -ItemType Directory -Force -Path $degradeStaged | Out-Null
         $degradeFailDetail = ""
         # 默认仍指向原源目录（表示「不降级」）；只有真的降级成功才改指向暂存副本。
-        # **必须显式初始化**：无 lib/client.js 的源（如 model-sync）不会进下面的 if，
-        # 若这三个变量保持未定义/为 $null，后续 `@($undoDeg, ...)` 会含 $null 元素，
-        # 经 splatting 传给 node 时造成**参数错位**（实测表现：--out 的值被当成未知参数）。
-        $undoDeg = $undo; $marketDeg = $market; $modelSyncDeg = $modelSync
-        # vendor 三源：**暂存副本**再降级（vendor/*/lib 是入库跟踪的，就地降级会写脏仓库并绊停
-        # 发布链自己的 dirty 门禁）。无 lib/client.js 的源（如 model-sync）不复制、保持原路径。
+        # **必须显式初始化**：无 lib/client.js 的源不会进下面的 if，若这两个变量保持未定义/为 $null，
+        # 后续 `@($undoDeg, ...)` 会含 $null 元素，经 splatting 传给 node 时造成**参数错位**
+        # （实测表现：--out 的值被当成未知参数）。
+        $undoDeg = $undo; $marketDeg = $market
+        # vendor 两源：**暂存副本**再降级（vendor/*/lib 是入库跟踪的，就地降级会写脏仓库并绊停
+        # 发布链自己的 dirty 门禁）。无 lib/client.js 的源不复制、保持原路径。
         # 本段刻意**不写中间 continue**：构建链静态锁「每个 continue 都必须是经 Deny-Abi 记账的
         # 拒绝路径」（check-build-chain-abort.mjs），而「该源没有浏览器 bundle」是正常跳过不是拒绝；
         # 且嵌套 foreach 里的 continue 只会继续内层循环、不会跳过本 ABI。故失败只记明细，
         # 统一在段末用一条 `Deny-Abi $abi "..."; continue` 记账并跳过本 ABI。
-        foreach ($pair in @(@('undo-degraded', $undo), @('market-degraded', $market), @('modelsync-degraded', $modelSync))) {
+        foreach ($pair in @(@('undo-degraded', $undo), @('market-degraded', $market))) {
             $leaf = $pair[0]; $src = $pair[1]
             if (Test-Path (Join-Path $src "lib\client.js")) {
                 $dst = Join-Path $degradeStaged $leaf
@@ -253,7 +251,6 @@ foreach ($abi in @('arm64', 'x86_64')) {
                 if ($LASTEXITCODE -ne 0) { $degradeFailDetail = "注入段浏览器语法降级失败（$leaf）" }
                 elseif ($leaf -eq 'undo-degraded') { $undoDeg = $dst }
                 elseif ($leaf -eq 'market-degraded') { $marketDeg = $dst }
-                else { $modelSyncDeg = $dst }
             }
         }
         # **不降级我方 plugin**（原实现会 `--degrade --stage <plugin>` 就地改写）：
@@ -274,7 +271,7 @@ foreach ($abi in @('arm64', 'x86_64')) {
         $comboDelta = Join-Path $work "combo-cache-delta"
         New-Item -ItemType Directory -Force -Path $comboDelta | Out-Null
         $comboArgs = @()
-        foreach ($d in (@($pluginDirs) + @($undoDeg, $marketDeg, $modelSyncDeg))) { $comboArgs += @("--scan", $d) }
+        foreach ($d in (@($pluginDirs) + @($undoDeg, $marketDeg))) { $comboArgs += @("--scan", $d) }
         node (Join-Path $Root "scripts\lib\combo-precompute.mjs") @comboArgs --out $comboDelta --manifest client-combos.inject.json --engine inject 2>&1
         if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "combo 缓存注入段预计算失败"; continue }
         # 单 pass 注入（2c 提速 2026-09-05）：@dsh-android + 根级插件 + 权威 patch 覆盖合并
@@ -283,11 +280,11 @@ foreach ($abi in @('arm64', 'x86_64')) {
         Write-Host "== 单 pass 注入（@dsh-android + undo/market + 权威 patch）（$abi）=="
         # ST-05：--all-profiles = 权威 patch 与注入包覆盖全部真实装配 profile（web + headless；
         # 负控 profile headless-bad 由 inject-all.py 显式跳过）。此前只写 web，headless 停在旧值。
-        python (Join-Path $Root "scripts\inject-all.py") $snap (Join-Path $work "snap-final2.tar.xz") (Join-Path $Root "scripts\profile-web.cordis.patch.yml") --dsh-android @pluginDirs --external $undoDeg $marketDeg $modelSyncDeg --all-profiles --combo-cache-delta $comboDelta 2>&1
+        python (Join-Path $Root "scripts\inject-all.py") $snap (Join-Path $work "snap-final2.tar.xz") (Join-Path $Root "scripts\profile-web.cordis.patch.yml") --dsh-android @pluginDirs --external $undoDeg $marketDeg --all-profiles --combo-cache-delta $comboDelta 2>&1
         if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "注入失败"; continue }
         # 防回归（审校 C4 2026-08-23）：patch 挂载集 ⊇ 注入集——缺条目（如 linux-env 漏挂）直接拒打包
         Write-Host "== 挂载集校验（$abi）=="
-        node (Join-Path $Root "scripts\check-patch-mounts.mjs") (Join-Path $Root "scripts\profile-web.cordis.patch.yml") @pluginDirs $undo $market $modelSync 2>&1 | Select-Object -First 4
+        node (Join-Path $Root "scripts\check-patch-mounts.mjs") (Join-Path $Root "scripts\profile-web.cordis.patch.yml") @pluginDirs $undo $market 2>&1 | Select-Object -First 4
         if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "patch 挂载集校验失败"; continue }
         # 注入面成员完整性（P0：包内新增文件曾被静默丢弃 → tar 里 import 悬空 → 设备侧引擎启动即死）
         Write-Host "== 注入成员完整性门禁（$abi）=="

@@ -56,7 +56,6 @@ const externalDirs = manifest.externals.map((d) => join(ROOT, d))
 const externalNamed = (name) => externalDirs.find((p) => p.replace(/\\/g, '/').endsWith('/' + name))
 const undo = externalNamed('dsh-undo-savepoint')
 const market = externalNamed('dshmarketplace-plugin')
-const modelSync = externalNamed('dsh-model-sync')
 
 // 门禁集（唯一声明处；check-release-gates.mjs 断言与 build-apk-013.ps1 的差集 = 0）
 const GATE_SCRIPTS = [
@@ -151,7 +150,6 @@ try {
   pluginDirs.forEach((p) => requires('插件', p))
   requires('vendor undo', join(undo, 'package.json'))
   requires('vendor market', join(market, 'package.json'))
-  requires('vendor model-sync', join(modelSync, 'lib', 'index.js'))
 
   // ---- 2. 门禁（注入前；与 build-apk-013.ps1 同一份门禁集，0.13.8-b ST-06）----
   log('门禁：补丁镜像一致性…')
@@ -237,11 +235,11 @@ try {
     const degradeStaged = join(work, 'degrade-src')
     mkdirSync(degradeStaged, { recursive: true })
     // 默认指向**原源目录**（表示「不降级」）；只有真的降级成功才改指向暂存副本。
-    // 无 lib/client.js 的源（如 dsh-model-sync）不复制、保持原路径。
+    // 无 lib/client.js 的源不复制、保持原路径。
     const degraded = new Map([
-      ['undo', undo], ['market', market], ['modelSync', modelSync],
+      ['undo', undo], ['market', market],
     ])
-    for (const key of ['undo', 'market', 'modelSync']) {
+    for (const key of ['undo', 'market']) {
       const src = degraded.get(key)
       const leaf = key + '-degraded'
       if (!existsSync(join(src, 'lib', 'client.js'))) {
@@ -258,7 +256,6 @@ try {
     }
     const undoDeg = degraded.get('undo')
     const marketDeg = degraded.get('market')
-    const modelSyncDeg = degraded.get('modelSync')
     // combo 缓存注入段（A3 启动性能）：注入链的 client.js 不在快照段预计算范围内，这里补算为
     // client-combos.inject.json + <sha256>.map，经 inject-all --combo-cache-delta 合入 tar；
     // 覆盖由注入后门禁 check-combo-cache 断言（与 build-apk-013.ps1 同一份实现）。
@@ -269,7 +266,7 @@ try {
     run('node', [
       join(ROOT, 'scripts', 'lib', 'combo-precompute.mjs'),
       ...pluginDirs.flatMap((p) => ['--scan', p]),
-      '--scan', undoDeg, '--scan', marketDeg, '--scan', modelSyncDeg,
+      '--scan', undoDeg, '--scan', marketDeg,
       '--out', comboDelta, '--manifest', 'client-combos.inject.json', '--engine', 'inject',
     ])
     log('单 pass 注入（@dsh-android + undo/market + 权威 patch，全部装配 profile）…')
@@ -278,7 +275,7 @@ try {
       join(ROOT, 'scripts', 'inject-all.py'), snapSrc, join(work, 'snap-final2.tar.xz'),
       join(ROOT, 'scripts', 'profile-web.cordis.patch.yml'),
       '--dsh-android', ...pluginDirs,
-      '--external', undoDeg, marketDeg, modelSyncDeg,
+      '--external', undoDeg, marketDeg,
       '--all-profiles',
       '--combo-cache-delta', comboDelta,
     ])
@@ -290,7 +287,7 @@ try {
 
   // ---- 4. 门禁（注入后；与 build-apk-013.ps1 同一份门禁集）----
   log('门禁：patch 挂载集校验（双向差集）…')
-  run('node', [gate('check-patch-mounts.mjs'), join(ROOT, 'scripts', 'profile-web.cordis.patch.yml'), ...pluginDirs, undo, market, modelSync])
+  run('node', [gate('check-patch-mounts.mjs'), join(ROOT, 'scripts', 'profile-web.cordis.patch.yml'), ...pluginDirs, undo, market])
   // 注入面成员完整性（P0）：包内新增文件必须随注入进 tar，且相对导入不得悬空
   log('门禁：注入成员完整性（成员集合 + 相对导入可解析）…')
   run('node', [gate('check-inject-completeness.mjs'), snapIn])

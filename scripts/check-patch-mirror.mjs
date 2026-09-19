@@ -228,6 +228,9 @@ if (peer) {
     'scripts/api-route-auth-policy.json',
     'vendor/dsh-undo-savepoint/PATCHES.md',
     'vendor/dshmarketplace-plugin/PATCHES.md',
+    // vendor/dsh-model-sync（@aiwayds/dsh-model-sync 固化副本）随插件于 0.14.1 **整体摘除**（用户裁定，
+    // 理由见 scripts/profile-web.cordis.patch.yml 的注释），故这里的镜像条目同批移除——
+    // 留着会让门禁对端缺失而 SKIP，看起来像「仍有一个 vendor 面在守」。
     'scripts/check-protocol-v2.mjs',
     'scripts/check-runtime-assets.mjs',
     'scripts/check-snapshot-fingerprint.mjs',
