@@ -16,7 +16,7 @@ import {
   adbCommandDisplayTokens,
   screenTokensFromSfDump,
 } from '../lib/screen-scope.js'
-import { AndroidPrivilegeService } from '../lib/index.js'
+import { AndroidPrivilegeService, SHELL_EXEC_TIMEOUT_MS, SHELL_QUEUE_TIMEOUT_MS } from '../lib/index.js'
 import { ControlQueue } from '../lib/control-queue.js'
 
 // ── 0.14.1 块G（T3）：执行点范围门禁按**目标屏**判定 ──────────────────────────────
@@ -53,8 +53,11 @@ function useScope(scope) {
   process.env.DSH_SCREEN_SCOPE = scope
 }
 
-function service(queue) {
-  return new AndroidPrivilegeService({}, () => 'danger-full-access', undefined, undefined, queue)
+/** 特权面调用的会话夹具（S-5 起服务面要求显式会话或 bindSession）。 */
+const TEST_SESSION = 'test-session'
+
+function service(queue, mode = 'danger-full-access') {
+  return new AndroidPrivilegeService({}, () => mode, { resolve: () => ({ mode }) }, undefined, queue)
 }
 
 /** 轮询取活（队列在途/空窗期都返回 null，等待即可）。 */
@@ -254,10 +257,11 @@ test('F1：范围 all 下真实屏目标照旧放行（放宽只针对目标屏�
 // 不看 `-d <displayId>` 指向哪块屏。于是「读虚拟屏」与「读真实屏」同罪。
 
 test('F2：virtual-only 下 screencap -d <虚拟屏 id> 必须放行（目标屏在注册表里）', async () => {
+  a11yOnlinePrefs()
   useScope('virtual-only')
   const queue = new ControlQueue()
   const svc = service(queue)
-  const out = svc.execAdbShell('adb shell screencap -p -d 47 /data/local/tmp/a.png')
+  const out = svc.execAdbShell('adb shell screencap -p -d 47 /data/local/tmp/a.png', { session: TEST_SESSION })
   const vd = await takeNext(queue)
   assert.equal(vd?.op, 'vdInfo', '带 -d 的命令必须先经 vdInfo 核对目标屏归属')
   queue.settle(vd.reqId, { ok: true, data: { screens: [{ alias: 'virtual-1', kind: 'virtual', displayId: 47 }] } })
@@ -270,14 +274,18 @@ test('F2：virtual-only 下 screencap -d <虚拟屏 id> 必须放行（目标屏
 })
 
 test('F2：virtual-only 下 -d 指向未注册 id / display 0 时仍然拒绝', async () => {
+  a11yOnlinePrefs()
   useScope('virtual-only')
   for (const command of [
     'adb shell screencap -p -d 99 /data/local/tmp/a.png',
     'adb shell screencap -p -d 0 /data/local/tmp/a.png',
   ]) {
+    // 每轮重写 a11y 心跳：在线判据有 20s 保鲜窗，而本轮每步都要等 8s 级的壳侧往返，
+    // 两轮之间心跳会过期 → 门变成「设备控制未授权」，测的就不是屏幕范围而是授权（假失败）。
+    a11yOnlinePrefs()
     const queue = new ControlQueue()
     const svc = service(queue)
-    const out = svc.execAdbShell(command)
+    const out = svc.execAdbShell(command, { session: TEST_SESSION })
     const vd = await takeNext(queue)
     if (vd !== null) {
       assert.equal(vd.op, 'vdInfo')
@@ -310,10 +318,11 @@ test('F2：无 -d 的 screencap 与真实屏命令照旧拒绝（放宽面收敛
 })
 
 test('F2：范围含 real 时不打注册表往返（放宽不得引入新的固定开销）', async () => {
+  a11yOnlinePrefs()
   useScope('real-only')
   const queue = new ControlQueue()
   const svc = service(queue)
-  const out = svc.execAdbShell('adb shell screencap -p -d 47 /data/local/tmp/a.png')
+  const out = svc.execAdbShell('adb shell screencap -p -d 47 /data/local/tmp/a.png', { session: TEST_SESSION })
   const sh = await takeNext(queue)
   assert.equal(sh?.op, 'shExec', 'real-only 下真实屏命令本就放行，不得先问 vdInfo')
   queue.settle(sh.reqId, { ok: true, data: { ok: true, stdout: '' } })
@@ -480,11 +489,12 @@ test('F6：多处壳侧往返必须串行（控制队列单线程，并发会让
   // 「已有在途的设备控制请求」⇒ 后一个立即失败 ⇒ token 集合恒空 ⇒ 已注册虚拟屏的 token 也被拒
   // （比不修更糟）。本用例把「必须串行」钉死：每一跳都必须在前一跳 settle **之后**才出现，
   // 且三跳全部走通后判定放行。
+  a11yOnlinePrefs()
   useScope('virtual-only')
   const queue = new ControlQueue()
   const svc = service(queue)
   const cmd = `adb shell screencap -p -d ${F6_VTOKEN} /data/local/tmp/a.png`
-  const out = svc.execAdbShell(cmd)
+  const out = svc.execAdbShell(cmd, { session: TEST_SESSION })
 
   // ① 第一跳：vdInfo（注册表：displayId + 别名一次取回）
   const vd1 = await takeNext(queue)
@@ -632,4 +642,116 @@ test('N-5：SF 反查输出容忍行尾空白（设备 dumpsys 常见尾随空�
   assert.deepEqual(screenTokensFromSfDump(withTrailing), [{ alias: 'virtual-1', token: '11529215046816944610' }])
   assert.deepEqual(screenTokensFromSfDump('Virtual Display 111\t\n'), [],
     'token 行有尾随空白仍须被识别（不得因行尾空白丢掉整条配对）')
+})
+
+// ── 审查 §5.1 / S-5：授权门从**调用方**下沉到**服务面** ────────────────────────────────
+//
+// 缺陷形态：`gateFor(session)` 与危险命令黑名单此前只在工具壳里，服务面 `controlExec` /
+// `execAdbShell` 自身不判档位 ⇒ 任何能 `ctx.get('androidPrivilege')` 的引擎侧代码（含市场装的
+// 第三方插件）都能直接驱动 uid 2000 特权 shell，与用户选的会话档位无关。in-tree 反例是 manage
+// 的动画开关（同类命令经工具走会被黑名单拒，内部直连却畅通）——说明黑名单是**工具壳的属性**。
+
+test('S-5 反证：无会话的特权调用在服务面被拒（fail-closed），且不投递任何请求', async () => {
+  a11yOnlinePrefs()
+  useScope('virtual-only')
+  const queue = new ControlQueue()
+  const svc = service(queue)
+  // 旧实现：直接畅通（这就是「授权门在调用方」的形态）。
+  const r = await svc.execAdbShell('getprop ro.product.model')
+  assert.equal(r.ok, false, '无会话的特权 shell 调用必须被拒')
+  assert.match(String(r.guidance), /缺少调用方会话/, '文案必须点明是「缺会话」而不是别的')
+  assert.equal(await takeNext(queue, 80), null, '被拒的调用不得进入控制队列')
+
+  const c = await svc.controlExec('shExec', { command: 'getprop ro.product.model' })
+  assert.equal(c.ok, false, 'controlExec(shExec) 同样必须在服务面拒绝无会话调用')
+})
+
+test('S-5 反证：会话档位不足（非 danger-full-access）时特权面拒绝', async () => {
+  a11yOnlinePrefs()
+  useScope('virtual-only')
+  const queue = new ControlQueue()
+  const svc = service(queue, 'workspace-write')
+  const r = await svc.execAdbShell('getprop ro.product.model', { session: TEST_SESSION })
+  assert.equal(r.ok, false)
+  assert.match(String(r.guidance), /danger-full-access/, '文案必须说明档位要求')
+  assert.equal(await takeNext(queue, 80), null)
+})
+
+test('S-5 反证：危险命令黑名单在服务面生效（工具壳之外同样拒）', async () => {
+  a11yOnlinePrefs()
+  useScope('all')
+  const queue = new ControlQueue()
+  const svc = service(queue)
+  // 这正是审查里的 in-tree 反例命令（manage 用内部直连写系统动画开关）。
+  const r = await svc.execAdbShell('settings put global window_animation_scale 0', { session: TEST_SESSION })
+  assert.equal(r.ok, false, '系统写面命令必须在服务面被黑名单拦下')
+  assert.match(String(r.guidance), /危险检查拦截/)
+  assert.equal(await takeNext(queue, 80), null, '被黑名单拦下的命令不得进入控制队列')
+})
+
+test('S-5：内部白名单按**命令形态**校验，不是名字对了就放行', async () => {
+  a11yOnlinePrefs()
+  useScope('all')
+  const queue = new ControlQueue()
+  const svc = service(queue)
+  // ① 形态合法的动画命令 → 放行（进入队列）。
+  const okCmd = 'settings put global window_animation_scale 0; settings put global transition_animation_scale 0'
+  const okRun = svc.execAdbShell(okCmd, { internal: 'animation-scales' })
+  const enqueued = await takeNext(queue)
+  assert.equal(enqueued?.op, 'shExec', '内部白名单的合法形态必须放行到执行面')
+  queue.settle(enqueued.reqId, { ok: true, data: { ok: true, stdout: '' } })
+  assert.equal((await okRun).ok, true, JSON.stringify(await okRun))
+
+  // ② 同一个白名单名字 + 形态外命令 → 拒（若实现是「名字对了就放行」，这里会判红）。
+  for (const bad of [
+    'pm grant com.example android.permission.CAMERA',
+    'settings put global window_animation_scale 0; rm -rf /sdcard/Download',
+    'settings put secure enabled_accessibility_services x',
+  ]) {
+    const r = await svc.execAdbShell(bad, { internal: 'animation-scales' })
+    assert.equal(r.ok, false, '白名单名字不得成为任意命令的通行证：' + bad)
+  }
+  // ③ 未登记的名字 → 拒。
+  const unknown = await svc.execAdbShell('getprop ro.product.model', { internal: 'no-such-call' })
+  assert.equal(unknown.ok, false, '未登记的内部调用名必须拒')
+  assert.equal(await takeNext(queue, 80), null)
+})
+
+test('S-5：SF token 反查（判定自身的一部分）经内部白名单可用，且与档位无关', async () => {
+  a11yOnlinePrefs()
+  useScope('virtual-only')
+  const queue = new ControlQueue()
+  const svc = service(queue)
+  // 无会话、无档位：SF 反查仍必须能跑（否则范围判定自己就转不动了）。
+  // 注意**先取活再 await**：反查的 promise 挂着等壳侧回填，先 await 会把请求等到超时。
+  const pendingSf = svc.shellSfVirtualDisplayTokens()
+  const req = await takeNext(queue)
+  assert.equal(req?.op, 'shExec', 'SF 反查必须能投递')
+  assert.match(String(req.args.command), /dumpsys SurfaceFlinger/)
+  queue.settle(req.reqId, { ok: true, data: { ok: true, stdout: F6_SF_DUMP, exitCode: 0 } })
+  assert.deepEqual(await pendingSf, [{ alias: 'virtual-1', token: F6_VTOKEN }])
+})
+
+test('S-5：bindSession 把会话绑到当前异步上下文（工具层的用法），且不跨上下文泄漏', async () => {
+  a11yOnlinePrefs()
+  useScope('all')
+  const queue = new ControlQueue()
+  const svc = service(queue)
+  // 工具层形态：入口绑定一次，其余嵌套 helper 自动继承（manage 有 40+ 处私有面调用点）。
+  await new Promise((resolve) => {
+    svc.bindSession(TEST_SESSION)
+    resolve(undefined)
+  })
+  const bound = svc.execAdbShell('getprop ro.product.model')
+  const req = await takeNext(queue)
+  assert.equal(req?.op, 'shExec', '绑定的会话必须让嵌套调用通过服务面门')
+  queue.settle(req.reqId, { ok: true, data: { ok: true, stdout: 'ok' } })
+  assert.equal((await bound).ok, true)
+})
+
+test('S-6：超时口径必须 shellTimeout < engineTimeout（否则假失败 + 二次执行）', () => {
+  assert.ok(SHELL_EXEC_TIMEOUT_MS < SHELL_QUEUE_TIMEOUT_MS,
+    '壳侧执行时限必须小于引擎入队时限：反了会出现「引擎超时但壳侧已执行」→ 模型重试即二次执行（非幂等 op）')
+  assert.equal(SHELL_EXEC_TIMEOUT_MS, 20_000)
+  assert.equal(SHELL_QUEUE_TIMEOUT_MS, 25_000)
 })

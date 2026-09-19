@@ -56,13 +56,15 @@ interface PrivilegeFace {
   /** 会话级通道门：无障碍通道（服务已开启）或 ADB 三道人门任一成立即放行；会话档位 danger-full-access 恒需。 */
   gateFor(session?: unknown): { ok: true; via?: 'a11y' | 'adb' } | { ok: false; guidance: string }
   /** 真实 ADB 通道：adb shell（adbd 执行，shell uid=2000）。 */
-  execAdbShell?(command: string): Promise<{ ok: boolean; stdout: string; guidance?: string }>
+  execAdbShell?(command: string, auth?: { session?: unknown; internal?: string }): Promise<{ ok: boolean; stdout: string; guidance?: string }>
   /** 真实 ADB 通道：原始 adb 行（自动注入 -s 与幂等 connect；screencap+pull 等组合用）。 */
-  execAdbLine?(line: string): Promise<{ ok: boolean; stdout: string; guidance?: string }>
+  execAdbLine?(line: string, auth?: { session?: unknown; internal?: string }): Promise<{ ok: boolean; stdout: string; guidance?: string }>
   /** 0.13.5 W4：控制通道策略（a11y 优先 / ADB 回退 / 拒绝，fail-closed）。 */
   controlDecision?(op: string, session?: unknown, forceBackend?: 'a11y' | 'adb'): { backend: 'a11y' | 'adb' | 'deny'; reason: string; guidance?: string }
   /** 0.13.5 W4：无障碍通道执行（壳侧队列往返；未开启无障碍时直接拒绝）。 */
-  controlExec?(op: string, args: Record<string, unknown>, timeoutMs?: number): Promise<{ ok: true; data: unknown } | { ok: false; error: string }>
+  controlExec?(op: string, args: Record<string, unknown>, timeoutMs?: number, auth?: { session?: unknown; internal?: string }): Promise<{ ok: true; data: unknown } | { ok: false; error: string }>
+  /** S-5：绑定本次调用的会话（bridge 服务面据此复查档位；见其 KDoc）。 */
+  bindSession?(session: unknown): void
 
   /** 0.14: current native-owned access range; no model tool can mutate it. */
   screenScope?(): 'virtual-only' | 'real-only' | 'all'
@@ -129,6 +131,10 @@ function tools(ctx: Context, priv: PrivilegeFace) {
    * 修法不是逐个补字段（下次加字段还会漏），而是**唯一入口收完整实参**。
    */
   const guard = async (action: string, args: Record<string, unknown>, exec?: { agent?: { session?: unknown } }) => {
+    // S-5：把本次调用的会话绑定到**当前异步上下文**——bridge 的服务面据此复查档位。
+    // 为什么在这里绑：本插件的私有面调用点有 40+ 处（分散在各 helper 里，多数拿不到 exec），
+    // 逐个改签名噪声大且必漏；而 guard 是每个工具入口的唯一必经点，语义正是「这次调用属于谁」。
+    priv.bindSession?.(exec?.agent?.session)
     if (SCREEN_ACTIONS.has(action) && (priv.screenAccessResolved ?? priv.screenAccess)) {
       const requested = typeof args.screenId === 'string' ? args.screenId : undefined
       // **必须用异步面**：`virtual-N` → displayId 要经壳侧 vdInfo 注册表解析，同步面做不到，
@@ -412,7 +418,9 @@ function tools(ctx: Context, priv: PrivilegeFace) {
   async function readAnimScales(): Promise<Record<string, string>> {
     if (!priv.execAdbShell) return {}
     const cmd = 'for k in ' + ANIM_KEYS.join(' ') + '; do echo R:$k=$(settings get global $k); done'
-    const r = await priv.execAdbShell(cmd).catch(() => ({ ok: false, stdout: '' }))
+    // S-5：`settings get/put global` 命中服务面危险命令黑名单，故走**具名内部白名单**——
+    // 白名单按命令形态逐条校验（bridge 的 isAnimationScaleCommand），不是名字对了就放行。
+    const r = await priv.execAdbShell(cmd, { internal: 'animation-scales' }).catch(() => ({ ok: false, stdout: '' }))
     const out: Record<string, string> = {}
     for (const m of r.stdout.matchAll(/R:(\w+)=(\S+)/g)) out[m[1]] = m[2]
     return out
@@ -422,13 +430,15 @@ function tools(ctx: Context, priv: PrivilegeFace) {
    *  音乐类 App 播放条常驻动画使窗口永不 idle（"could not get idle state" 实锤根因）。 */
   async function setAnimScales(v: string): Promise<void> {
     if (!priv.execAdbShell) return
-    await priv.execAdbShell(ANIM_KEYS.map((k) => `settings put global ${k} ${v}`).join('; ')).catch(() => undefined)
+    await priv.execAdbShell(ANIM_KEYS.map((k) => `settings put global ${k} ${v}`).join('; '), { internal: 'animation-scales' })
+      .catch(() => undefined)
   }
 
   /** F1 止血：还原动画三开关（读数失败的键回 1 标准值）。 */
   async function restoreAnimScales(old: Record<string, string>): Promise<void> {
     if (!priv.execAdbShell) return
-    await priv.execAdbShell(ANIM_KEYS.map((k) => `settings put global ${k} ${old[k] ?? '1'}`).join('; ')).catch(() => undefined)
+    await priv.execAdbShell(ANIM_KEYS.map((k) => `settings put global ${k} ${old[k] ?? '1'}`).join('; '), { internal: 'animation-scales' })
+      .catch(() => undefined)
   }
 
   /** F10：本地临时产物统一目录（TMPDIR/dsh-tmp/）+ 按 prefix LRU 清理，杜绝私有目录无限堆积。 */
