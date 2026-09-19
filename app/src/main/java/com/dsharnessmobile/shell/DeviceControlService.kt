@@ -749,7 +749,8 @@ class DeviceControlService : AccessibilityService() {
     // 一次性迁移（issue #127）：≤0.13.5 把截图落在 files/control-shots（引擎读不到），
     // 升级后清掉旧目录，避免历史残留长期占位。
     if (legacyShotDirCleaned.compareAndSet(false, true)) {
-      try { java.io.File(filesDir, "control-shots").deleteRecursively() } catch (_: Throwable) { /* 忽略 */ }
+      // 审查 I-9：同类形态一律 NOFOLLOW（截图目录里可能有链）。
+      try { SnapshotFs.deletePath(java.io.File(filesDir, "control-shots")) } catch (_: Throwable) { /* 忽略 */ }
     }
     // displayId 由 realScreenScopeError 解析并固定（真实屏 0 / 虚拟屏动态 id），不接受 caller 直接指定。
     val displayId = activeDisplayId

@@ -587,7 +587,10 @@ class EngineManager(private val context: Context, private val pickToken: String?
       val f = File(dshData, name)
       if (f.exists()) {
         removedPaths += f.absolutePath
-        if (!f.deleteRecursively()) {
+        // 审查 I-9：`deleteRecursively` 的 walkBottomUp 用 File.isDirectory 判目录，**跟随符号链接**
+        // ⇒ 用户数据树里若有一条指向别处的链，删除会穿过去。一律走项目既有的 NOFOLLOW 原语。
+        SnapshotFs.deletePath(f)
+        if (SnapshotFs.exists(f)) {
           throw java.io.IOException("failed to delete public path " + f.absolutePath)
         }
       }
@@ -618,11 +621,12 @@ class EngineManager(private val context: Context, private val pickToken: String?
         Log.w(TAG, "private " + privateDir.absolutePath + " exists; public kept as " + backup.absolutePath)
         return
       }
-      privateDir.deleteRecursively()
+      SnapshotFs.deletePath(privateDir)
     }
     privateDir.parentFile?.mkdirs()
     copyTreeVerified(publicDir, privateDir)
-    if (!publicDir.deleteRecursively()) {
+    SnapshotFs.deletePath(publicDir)
+    if (SnapshotFs.exists(publicDir)) {
       throw java.io.IOException("failed to delete public source " + publicDir.absolutePath)
     }
   }
@@ -1348,7 +1352,8 @@ class EngineManager(private val context: Context, private val pickToken: String?
       if (updateHealthTicks >= UPDATE_CONFIRM_TICKS) {
         pending.delete()
         File(context.filesDir, ".update-pending-at").delete()
-        File(context.filesDir, "usr-old").deleteRecursively()
+        // 审查 I-9 点名：usr-old 里的绝对链此时已指向**新** usr 树，跟随删除会穿进 live 运行时。
+        SnapshotFs.deletePath(File(context.filesDir, "usr-old"))
         updateHealthTicks = 0
         LogCollector.log(TAG, "update confirmed: old runtime cleaned (usr-old removed)")
       }
@@ -1370,7 +1375,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
     if (!old.exists()) return
     try {
       val broken = File(context.filesDir, "usr-broken")
-      broken.deleteRecursively()
+      SnapshotFs.deletePath(broken)
       if (usr.exists()) usr.renameTo(broken)
       if (old.renameTo(usr)) {
         LogCollector.log(TAG, "update rolled back to previous runtime; restarting engine")
