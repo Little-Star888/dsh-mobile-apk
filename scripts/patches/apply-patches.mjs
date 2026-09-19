@@ -961,7 +961,11 @@ const IMPLS = {
         ' * names every skipped plugin in engine.log. Official and shipped-mobile entries still fail loud. */',
         '/** Scopes owned by the product: a failure here is a real regression and must stay fatal. */',
         'const DSH_MOBILE_SHIPPED_PLUGIN_PREFIXES = ["@deepseek-ai/", "@dsh-android/"];',
-        'const DSH_MOBILE_SHIPPED_PLUGIN_NAMES = ["dsh-undo-savepoint", "dshmarketplace-plugin", "@aiwayds/dsh-model-sync"];',
+        // 0.14.1：`@aiwayds/dsh-model-sync` 随插件整体摘除（审查 §9，用户裁定）——它留在本名单里
+        // 的后果很具体：名单成员的加载失败**按产品回归 fail-loud**，而它已经不在注入集里了，
+        // 老设备上任何残留挂载都会把引擎启动打挂（fail-loud 用在了错误的对象上）。
+        // 摘除插件时，这里必须同步删掉——名单就是「谁算我们自己的插件」的单一真源。
+        'const DSH_MOBILE_SHIPPED_PLUGIN_NAMES = ["dsh-undo-savepoint", "dshmarketplace-plugin"];',
         '/** Isolation cap: never tolerate an unbounded number of broken plugins. */',
         'const DSH_MOBILE_BOOT_SKIP_LIMIT = 8;',
         'const DSH_MOBILE_BOOT_SKIPPED_PLUGINS = [];',

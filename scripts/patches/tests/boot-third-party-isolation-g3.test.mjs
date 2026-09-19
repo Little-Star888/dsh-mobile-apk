@@ -213,6 +213,12 @@ try {
       && iso.dshMobileIsShippedPlugin('@dsh-android/dsh-android-bridge') === true
       && iso.dshMobileIsShippedPlugin('dshmarketplace-plugin') === true
       && iso.dshMobileIsShippedPlugin('dsh-live2d-pets') === false)
+    // 【0.14.1 D-1 反回归】已摘除的插件必须**不再**算出货：名单成员加载失败按产品回归 fail-loud，
+    // 而它已不在注入集 ⇒ 老设备上任何残留挂载都会把引擎启动打挂（fail-loud 用错对象）。
+    // 本断言的存在意义：将来再摘除插件时忘改名单，这里立刻红（本轮实测就是这样发现的）。
+    check('② 已摘除插件不得留在出货名单（否则残留挂载会 fail-loud 打死启动）',
+      iso.dshMobileIsShippedPlugin('@aiwayds/dsh-model-sync') === false
+      && iso.dshMobileIsIsolatableEntry('@aiwayds/dsh-model-sync') === true)
     // 归属必须**可证**：路径/URL 形态不是「用户自装包」的证据，一律不可隔离（否则产品自身的
       // 相对路径条目坏掉会被静默跳过——这正是反向断言抓到的缺陷）。
     check('② 归属可证性：裸包名可隔离；相对/绝对路径、file:/其它 scheme 一律不可隔离',
