@@ -15,7 +15,7 @@
 | WebUiChrome.kt | 123 | 窗口 UI chrome：沉浸式/剪贴板/常亮/主题推送（真源统一走 ShellState） | MainActivity |
 | FileIncoming.kt | 484 | 外部来件（VIEW/SEND）校验净化→临时工作区→通知引擎；queued source 保留到浏览器草稿 claim 或 TTL | MainActivity、EngineService |
 | AndroidBridge.kt | 383 | `window.androidBridge` 全部 @JavascriptInterface（计数由 check-bridge-symmetry 守；含设置/chooser/ScreenScope/BrowserHost/虚拟屏/BackGate 接线） | MainActivity（唯一 addJavascriptInterface 点） |
-| BrowserHost.kt / BrowserHostNavigationPolicy.kt | 341 / 35 | 0.14 新增：惰性隔离第二 WebView（无 bridge）；仅 http(s)/about:blank，拒 file/content/data/javascript/loopback；stage bounds + viewport letterbox | MainActivity |
+| BrowserHost.kt / BrowserHostNavigationPolicy.kt / BrowserOverlayPolicy.kt | 1813 / 210 / 82（`wc -l` 现数；**不要写死**，行数每次改都会漂） | 惰性隔离第二 WebView（无 bridge）；准入 = http(s)/about:blank 且**主机规范化后**拒回环等价写法（数值/八进制/十六进制/结尾点/IPv4-mapped）；请求级过滤另拒回环/链路本地/元数据段；stage bounds + viewport letterbox；覆盖层可见性判据（fail-closed + 发布者保鲜 TTL） | MainActivity |
 | ScreenScope.kt | 55 | 0.14 新增：ScreenScope/ScreenTargets/ScreenScopePrefs——用户屏幕范围的 native 真源（损坏/未知回落 virtual-only） | AndroidBridge、DeviceControlService |
 
 注入方向：MainActivity 字段初始化阶段 `by lazy`/直接构造各协作类并传 `this`（如 `engineFlow = EngineStartFlow(this)`）；ActivityResult 注册必须在 STARTED 前，故 dirPickerController/mediaPickerController 为字段直接构造。协作类只回调 MainActivity 的 internal 方法，不持有彼此。

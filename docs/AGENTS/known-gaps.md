@@ -23,7 +23,7 @@
 ## 0.14.0 收尾登记（2026-09-14，发布后工作区）
 
 - **BrowserHost 与浏览器控制面：工作区已实现、未设备回归**：壳侧 `BrowserHost`（隔离 WebView + 拒绝面 + 视口 letterbox）与六条桥 op、面板视口下拉已就绪；`plugins/dsh-android-browser` 的 17 条工具契约与 `tools.ts` 实现（open/snapshot/click/type/press/scroll/get_text/wait/navigate/back/forward/reload/tabs/identity/viewport/screenshot/tier）已在工作区落地——**但 0.14.0-preview 发布时壳侧宿主未落地（面板只读），工作区代码未过设备端到端回归**；页代次/旧 ref 拒绝、截图权限与身份切换的设备验收待补。
-- **虚拟屏多屏能力：工作区已实现、未设备回归**：壳侧已含实时 display registry（stable alias + 动态 displayId）、controller 自有选择目标、每查看器独立 bounds、查看器仲裁（同一 Surface 不能挂两个查看器，冲突返回 `viewer-target-occupied`）、`MAX_VIRTUAL_DISPLAYS=2`；面板已渲染「呈现目标」下拉（调 `vdisplaySelect`）。**发布版（0.14.0-preview）不含这些；工作区的 viewer 接管/重挂、双查看器冲突、横竖屏几何与截图仍未过设备回归。** 真实屏明确不可镜像（`screen-not-selectable`）。
+- **虚拟屏多屏能力：工作区已实现、未设备回归**：壳侧已含实时 display registry（stable alias + 动态 displayId）、controller 自有选择目标、每查看器独立 bounds、查看器仲裁（同一 Surface 不能挂两个查看器，冲突返回 `viewer-target-occupied`）、`MAX_VIRTUAL_DISPLAYS=1`（0.14.0 发布提交起就是 1；旧文档写 2 是漂移）；面板已渲染「呈现目标」下拉（调 `vdisplaySelect`）。**发布版（0.14.0-preview）不含这些；工作区的 viewer 接管/重挂、双查看器冲突、横竖屏几何与截图仍未过设备回归。** 真实屏明确不可镜像（`screen-not-selectable`）。
 - **Shizuku 完整特权体验未收口**：UserService/AIDL v1 与固定 argv 执行已落地、建屏/launch/back 探针设备通过；「无障碍关闭时 Shizuku 提供完整特权体验」（U-4）仍缺工具面改名/能力迁移与设备矩阵；ADB 配对页仍作为迁移/诊断面保留，未按 U-4 退役。
 - **开放屏幕范围**：native 真源与执行点复查已落地；`virtual-only` 下真实屏观察面（含无障碍直连队列）的完整设备矩阵未跑。
 - **按需 skill 注入（U-5）未实施**：控制流程仍会进入常驻上下文/schema 的部分未清点，token 预算门禁未做。
@@ -139,3 +139,12 @@
   - 三段式子路径（桥侧门禁 / 壳侧 F5 / manage 反查+回落）各有单测，且都做过**改前判红**。
   - 装机后最小复验：调 `android_screenshot {screenId:"virtual-1"}`，断言返回 675x1200 级别像素、
     非真实屏画面（与真机 900x1600 对照）、非全黑。
+
+## 0.14.1 审查轮登记的缺口（承接 `docs/COMPAT-REVIEW-0.14.0-2026-09-19.md`，进度见协调仓 `0.14.1-REVIEW-CHECKLIST-PROGRESS.md`）
+
+| # | 缺口 | 现状 |
+|---|---|---|
+| K-A | **侧栏浏览器自动落位的时机洞**：`browser-auto-place.ts` 的 `tick()` 在「首次观测到某 owner 且已有页面」时只建基线就 return（`seenEmpty` 守卫）；若 `browserCaps` 与 `browser_open` 落在同一拍 1s 轮询内，该页**永远不会注册成侧栏 tab** | 未修。修法：壳侧 `status()` 增页面创建时间戳（如 `lastPageAtMs`），前端按 `pageCreatedAt > UI 加载时刻` 判真实边沿，替代近似守卫 |
+| K-B | **A3 悬浮窗背景启动限制在多 ROM 上未复核**（0.14.1 块 H 自述残留） | 需多 ROM 真机各跑一次（权限缺失/开关关闭/无虚拟屏三种 fail-closed 形态） |
+| K-C | **块 J① FIX-3「双起点验收」设备级证据缺**：`files/notify-responder.log` 的 `result=` 判据此前读错文件（真因已修），修后需再装机复验 | 未复验 |
+| K-D | **execAdbLine 档位门的会话来源依赖工具入口绑定**（0.14.1 S-5 引入）：会话经 `guard()` 的 AsyncLocalStorage 绑定传递；若将来出现不经工具入口的后台调用路径，会被 fail-closed 拒（预期行为，但需要一条测试钉住） | 已在审查进度文档 §3.4 登记 |
