@@ -46,8 +46,20 @@ internal object SnapshotFs {
       val attrs = Files.readAttributes(nioPath, BasicFileAttributes::class.java, NOFOLLOW_LINKS)
       if (attrs.isDirectory) {
         // 目录项本身读取失败（元数据损坏）也要能继续：记下并跳过，不要让它中断整棵树。
+        //
+        // 0.14.1 P0（真机崩溃实锤）：这里原为 `Files.list(nioPath).use { it.toList() }`。
+        // `java.util.stream.Stream.toList()` 是 **Java 16 引入、Android API 34 才提供**的接口方法，
+        // 而本项目 minSdk = 26 —— 在 API < 34 设备上抛 `NoSuchMethodError`。
+        // 关键：`NoSuchMethodError` 是 **Error 而非 Exception**，外层 `catch (e: Exception)` 抓不住，
+        // 于是直接打穿 `SnapshotTransaction.finish` → 事务恢复**永远无法完成**（marker retained），
+        // 快照刷新/恢复在 Android < 34 上卡死（华为 NOH-AN00 / Android 31 实测：12:55/12:56/12:57
+        // 三时点、主线程与工作线程均崩于此行）。
+        // 改用 `Files.newDirectoryStream`：`DirectoryStream<Path>` 是 `Iterable` + `Closeable`，
+        // Kotlin 的 `toList()` 是自带的 stdlib 扩展（**无 API 级别依赖**），语义等价：
+        // 只列直接子项、不跟随符号链接（调用方已按 NOFOLLOW 判定 attrs.isDirectory，
+        // 符号链接到目录者不会进本分支）、`use` 保证关闭。
         val children = try {
-          Files.list(nioPath).use { stream -> stream.toList() }
+          Files.newDirectoryStream(nioPath).use { stream -> stream.toList() }
         } catch (e: Exception) {
           onFailure(path, e)
           return

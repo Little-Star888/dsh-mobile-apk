@@ -83,6 +83,32 @@ class AndroidBridge(
   private val onOpenA11ySettings: () -> Unit = {},
   /** 0.13.5 W4：一键解锁受限设置（Android 13+ 侧载应用默认禁止开启无障碍）。返回 JSON {ok, message}。 */
   private val onUnlockRestrictedSettings: () -> String = { """{"ok":false,"message":"未接线"}""" },
+  /**
+   * 0.14.1 块J FIX-4：通知设置**读**面（key 为空 = 全量快照）。
+   *
+   * 默认实现与 [onGetImmersiveMode] 同款：**直接读壳侧单一真源**（`ShellAppContext` 由
+   * `EngineAuth.initContext` 绑定），因此 MainActivity 无需传参即可返回真实值。
+   *
+   * 这是 J-1「FIX-4 名义落地、实际不可达」的直接修法：旧态的 `settingsSnapshot` /
+   * `applySetting` 在 `app/src/main` 全仓**零外部调用点**（只有定义处互调），桥面 35 个
+   * `@JavascriptInterface` 无一涉及 notify/suppress，页面侧 grep 亦 0 命中——能力在、入口无。
+   * 把默认实现钉在真源上（而不是 `{ok:false}` 桩），则「漏接线」这一失效形态在结构上不可能复发：
+   * 没有 MainActivity 传参，入口依然可达。
+   */
+  private val onGetNotifySetting: (String) -> String = { key ->
+    val app = ShellAppContext.get()
+    if (app == null) """{"ok":false,"reason":"no-shell-context"}"""
+    else NotifyCenter.settingsSnapshot(app).put("key", key).toString()
+  },
+  /**
+   * 0.14.1 块J FIX-4：通知设置**写**面（key + value），返回写后读回的 JSON（含 applied/reason）。
+   * 与读面同款默认实现：未绑定壳上下文时**拒绝**而不是静默假成功（fail-closed）。
+   */
+  private val onSetNotifySetting: (String, Boolean) -> String = { key, value ->
+    val app = ShellAppContext.get()
+    if (app == null) """{"ok":false,"reason":"no-shell-context"}"""
+    else NotifyCenter.applySetting(app, key, value).toString()
+  },
 ) {
 
   @JavascriptInterface
@@ -334,6 +360,25 @@ class AndroidBridge(
   /** 0.13.5 W4：一键解锁受限设置（appops set … ACCESS_RESTRICTED_SETTINGS allow，走 ADB 通道）。 */
   @JavascriptInterface
   fun unlockRestrictedSettings(): String = onUnlockRestrictedSettings()
+
+  /**
+   * 0.14.1 块J FIX-4：通知设置读回（设置页「开发者选项」的初始态与写后读回）。
+   *
+   * 调用面 = 受信任 DSH 页面（`window.androidBridge`）；返回 `NotifyCenter.settingsSnapshot`
+   * 的 JSON（`suppressForeground` / `suppressForegroundDefault` / `categories`）。
+   * @param key 可选：只回读一个设置键（空串 = 全量快照）。回读**始终取壳侧真源**，不回显入参。
+   */
+  @JavascriptInterface
+  fun getNotifySetting(key: String?): String = onGetNotifySetting(key ?: "")
+
+  /**
+   * 0.14.1 块J FIX-4：通知设置写入（key = `suppressForeground` 或 `cat.<category>`）。
+   *
+   * 返回写后读回的快照：`applied=true` 才代表生效；未知 key / 读回不一致一律如实回 `false`
+   * （拒绝乐观置位，与 `ShellState.DevLogControl` 同纪律）。这是 FIX-4 的唯一页面上行入口。
+   */
+  @JavascriptInterface
+  fun setNotifySetting(key: String, value: Boolean): String = onSetNotifySetting(key, value)
 
   companion object {
     /**

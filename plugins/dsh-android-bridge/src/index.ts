@@ -22,6 +22,8 @@ import {
   decideScreenAccess,
   controlOpNeedsRealScreen,
   realScreenAdbCommandDenied,
+  adbCommandDisplayTokens,
+  screenTokensFromSfDump,
   isVirtualScreenId,
   type ScreenAccessDecision,
   type UserScreenScope,
@@ -530,6 +532,115 @@ export class AndroidPrivilegeService {
   }
 
   /**
+   * 块G F2：壳侧虚拟屏注册表当前登记的**全部** displayId（不按别名过滤）。
+   *
+   * 用途：raw shell 命令里显式出现 `-d <id>` 时，只有能证明该 id 属于一块虚拟屏才可放行
+   * （否则「用户只给 virtual-only」会连自己的虚拟屏截图都拿不到）。只认原生回报的 kind=virtual
+   * 且 displayId>0 的条目；注册表不可达一律空集（fail-closed：绝不凭命令里的数字自证是虚拟屏）。
+   * 只在命令确实带了目标 id 时才去问壳侧，保持低成本路径零额外往返。
+   */
+  /**
+   * 块G F2 + F6：一次 `vdInfo` 同时拿回**注册表的两个投影**（displayId 集合 + 别名集合）。
+   *
+   * 为什么合并成一次：控制队列是壳侧单线程（在途请求会被直接拒），两次分别问 vdInfo 不仅多一次
+   * 往返，还会在并发/交叉调用下互相踩。一次取回、两处使用。
+   * 注册表不可达 → 两个集合都为空（fail-closed）。
+   */
+  async registeredVirtualScreens(): Promise<{ ids: number[]; aliases: string[] }> {
+    try {
+      const r = await this.controlExec('vdInfo', {})
+      if (!r.ok) return { ids: [], aliases: [] }
+      const data = (r.data ?? {}) as { screens?: Array<{ alias?: string; displayId?: number; kind?: string }> }
+      const virtual = (data.screens ?? []).filter((s) => s.kind === 'virtual')
+      return {
+        ids: virtual
+          .map((s) => s.displayId)
+          .filter((id): id is number => typeof id === 'number' && Number.isInteger(id) && id > 0),
+        aliases: virtual
+          .map((s) => s.alias)
+          .filter((a): a is string => typeof a === 'string' && a.length > 0),
+      }
+    } catch {
+      return { ids: [], aliases: [] }
+    }
+  }
+
+  async registeredVirtualDisplayIds(): Promise<number[]> {
+    return (await this.registeredVirtualScreens()).ids
+  }
+
+  /**
+   * 块G F6：`dumpsys SurfaceFlinger` 的虚拟屏 **token ↔ 别名** 配对。
+   *
+   * 为什么需要（设备实测真因，见 screen-scope.ts 的 screenTokensFromSfDump）：`screencap -d` 吃的是
+   * **SurfaceFlinger display token**，而壳侧注册表（`vdInfo`）给的是 **DisplayManager displayId**；
+   * 两个 id 空间**不相交**——用 displayId 传 `-d` 对虚拟屏必然 Status -2，用 token 才出图。
+   * 故范围判定必须能核对 token 归属，否则「放行的值取不到图、能取到图的值被拒」。
+   *
+   * **必须先用 grep 收窄**（设备实测，别改回全量）：全量 `dumpsys SurfaceFlinger` 在本机是 31,590 B，
+   * 而虚拟屏段落在 **第 ~9,500 字节之后**，超出壳侧 capture 路径的 8 KiB inline 窗口（其余进 spool
+   * 文件、不回传）⇒ 全量取回**必然**拿不到 `Virtual Display` 行，反查恒空、判定恒拒。
+   * 收窄后只有 25 B 量级，稳稳落在窗口内。
+   *
+   * fail-closed：命令不可达/超时/解析不出 → 返回空数组（判定侧视为无 token 可核对 → 拒绝）。
+   */
+  async shellSfVirtualDisplayTokens(): Promise<Array<{ alias: string; token: string }>> {
+    try {
+      const r = await this.controlExec('shExec', {
+        // 只取「Virtual Display <token>」与其紧跟的 name= 行；输出 ~25 B。
+        command: "dumpsys SurfaceFlinger | grep -E '^(Virtual Display |    name=)'",
+        timeoutMs: 15_000,
+      })
+      if (!r.ok) return []
+      const data = (r.data ?? {}) as Record<string, unknown>
+      const stdout = typeof data.stdout === 'string' ? data.stdout : ''
+      if (data.ok !== true || stdout.length === 0) return []
+      return screenTokensFromSfDump(stdout)
+    } catch {
+      return []
+    }
+  }
+
+  /**
+   * 块G F2：raw shell 命令的屏幕范围复查（三个执行点共用）。
+   *
+   * 与纯 `realScreenAdbCommandDenied` 的区别：命令里带了可解析的目标 display id 且**基础判据确实要拒**
+   * 时，才去问壳侧注册表核对；目标确为虚拟屏 → 放行。低成本路径（范围含 real / 命令不命中命令面 /
+   * 命令无目标屏）零额外往返——不为一条本来就不该拦的命令多打一次 vdInfo。
+   */
+  private async adbCommandScopeDenied(command: string): Promise<string | null> {
+    const base = realScreenAdbCommandDenied(this.screenScope(), command)
+    if (base === null) return null
+    if (adbCommandDisplayTokens(command).length === 0) return base
+    // 块G F2 + F6：两个 id 空间都核对——DisplayManager displayId（F2）与 SurfaceFlinger token（F6）。
+    //
+    // 顺序刻意如此（两个理由，都别改）：
+    //  ① **短路**：先只问注册表（一次 vdInfo，与 F2 既有开销一致）。命中即放行——绝大多数调用是
+    //     displayId 形态，不该为它们多打一次 SurfaceFlinger 往返。
+    //  ② **串行**：控制队列是壳侧单线程（`ControlQueue.enqueue` 在途时直接返回「已有在途的设备控制
+    //     请求」），发 SF 反查前**必须**等注册表那一跳结束。并发发请求会让后一个立即失败 → token
+    //     集合恒空 → 已注册虚拟屏的 token 也被拒（比不修更糟）。
+    const registry = await this.registeredVirtualScreens()
+    const byDisplayId = realScreenAdbCommandDenied(this.screenScope(), command, {
+      virtualDisplayIds: registry.ids,
+    })
+    if (byDisplayId === null) return null
+    // displayId 空间不命中：再核对 SurfaceFlinger token（只有这一路需要额外往返与别名集合）。
+    if (registry.aliases.length === 0) return byDisplayId
+    const sf = await this.shellSfVirtualDisplayTokens()
+    return realScreenAdbCommandDenied(this.screenScope(), command, {
+      virtualDisplayIds: registry.ids,
+      virtualAliases: registry.aliases,
+      sfVirtualDisplays: sf,
+    })
+  }
+
+  /** 同上，公开面（android_shell_exec 工具执行点在类外，需要经服务对象调用）。 */
+  shellCommandScopeDenied(command: string): Promise<string | null> {
+    return this.adbCommandScopeDenied(command)
+  }
+
+  /**
    * 会话级通道门（AI 能否获取——实时）：引擎级授权（三道门+门1）满足后，
    * 按 `exec.agent.session` 的档位 resolve；≠ danger-full-access 即拒绝。
    * 安全方向：会话切回 read-only/workspace-write → 下一次调用立即拒绝。
@@ -705,13 +816,24 @@ export class AndroidPrivilegeService {
           '若确实需要语义树/ref 动作，请由用户在系统设置里开启「DSH 设备控制」无障碍服务。',
       }
     }
-    // review C11 范围复查下沉到执行点：manage 工具层之外（其它插件/直连调用）不得绕过——
-    // a11y 承载的内容/输入 op 全部作用于真实屏前台窗口，范围不含 real 时在执行点拒绝。
-    const scope = this.screenScope()
-    if (controlOpNeedsRealScreen(op) && scope === 'virtual-only') {
-      return {
-        ok: false,
-        error: 'screen-out-of-scope: 用户当前开放屏幕范围为 virtual-only，不允许读取或操作真实屏幕。请由用户在设置中修改范围。',
+    // review C11 范围复查下沉到执行点：manage 工具层之外（其它插件/直连调用）不得绕过。
+    //
+    // 0.14.1 块G（F1）诊断修正：本判据此前是「按 op 名一刀切」——只看
+    // `controlOpNeedsRealScreen(op)` 与用户范围，**从不读 `args.screenId`**，命中后还硬编码
+    // 「不允许读取或操作真实屏幕」。于是范围 virtual-only、屏幕上确有 virtual-1 时，
+    // `snapshot`/`screenshot`（本就带 screenId 且此刻目标是虚拟屏）被判成「读真实屏」而拒绝。
+    // 用户实报的那条自相矛盾报文逐字来自这里——**是文案在撒谎，不是参数在漂移**
+    // （screenId 在 args 里全程都在，manage guard 用的也是完整实参）。
+    //
+    // 正确判据 = **目标屏**，不是 op 名：REAL_SCREEN_CONTROL_OPS 表达的是「这个 op 按设计作用于
+    // 屏幕内容」，而「这一次调用作用于哪块屏」必须由 args.screenId 经注册表解析后判定。
+    // 未知别名 → screen-not-found，未就绪虚拟屏 → screen-not-ready，真实屏+范围不含 real →
+    // screen-out-of-scope：三者都是 fail-closed，放宽的只是「目标确为虚拟屏且范围允许」这一例。
+    if (controlOpNeedsRealScreen(op)) {
+      const requested = typeof args.screenId === 'string' && args.screenId !== '' ? args.screenId : undefined
+      const decision = await this.screenAccessResolved(requested)
+      if (!decision.ok) {
+        return { ok: false, error: decision.reason + ': ' + decision.guidance }
       }
     }
     return this.controlQueue.enqueue(op, args, timeoutMs)
@@ -752,7 +874,8 @@ export class AndroidPrivilegeService {
    */
   async execAdbShell(command: string): Promise<{ ok: boolean; stdout: string; guidance?: string }> {
     // review C11：raw shell 是绕过页面/工具层的执行面——范围不含 real 时真实屏读写命令在此拒绝。
-    const scopeDenied = realScreenAdbCommandDenied(this.screenScope(), command)
+    // 块G F2：命令显式指定了目标屏（`-d <id>`）时按**目标屏**判定，不再按命令词一刀切。
+    const scopeDenied = await this.adbCommandScopeDenied(command)
     if (scopeDenied !== null) return { ok: false, stdout: '', guidance: scopeDenied }
     const r = await this.controlExec('shExec', { command, timeoutMs: 20_000 })
     if (!r.ok) return { ok: false, stdout: '', guidance: r.error }
@@ -769,7 +892,8 @@ export class AndroidPrivilegeService {
    */
   async execAdbLine(line: string): Promise<{ ok: boolean; stdout: string; guidance?: string }> {
     // review C11：screencap+pull / uiautomator dump 等行同样要在执行点复查屏幕范围。
-    const scopeDenied = realScreenAdbCommandDenied(this.screenScope(), line)
+    // 块G F2：`screencap -p -d <虚拟屏 id>` 是**读范围内的屏**，必须与无参 screencap 区分开。
+    const scopeDenied = await this.adbCommandScopeDenied(line)
     if (scopeDenied !== null) return { ok: false, stdout: '', guidance: scopeDenied }
     const translated = translateAdbLine(line)
     if (!translated.ok) return { ok: false, stdout: '', guidance: translated.error }
@@ -1064,7 +1188,8 @@ function tools(svc: AndroidPrivilegeService, shellFace?: { resolve?(spec: Record
         return { ok: false, text: '命令被特权 shell 通道危险检查拦截（系统配置/权限写面一律拒绝；自动审批不豁免）' }
       }
       // review C11：屏幕范围在执行点复查（工具层黑名单之外）——virtual-only 下 screencap/input 等真实屏命令拒绝。
-      const scopeDenied = realScreenAdbCommandDenied(svc.screenScope(), command)
+      // 块G F2：命令带 `-d <id>` 时按**目标屏**判定（目标确为已注册虚拟屏则放行）。
+      const scopeDenied = await svc.shellCommandScopeDenied(command)
       if (scopeDenied !== null) {
         writeAudit({ action: 'shell-exec', args: { command }, result: 'denied-screen-scope' })
         return { ok: false, text: scopeDenied }
@@ -1225,8 +1350,14 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
       if (k === 'turn/end') {
         // D13（§6.5 NT-22）：载荷是 {turn, reason: TurnEndReason}，没有 outcome 字段。
         // 旧实现判 `d?.outcome === 'success'` 恒 false（.live.ndjson 的 turn_end.ok 全灭）。
+        //
+        // 0.14.1 块H（详档 §5.2 选项 C）：除 ok 之外必须**同时**写 kind——壳侧完成态语义标签
+        // 优先消费 `turn_end.kind`（completed/aborted/blocked/error/max-tokens/interrupted），
+        // `ok` 只是兜底。此前只写 ok，于是 ok=false 时壳侧只能显示笼统的「结果未知」，
+        // 无法区分失败/被阻塞/被中断/被取消。kind 与 ok 同源（turnEndKind/turnEndOk 都读 reason.kind），
+        // 未知 reason 一律 `unknown`，绝不映射成 completed（不得把未知当成功）。
         const d = ev.data as { turn?: unknown; reason?: unknown }
-        appendLive(JSON.stringify({ t, s, k: 'turn_end', ok: turnEndOk(d?.reason) }) + '\n')
+        appendLive(JSON.stringify({ t, s, k: 'turn_end', ok: turnEndOk(d?.reason), kind: turnEndKind(d?.reason) }) + '\n')
         return
       }
       if (k === 'session/title') {
