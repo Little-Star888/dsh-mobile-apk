@@ -82,6 +82,20 @@ internal object SnapshotFs {
     }
   }
 
+  /**
+   * 目录字节数（**不跟随符号链接**：快照树里有大量指向同树的链，跟随会把体积算成几倍）。
+   * 用于交换前的空间断言（审查 §7.2-F-4）。不可读的条目按 0 计（宁可低估也不抛）。
+   */
+  fun sizeOf(dir: File): Long {
+    if (!exists(dir)) return 0L
+    if (isSymbolicLink(dir)) return 0L
+    if (dir.isFile) return dir.length()
+    var total = 0L
+    val children = dir.listFiles() ?: return 0L
+    for (child in children) total += sizeOf(child)
+    return total
+  }
+
   fun createDirectories(dir: File) {
     Files.createDirectories(dir.toPath())
   }

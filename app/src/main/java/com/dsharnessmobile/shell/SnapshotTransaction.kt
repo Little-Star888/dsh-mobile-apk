@@ -33,6 +33,8 @@ internal object SnapshotTransaction {
 
   const val STAGE_NAME = ".snapshot-stage"
   const val PREVIOUS_NAME = ".snapshot-previous"
+  /** stage 删不掉时被改名挪开的解压残渣前缀（写点在 EngineManager；回收见 [reclaimResidue]）。 */
+  const val STAGE_ORPHAN_PREFIX = ".snapshot-stage-orphan-"
   const val MARKER_NAME = ".snapshot-transaction"
   private const val TMP_MARKER_NAME = ".snapshot-transaction.tmp"
 
@@ -45,10 +47,27 @@ internal object SnapshotTransaction {
     val moved: List<String> = emptyList(),
   )
 
-  enum class Outcome { NONE, DISCARDED_STAGE, ROLLED_BACK, ROLLED_FORWARD }
+  enum class Outcome { NONE, DISCARDED_STAGE, ROLLED_BACK, ROLLED_FORWARD, ROLLBACK_FAILED }
 
-  /** [fingerprintToCommit] is set when the swap completed but the commit write did not. */
-  data class Recovery(val outcome: Outcome, val fingerprintToCommit: String? = null)
+  /**
+   * 交换前空间不足（审查 §7.2-F-4）。**专门类型**而不是 IOException：调用方要能对它给
+   * 「请清理空间后重试」这类可直接照做的文案，而不是与归档损坏/ENOSPC 混在同一句
+   * 「运行时更新失败」里（§7.2 的 F-7 就是这种「同一句报错多种真因」的形态）。
+   */
+  class InsufficientSpaceException(val requiredBytes: Long, message: String) : IOException(message)
+
+  /**
+   * [fingerprintToCommit] is set when the swap completed but the commit write did not.
+   * [failures] 非空 = 回滚未完整落地（marker 已按 D-3 保留；条目名供诊断）。
+   */
+  data class Recovery(
+    val outcome: Outcome,
+    val fingerprintToCommit: String? = null,
+    val failures: List<String> = emptyList(),
+  )
+
+  /** 回滚结果：[ok]=false 时 [failures] 列出没能恢复的条目（marker 必须保留）。 */
+  data class RollbackResult(val ok: Boolean, val failures: List<String>)
 
   fun markerFile(filesDir: File): File = File(filesDir, MARKER_NAME)
 
@@ -156,7 +175,7 @@ internal object SnapshotTransaction {
    * @param filesDir - 应用私有 files 目录。
    * @returns 实际回收的条目名（供调用方写日志；空 = 无残渣）。
    */
-  fun reclaimResidue(filesDir: File): List<String> {
+  fun reclaimResidue(filesDir: File, now: Long = System.currentTimeMillis()): List<String> {
     val reclaimed = mutableListOf<String>()
     if (SnapshotFs.exists(previousRoot(filesDir))) {
       SnapshotFs.deletePath(previousRoot(filesDir))
@@ -166,7 +185,55 @@ internal object SnapshotTransaction {
       SnapshotFs.deletePath(stageRoot(filesDir))
       if (!SnapshotFs.exists(stageRoot(filesDir))) reclaimed += STAGE_NAME
     }
+    // ── 审查 N-1 / F-9：另两类**只写不回收**的残渣 ────────────────────────────────
+    //
+    // `.snapshot-stage-orphan-<ts>`（EngineManager 在「stage 删不掉」时改名挪开的目录）此前
+    // 只有写点、全仓无回收点；`*.failed-<ts>`（rollback/merge 补偿时把删不净的 live 树改名挪开）
+    // 同样只写不回收。两者都是**全量树副本**（数百 MB 量级），与「失败→留残渣→空间变紧→更易失败」
+    // 形成自我强化（N-1 的原话）。
+    //
+    // 年龄门槛（30 分钟）刻意存在：这两类目录由**正在进行**的回滚/补偿产生，而本函数可能在
+    // 同一轮启动里被调用——没有门槛就会把刚挪开、仍可能被本次恢复引用的目录删掉。
+    // 30 分钟 ≫ 一次刷新（8–12 分钟），也 ≫ 一次启动恢复。
+    for (dir in residueDirs(filesDir, now)) {
+      val before = SnapshotFs.exists(dir)
+      if (!before) continue
+      SnapshotFs.deletePath(dir)
+      if (!SnapshotFs.exists(dir)) reclaimed += dir.name
+    }
     return reclaimed
+  }
+
+  /** 回收年龄门槛：只动「明显不再属于进行中事务」的残渣（见 [reclaimResidue]）。 */
+  private const val RESIDUE_MIN_AGE_MS = 30L * 60L * 1000L
+
+  /**
+   * 扫描三类位置上的残渣目录（纯函数，可单测）：
+   *  - `files/` 与 `files/home/` 与 `files/home/.dsh/` 下的 `*.failed-*`（rollback/补偿挪开的 live 树）；
+   *  - `files/` 下的 `.snapshot-stage-orphan-*`（stage 删不掉时挪开的解压残渣）。
+   *
+   * 为什么只扫这三层：`.failed-*` 的写点只有「live 条目的兄弟位置」，而 live 条目全部落在
+   * `files/usr`、`files/home/<name>`、`files/home/.dsh/<name>` 三处（见 livePath）。不做全树递归 =
+   * 不把用户数据树整个走一遍（回收入口在启动路径上，必须廉价）。
+   */
+  fun residueDirs(filesDir: File, now: Long = System.currentTimeMillis()): List<File> {
+    val out = mutableListOf<File>()
+    val dirs = listOf(filesDir, File(filesDir, "home"), File(filesDir, "home/.dsh"))
+    for (dir in dirs) {
+      val children = dir.listFiles() ?: continue
+      for (child in children) {
+        val name = child.name
+        val isFailed = name.contains(".failed-")
+        val isOrphanStage = dir == filesDir && name.startsWith(STAGE_ORPHAN_PREFIX)
+        if (!isFailed && !isOrphanStage) continue
+        if (!SnapshotFs.exists(child)) continue
+        // 年龄门槛：`<ts>` 后缀是写点时间戳；解析不出时间戳的（老版本命名）不删（保守）。
+        val stamp = name.substringAfterLast('-', "").toLongOrNull() ?: continue
+        if (now - stamp < RESIDUE_MIN_AGE_MS) continue
+        out += child
+      }
+    }
+    return out
   }
 
   /**
@@ -183,9 +250,23 @@ internal object SnapshotTransaction {
     fingerprint: String,
     startedAt: Long,
     onEntry: (String) -> Unit = {},
+    /**
+     * 空间前置检查（审查 §7.2-F-4 / B12）：入参是**本次交换需要保留的可用字节**，
+     * 返回拒绝文案（null = 放行）。注入式而非直接调 Android StatFs，是为了让事务保持纯 JVM 可测
+     * （同 `delete` 注入的既有做法）。
+     */
+    spaceCheck: ((requiredBytes: Long) -> String?)? = null,
   ): List<String> {
     val stagedUsr = File(stagedRoot, "usr")
     if (!SnapshotFs.exists(stagedUsr)) throw IOException("staged runtime is missing usr/")
+    // 空间断言必须在**动第一棵树之前**：换到一半再 ENOSPC 只能靠回滚收拾，而回滚本身也要空间。
+    // 需求 = 2.5 × 解压体量（解压树 + 合并期的 profiles 拷贝 + 余量），见 §7.6-1 的实测口径。
+    if (spaceCheck != null) {
+      val stagedBytes = SnapshotFs.sizeOf(stagedRoot)
+      val required = stagedBytes * 5 / 2
+      val refusal = spaceCheck(required)
+      if (refusal != null) throw InsufficientSpaceException(required, refusal)
+    }
     val previous = previousRoot(filesDir)
     SnapshotFs.deletePath(previous)
     SnapshotFs.createDirectories(previous)
@@ -511,24 +592,56 @@ internal object SnapshotTransaction {
     if (marker.phase == Phase.SWAPPED) {
       return Recovery(Outcome.ROLLED_FORWARD, marker.fingerprint.ifEmpty { null })
     }
-    rollback(filesDir, stagedRoot, usrDir, homeDir, marker)
+    val result = rollback(filesDir, stagedRoot, usrDir, homeDir, marker)
+    if (!result.ok) {
+      // 【D-3 / 审查 §7.7.5】回滚失败**不得无条件清 marker**。
+      //
+      // 旧实现无论回滚成败都 `clearMarker()`：于是半成品树被当成「已恢复」长期使用——
+      // 列表在、能力不在（用户实报的「插件注册了但不真实可用」正是这一步的产物）。
+      // 保留 marker 的语义 = 「这棵树还没收敛」，下次启动先重试回滚；同时把失败明细交回调用方，
+      // 由它在 boot-fail.log 里落结构化字段（recovery=rollback_failed + 失败条目）。
+      return Recovery(Outcome.ROLLBACK_FAILED, null, result.failures)
+    }
     clearMarker(filesDir)
     return Recovery(Outcome.ROLLED_BACK)
   }
 
-  /** Undoes an interrupted swap; leaves the marker in place (the caller clears it). */
-  fun rollback(filesDir: File, stagedRoot: File, usrDir: File, homeDir: File, marker: Marker) {
+  /**
+   * Undoes an interrupted swap; leaves the marker in place (the caller clears it **only on success**).
+   *
+   * 逐条容错（D-3）：单条失败不再让整次回滚伪装成功——失败的条目名被收集起来交回调用方，
+   * 调用方据此保留 marker（下次启动重试）并把明细落进 boot-fail.log。
+   */
+  fun rollback(
+    filesDir: File,
+    stagedRoot: File,
+    usrDir: File,
+    homeDir: File,
+    marker: Marker,
+  ): RollbackResult {
     val previous = previousRoot(filesDir)
     val names = LinkedHashSet<String>()
     names += marker.moved
     // An entry displaced by the first half of a rename pair is journaled, but an
     // entry whose journal write itself was lost is still discoverable here.
     collectDisplacedNames(previous, names)
+    val failures = mutableListOf<String>()
     for (name in names.toList().asReversed()) {
-      rollbackEntry(stagedRoot, name, usrDir, homeDir, previous)
+      try {
+        rollbackEntry(stagedRoot, name, usrDir, homeDir, previous)
+      } catch (t: Throwable) {
+        // 单条失败：记账后继续恢复其余条目（一条坏条目不该让整棵树停在半成品）。
+        failures += name + " (" + t.javaClass.simpleName + ")"
+      }
     }
-    SnapshotFs.deletePath(previous)
-    SnapshotFs.deletePath(stagedRoot)
+    // 只有整次回滚成功才清残渣：失败时 previous 仍是唯一回滚源，删了就再也回不去。
+    return if (failures.isEmpty()) {
+      SnapshotFs.deletePath(previous)
+      SnapshotFs.deletePath(stagedRoot)
+      RollbackResult(true, emptyList())
+    } else {
+      RollbackResult(false, failures)
+    }
   }
 
   private fun replaceEntry(

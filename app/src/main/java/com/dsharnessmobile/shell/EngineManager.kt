@@ -124,7 +124,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
       val discarded = mutableListOf<String>()
       SnapshotFs.deletePath(stage) { f, ex -> discarded += (f.name + " (" + ex.javaClass.simpleName + ")") }
       if (SnapshotFs.exists(stage)) {
-        val orphan = File(filesDir, ".snapshot-stage-orphan-" + startedAt)
+        val orphan = File(filesDir, SnapshotTransaction.STAGE_ORPHAN_PREFIX + startedAt)
         val movedAside = try {
           SnapshotFs.move(stage, orphan); true
         } catch (t: Throwable) {
@@ -173,6 +173,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
         fingerprint = fingerprint,
         startedAt = startedAt,
         onEntry = { onStage("正在更新 " + it) },
+        spaceCheck = { required -> insufficientSpaceReason(filesDir, required) },
       )
       // #214：profiles 合并期间的工厂语义纠正逐条留档（升级现场可追溯，不只依赖 UI 文案）。
       for (note in swapNotes) LogCollector.log(TAG, "profile patch reconciled during swap: " + note)
@@ -219,6 +220,12 @@ class EngineManager(private val context: Context, private val pickToken: String?
    */
   @Volatile
   var lastRefreshFailure: Throwable? = null
+
+  /**
+   * 最近一次「启动恢复未收敛」的明细（D-3：回滚失败时 marker 保留，下次启动重试）。
+   * 非空即表示**当前这棵树可能不完整**——启动自检与诊断面据此如实上报，而不是当作正常启动。
+   */
+  var pendingRecoveryFailure: String? = null
     private set
 
   /**
@@ -295,6 +302,39 @@ class EngineManager(private val context: Context, private val pickToken: String?
         SnapshotTransaction.finish(context.filesDir)
         Log.w(TAG, "interrupted refresh completed (runtime was already activated)")
       }
+      // 【D-3 / 审查 §7.7.5】回滚未完整落地：marker **已保留**（下次启动先重试），
+      // 并把失败条目写进诊断面——用户实报的「插件注册了但不真实可用」正是「半成品树被当成
+      // 已恢复长期使用」的下游症状（§7.7），所以这条必须可归因，不能只留一行 logcat。
+      SnapshotTransaction.Outcome.ROLLBACK_FAILED -> {
+        val detail = recovery.failures.joinToString(", ")
+        Log.e(TAG, "interrupted refresh rollback incomplete; recovery marker retained: " + detail)
+        LogCollector.log(TAG, "snapshot recovery incomplete (retry on next start): " + detail)
+        pendingRecoveryFailure = detail
+      }
+    }
+  }
+
+  /**
+   * 交换前空间断言（审查 §7.2-F-4 / B12）：把 StatFs 事实翻译成**可直接照做**的文案。
+   *
+   * 为什么必须有它：`refreshSnapshot`/`swap` 全程没有任何空间前置检查，空间不足时解压/合并
+   * 中途 ENOSPC → 报「运行时更新失败」，用户与维护者都看不出真因（§7.2 的 F-7 形态）。
+   * 这也是唯一一条「重启未必好、且会重复失败」的机制。
+   * @return 拒绝文案；null = 空间充足。
+   */
+  private fun insufficientSpaceReason(filesDir: File, requiredBytes: Long): String? {
+    return try {
+      val stat = android.os.StatFs(filesDir.absolutePath)
+      val free = stat.availableBytes
+      if (free >= requiredBytes) return null
+      val needMb = requiredBytes / (1024 * 1024)
+      val freeMb = free / (1024 * 1024)
+      "存储空间不足：运行时更新需要约 " + needMb + " MB 可用空间，当前仅 " + freeMb + " MB。" +
+        "请清理存储（开发者选项 → 清除运行时缓存，或删除不需要的文件）后重试；本次更新未改动现有运行时。"
+    } catch (t: Throwable) {
+      // 拿不到 StatFs 事实（异常挂载等）：不因测量失败而阻断更新，但留日志以便事后归因。
+      Log.w(TAG, "snapshot space precheck unavailable", t)
+      null
     }
   }
 

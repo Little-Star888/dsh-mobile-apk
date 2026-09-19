@@ -1,6 +1,6 @@
 {
   "$comment": "Kotlin 单测基线（0.14.1）：只许升不许降。键=测试类名（=源文件名去 .kt），值=用例数。逐类记录而非只记总数——防「删 A 类用例 + 加 B 类用例」净零抵消。升档：node scripts/check-kotlin-test-count.mjs --update-baseline（会拒绝降档）。",
-  "totalTests": 433,
+  "totalTests": 449,
   "testsByClass": {
     "AcceptRoutingTest": 7,
     "AdbLiveProbeTest": 4,
@@ -11,7 +11,7 @@
     "BootFailLogTest": 20,
     "BootPageConsoleRouteTest": 10,
     "BrowserHostCleartextConsistencyTest": 3,
-    "BrowserHostNavigationPolicyTest": 4,
+    "BrowserHostNavigationPolicyTest": 8,
     "BrowserOverlayContractTest": 4,
     "BrowserOverlayPolicyTest": 9,
     "CallSiteContractTest": 28,
@@ -38,9 +38,10 @@
     "ProcIoTest": 5,
     "ScreenScopeTest": 4,
     "ShellOpsScopeTargetTest": 11,
+    "ShellOpsScreenCommandFixtureTest": 8,
     "SnapshotExtractorTest": 1,
     "SnapshotFileModeTest": 1,
-    "SnapshotTransactionTest": 24,
+    "SnapshotTransactionTest": 28,
     "SnapshotUserDataTest": 5,
     "UndoGateDecisionTest": 11,
     "UpdateCheckerSuffixTest": 3,

@@ -817,4 +817,125 @@ class SnapshotTransactionTest {
             name: '@dsh-android/dsh-android-manage'
     """.trimIndent() + "\n"
   }
+
+  // ── 0.14.1 审查 D-3 / §7.7.5：回滚失败**不得无条件清 marker** ──────────────────────
+  //
+  // 缺陷形态：旧 recover() 无论回滚成败都 clearMarker() ⇒ 半成品树被当成「已恢复」长期使用，
+  // 下游症状正是用户实报的「插件注册了但不真实可用」（列表在、能力不在，§7.7）。
+  @Test
+  fun recoveryKeepsTheMarkerWhenRollbackCouldNotFinish() {
+    val filesDir = tempDir()
+    try {
+      // 构造「回滚这一条必定失败」的形态：live 路径的**父级是一个普通文件** ⇒
+      // rollbackEntry 里 `move(displaced, live)` 的 createDirectories 必然抛错。
+      // （不用「只读目录/占用句柄」这类平台相关手法：CI 跑 Linux、本机跑 Windows，两者语义不同。）
+      File(filesDir, "live").writeText("not-a-directory")
+      val stage = SnapshotTransaction.stageRoot(filesDir)
+      SnapshotFs.createDirectories(stage)
+      val previous = SnapshotTransaction.previousRoot(filesDir)
+      File(previous, "usr/bin").mkdirs()
+      File(previous, "usr/bin/node").writeText("old-node")
+      SnapshotTransaction.writeMarker(
+        filesDir,
+        SnapshotTransaction.Marker(SnapshotTransaction.Phase.SWAPPING, "fp1", 1L, listOf("usr")),
+      )
+
+      val recovery = SnapshotTransaction.recover(filesDir, stage, File(filesDir, "live/usr"), File(filesDir, "live/home"))
+
+      assertEquals(SnapshotTransaction.Outcome.ROLLBACK_FAILED, recovery.outcome)
+      assertTrue("失败条目必须如实回报（供 boot-fail.log 归因）", recovery.failures.isNotEmpty())
+      assertTrue("marker 必须保留（下次启动重试回滚，而不是把半成品当已恢复）",
+        SnapshotTransaction.readMarker(filesDir) != null)
+    } finally {
+      SnapshotFs.deletePath(filesDir)
+    }
+  }
+
+  @Test
+  fun rollbackReportsOkSoTheCallerCanDecideAboutTheMarker() {
+    val filesDir = tempDir()
+    try {
+      val live = File(filesDir, "live").apply { mkdirs() }
+      writeRuntime(live, "live-node", "live-profile")
+      val stage = SnapshotTransaction.stageRoot(filesDir)
+      SnapshotFs.createDirectories(stage)
+      val previous = SnapshotTransaction.previousRoot(filesDir)
+      writeRuntime(previous, "old-node", "old-profile")
+      val marker = SnapshotTransaction.Marker(
+        SnapshotTransaction.Phase.SWAPPING, "fp1", 1L, listOf("usr", "home/.dsh/profiles"),
+      )
+      val result = SnapshotTransaction.rollback(filesDir, stage, File(live, "usr"), File(live, "home"), marker)
+      assertTrue("成功回滚必须回报 ok（调用方据此决定清 marker）", result.ok)
+      assertTrue(result.failures.isEmpty())
+    } finally {
+      SnapshotFs.deletePath(filesDir)
+    }
+  }
+
+  // ── 0.14.1 审查 N-1 / F-9：只写不回收的两类残渣 ────────────────────────────────
+  @Test
+  fun residueReclaimCoversFailedAndOrphanStageDirectoriesWithAnAgeGate() {
+    val filesDir = tempDir()
+    try {
+      val now = 1_800_000_000_000L
+      val old = now - 31L * 60L * 1000L        // 超过 30 分钟门槛
+      val fresh = now - 60L * 1000L            // 1 分钟前（可能属于进行中事务）
+      // 三类残渣：`.failed-<ts>`（rollback 挪开的 live 树，三层位置各一）
+      val usrFailed = File(filesDir, "usr.failed-$old").apply { mkdirs() }
+      File(usrFailed, "bin/node").apply { parentFile?.mkdirs() }.writeText("x")
+      val dshFailed = File(filesDir, "home/.dsh/profiles.failed-$old").apply { mkdirs() }
+      val orphanStage = File(filesDir, SnapshotTransaction.STAGE_ORPHAN_PREFIX + old).apply { mkdirs() }
+      // 新鲜残渣：必须**不动**（可能仍被进行中的恢复引用）
+      val freshFailed = File(filesDir, "usr.failed-$fresh").apply { mkdirs() }
+      // 无时间戳的（老命名）：保守不动
+      val noStamp = File(filesDir, "usr.failed-legacy").apply { mkdirs() }
+
+      val reclaimed = SnapshotTransaction.reclaimResidue(filesDir, now)
+
+      assertFalse("老 .failed-* 必须被回收（旧实现只认 previous/stage）", usrFailed.exists())
+      assertFalse("home/.dsh 下的 .failed-* 同样回收", dshFailed.exists())
+      assertFalse("孤儿 stage 必须被回收（旧实现只有写点、无回收点）", orphanStage.exists())
+      assertTrue("新鲜残渣不得动（30 分钟年龄门槛）", freshFailed.exists())
+      assertTrue("解析不出时间戳的命名保守不动", noStamp.exists())
+      assertEquals(3, reclaimed.size)
+    } finally {
+      SnapshotFs.deletePath(filesDir)
+    }
+  }
+
+  // ── 0.14.1 审查 §7.2-F-4 / B12：交换前的空间断言 ──────────────────────────────
+  @Test
+  fun swapRefusesToStartWhenTheSpacePrecheckFailsAndLeavesTheTreeUntouched() {
+    val filesDir = tempDir()
+    try {
+      val live = File(filesDir, "live").apply { mkdirs() }
+      writeRuntime(live, "old-node", "old-profile")
+      val stage = SnapshotTransaction.stageRoot(filesDir)
+      File(stage, "usr/bin").mkdirs()
+      File(stage, "usr/bin/node").writeText("new-node-内容")
+      var asked = 0L
+      val failure = try {
+        SnapshotTransaction.swap(
+          filesDir = filesDir,
+          stagedRoot = stage,
+          usrDir = File(live, "usr"),
+          homeDir = File(live, "home"),
+          preservedNames = preserved,
+          fingerprint = "fp2",
+          startedAt = 2L,
+          spaceCheck = { required -> asked = required; "空间不足" },
+        )
+        null
+      } catch (t: SnapshotTransaction.InsufficientSpaceException) {
+        t
+      }
+      assertTrue("空间不足必须抛专门类型（调用方据此给可照做的文案）", failure != null)
+      assertTrue("需求按 2.5× 解压体量算（实测口径）", asked > 0)
+      assertEquals("空间不足时**不得动 live 树**", "old-node", File(live, "usr/bin/node").readText())
+      assertNull("也不得留下 marker（事务根本没开始）", SnapshotTransaction.readMarker(filesDir))
+    } finally {
+      SnapshotFs.deletePath(filesDir)
+    }
+  }
+
 }
