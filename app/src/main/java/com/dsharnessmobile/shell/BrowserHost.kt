@@ -15,6 +15,7 @@ import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -27,10 +28,12 @@ import androidx.webkit.WebViewFeature
 import org.json.JSONArray
 import org.json.JSONObject
 import org.json.JSONTokener
+import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
@@ -70,6 +73,14 @@ internal class BrowserHost(
     /** 非会话调用（旧调用/设备脚本）的工作台键：与任何真实会话隔离，保持改造前的可用性。 */
     private const val ANONYMOUS_SESSION = "__anonymous__"
     private const val MAX_TABS = 8
+    /**
+     * 请求级过滤写进 logcat 的**条数上限**（审查 S-4）。
+     *
+     * 为什么必须有上限：被拦请求的数量由**页面**决定 —— 一个恶意/失控页面可以刷出成千上万条回环
+     * 探测请求，没有上限就是把 logcat 与诊断文件交给它写。超出后只累加计数
+     * （`status().blockedRequests`），行为仍如实可观测。
+     */
+    private const val BLOCKED_REQUEST_LOG_LIMIT = 20
     private const val SNAPSHOT_MAX_NODES = 400
     /** 无活动标签页时的只读占位（避免把“没有页面”误判成“有页面”） */
     private val ORPHAN_GENERATION = AtomicLong(0)
@@ -125,6 +136,15 @@ internal class BrowserHost(
     var pageHeight = 0
     var pageDevicePixelRatio = 0.0
     var errorPageUrl: String? = null
+    /**
+     * 被**请求级过滤**拦下的子资源计数（审查 S-4）。
+     *
+     * 为什么要有这个计数：拦截动作发生在 `shouldInterceptRequest`（后台线程），既不改页面状态、
+     * 也不产生 onReceivedError —— 如果只写 logcat，模型与面板都无从知道「页面少了东西」，
+     * 现场排查只能靠人捞日志。计数进 `status()` 后可被 `browser_state` 直接看到。
+     * 计数用 AtomicInteger：该方法在 WebView 的 IO 线程池上并发调用。
+     */
+    val blockedRequests = AtomicInteger(0)
   }
 
   /**
@@ -605,6 +625,37 @@ internal class BrowserHost(
           return true
         }
 
+        /**
+         * 请求级过滤（审查 S-4）：顶层导航串被准入检查过，**不代表页面发出去的子请求也被查过**。
+         *
+         * 旧实现的缺口：全仓没有 `shouldInterceptRequest`，于是放行后的任意站点可以用
+         * `<img>/<iframe>/<script>/<form>/fetch` 去打 `127.0.0.1:3080`（引擎同源，且引擎的鉴权
+         * cookie 就在**进程级** CookieManager 里）、`192.168.*`、`169.254.169.254`。
+         * 壳侧此前零防线，唯一拦截在引擎侧（`sec-fetch-site` 与 SameSite）——两者都不是本仓可控属性。
+         *
+         * 返回非 null 即阻断（403 + 空体）。判定是纯函数（[BrowserHostNavigationPolicy.blockedRequestReason]），
+         * 与准入共用同一套主机规范化，避免两层口径分裂。
+         */
+        override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
+          val url = request.url?.toString().orEmpty()
+          val reason = BrowserHostNavigationPolicy.blockedRequestReason(url)
+          if (reason == null) return null
+          val count = tab.blockedRequests.incrementAndGet()
+          // 前若干条进 logcat（稳定 tag，便于现场 `logcat | grep dsh-browser` 定性）；
+          // 之后的只计数——攻击者可控的页面可以刷出成千上万条，日志面不能被它撑爆。
+          if (count <= BLOCKED_REQUEST_LOG_LIMIT) {
+            android.util.Log.w("dsh-browser", "blocked subresource ($reason): $url")
+          }
+          return WebResourceResponse(
+            "text/plain",
+            "utf-8",
+            403,
+            "Blocked",
+            emptyMap(),
+            ByteArrayInputStream(ByteArray(0)),
+          )
+        }
+
         override fun onPageStarted(view: WebView, startedUrl: String, favicon: android.graphics.Bitmap?) {
           // 内置错误页守卫（0.14.0 设备实锤的真缺陷）：错误页用 loadDataWithBaseURL(null, ...) 载入，
           // 其文档 URL 是 **about:blank**，**不是** data: ——所以只判 data: 的旧守卫会漏掉它：
@@ -876,6 +927,8 @@ internal class BrowserHost(
       .put("tabId", activeTabId ?: "")
       .put("tabs", tabSummaries())
       .put("tabCount", tabs.size)
+      // 请求级过滤计数（审查 S-4）：非 0 表示本页有子资源被拒（模型/面板据此知道「页面少了东西」）。
+      .put("blockedRequests", activeTab()?.blockedRequests?.get() ?: 0)
       .put("reason", lastError)
   }
 
