@@ -89,13 +89,38 @@ async function drive(toolName, args, datas) {
   return { tool, value, calls }
 }
 
+/**
+ * 同 [drive]，但先在同一实例上跑一次 snapshot —— click/type/press 的前置是「必须先有 snapshot」
+ * （ref 记忆是**实例级**的，而 drive() 每次重新 apply() 都会重置它）。
+ */
+async function driveWithSnapshotPrimer(toolName, args, datas) {
+  const { face, calls } = makeFace({
+    ...datas,
+    [BROWSER_OPS.js]: {
+      url: OK_URL, title: 'Example Domain', pageGeneration: 1,
+      nodes: [{ ref: 'bx1', role: 'link', name: 'a' }],
+    },
+  })
+  const { byName } = applyBrowser(face)
+  const primer = byName(BROWSER_TOOLS.snapshot)
+  if (primer !== undefined) await primer.execute({}, EXEC)
+  const tool = byName(toolName)
+  assert.ok(tool, '工具必须注册：' + toolName)
+  const value = await tool.execute(args, EXEC)
+  assert.ok(calls.length > 0, toolName + ' 的 execute 必须真的调用壳侧控制面（夹具未被使用 = 空转）')
+  return { tool, value, calls }
+}
+
 /** 取渲染文本（工具层 render 是模型唯一能看到的内容）。 */
 const renderedText = (tool, value) => tool.output.render({}, value).map((b) => b.text).join('\n')
 
 /** 按参数 schema 造最小实参（只补 required）。两种方言都吃：源码属性级 required:true 与
  *  归一化后的顶层 required:['x']（defineTool 编译后是后者）。 */
 function requiredArgs(tool, url) {
-  const props = tool.parameters ?? {}
+  // 方言归一：defineTool 编译后是 `{ type, properties, required }`，而个别工具仍是属性级
+  // `required: true`。只读顶层会把「properties 下的 ref/text/key」全漏掉 ⇒ 参数永远补不齐、
+  // 通用判据对这些工具**结构性跑不起来**（本轮实测：click/type 因缺 ref 直接抛 INVALID_ARGS）。
+  const props = tool.parameters?.properties ?? tool.parameters ?? {}
   const requiredArray = Array.isArray(tool.parameters?.required) ? new Set(tool.parameters.required) : null
   const requiredKeys = new Set([
     ...Object.entries(props).filter(([, prop]) => prop?.required === true).map(([k]) => k),
@@ -260,8 +285,8 @@ test('可执行判据：凡 output.schema 声明 loadState 的工具，render �
   assert.ok(subject.length >= 2, '声明 loadState 的工具应至少 2 个（browser_open / browser_navigate），实际 ' + subject.length)
 
   for (const tool of subject) {
-    const fail = await drive(tool.name, requiredArgs(tool, FAIL_URL), stateStub(FAILED_STATE))
-    const ok = await drive(tool.name, requiredArgs(tool, OK_URL), stateStub(LOADED_STATE))
+    const fail = await driveWithSnapshotPrimer(tool.name, requiredArgs(tool, FAIL_URL), stateStub(FAILED_STATE))
+    const ok = await driveWithSnapshotPrimer(tool.name, requiredArgs(tool, OK_URL), stateStub(LOADED_STATE))
     const failText = renderedText(tool, fail.value)
     const okText = renderedText(tool, ok.value)
     assert.notEqual(failText, okText, tool.name + '：loaded 与 error 的 render 输出必须不同（语义判据，非文本在场）')

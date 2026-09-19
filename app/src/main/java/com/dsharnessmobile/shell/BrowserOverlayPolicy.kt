@@ -31,7 +31,11 @@ package com.dsharnessmobile.shell
 internal object BrowserOverlayPolicy {
 
   /** 舞台下推的保鲜期（ms）：侧栏面板的下推周期为 300ms，取 5 倍。 */
-  const val STAGE_BOUNDS_TTL_MS = 1_500L
+  // 审查 N-3：TTL 必须 **> `onMain` 的主线程预算（2s）**，否则主线程一忙（冷启动建页、截图 PNG
+  // 编码、recycleView 重建）就会让「面板下推」的消息排在看门狗之后执行 ⇒ 在场的覆盖层被判
+  // 「发布者已消失」→ 停画一下再回来（低端机上表现为「侧栏浏览器偶尔闪一下」）。
+  // 取 4s = 2× 预算，且仍是面板下推周期（300ms）的 13 倍——发布者真消失时收敛依然很快。
+  const val STAGE_BOUNDS_TTL_MS = 4_000L
 
   /** 保鲜看门狗周期（ms）：TTL 过期后最多再晚一拍停画。 */
   const val STAGE_BOUNDS_WATCHDOG_MS = 500L

@@ -560,6 +560,9 @@ internal class BrowserHost(
   }
 
   private fun disposeView() {
+    // 审查 N-2：看门狗此前只在 destroy() 摘表，disposeView()（close/关最后一页走到）不摘 ⇒
+    // browserClose 之后仍每 500ms 唤醒主线程空转。这里补摘（幂等：removeCallbacks 对未挂表是空操作）。
+    root.removeCallbacks(boundsWatchdog)
     // browserClose 的语义 = 关闭**当前会话**的工作台（销毁它的全部页面与 renderer）。
     // 复用 dropWorkspace，避免「同一件事两份实现」——早先这里是 dropWorkspace 的重复副本，
     // 改一处漏一处是这类状态的经典回归源。
@@ -863,7 +866,10 @@ internal class BrowserHost(
           applyVisibility()
         }
       }
-      root.postDelayed(this, BrowserOverlayPolicy.STAGE_BOUNDS_WATCHDOG_MS)
+      // 审查 N-2：没有工作台（或没有可见工作台）时不再自续 —— 看门狗守的是「发布者已不在场」，
+      // 而「一个页面都没有」不产生任何停画决策；继续每 500ms 唤醒主线程只是纯开销。
+      val stillNeeded = workspaces.values.any { it.stageVisible || it.requestedVisible }
+      if (stillNeeded) root.postDelayed(this, BrowserOverlayPolicy.STAGE_BOUNDS_WATCHDOG_MS)
     }
   }
 
@@ -1403,7 +1409,11 @@ a{display:inline-block;margin-top:16px;padding:10px 20px;border-radius:8px;backg
           val nodeCount = nodes.length()
           done(JSONObject()
             .put("ok", true)
-            .put("tabId", TAB_ID)
+            // 审查 §3.2-S7：此前恒回报常量 "tab-1"——多页签时**是错值**（在 tab-3 上取快照也说是
+            // tab-1），而工具层把它写进 lastSnapshot.tabId 用于后续动作归因，于是「点错页」在回执层
+            // 完全不可见（还被两道防线同时遮蔽：schema 的 NOT_RENDERED 白名单 + 壳侧 resolveRef 只校验
+            // pageGeneration/ref 不校验 tab）。这里取当前活动页的真实 id。
+            .put("tabId", activeTab()?.id ?: TAB_ID)
             .put("surface", "browser")
             .put("pageGeneration", startedGeneration)
             .put("url", payload.optString("url", url))

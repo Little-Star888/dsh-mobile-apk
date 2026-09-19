@@ -1,6 +1,8 @@
 package com.dsharnessmobile.shell
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Assert.assertNull
 import org.junit.Test
 
@@ -117,5 +119,24 @@ class BrowserHostNavigationPolicyTest {
     )) {
       assertNull("不得误拦：$value", BrowserHostNavigationPolicy.blockedRequestReason(value))
     }
+  }
+
+  // ── 审查 §3.1-C3：jsString 必须转义 U+2028/U+2029（Chromium < 92 上是 SyntaxError） ──────
+  //
+  // 缺陷形态：`JSONObject.quote` 只处理引号/反斜杠与控制字符（< 0x20），**不转义行分隔符**；
+  // 而 ES2019 之前 U+2028/U+2029 出现在字符串字面量里即语法错误 —— 模型输入一段含行分隔符的正文时
+  // 整段注入脚本解析失败，回执却报 `stale-ref`（与真因毫无关系的错误码）。
+  @Test
+  fun javascriptStringLiteralsEscapeLineSeparators() {
+    val lineSeparator = "\u2028"
+    val paragraphSeparator = "\u2029"
+    for (code in listOf(lineSeparator, paragraphSeparator)) {
+      val escaped = jsString("a" + code + "b")
+      assertFalse("注入字面量里不得出现裸行分隔符：$escaped", escaped.contains(code))
+      assertTrue("必须写成 uXXXX 转义序列（反斜杠 u 打头）：$escaped", escaped.contains("\\u20"))
+    }
+    // 反向对照：普通文本不得被这次转义改变（否则所有注入脚本都会变形）。
+    assertEquals("\"aéb\"", jsString("aéb"))
+    assertEquals("\"中文\"", jsString("中文"))
   }
 }

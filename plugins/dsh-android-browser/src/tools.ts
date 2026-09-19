@@ -95,7 +95,10 @@ function renderSnapshotNodes(nodes: unknown[], budget = 120): string {
     const node = raw as Record<string, unknown>
     const ref = typeof node.ref === 'string' ? node.ref : ''
     const role = typeof node.role === 'string' && node.role !== '' ? node.role : 'node'
-    const name = typeof node.name === 'string' ? node.name.replace(/\\s+/g, ' ').trim() : ''
+    // 审查 N-12：旧写法是 `/\\s+/g`（笔误：匹配「反斜杠 + s」，不匹配任何空白）——页面可控的
+    // 节点名里的换行不会被折叠，可在模型看到的快照清单里**插入伪造行**（本行上方的注释本来就
+    // 声称做了这件事）。必须是 `\s+`。
+    const name = typeof node.name === 'string' ? node.name.replace(/\s+/g, ' ').trim() : ''
     const flags = node.inView === false ? ' [off-screen]' : ''
     const disabled = node.disabled === true ? ' [disabled]' : ''
     const label = name === '' ? '' : ' "' + name.replace(/"/g, "'").slice(0, 80) + '"'
@@ -400,7 +403,7 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
           tabId: openedTabId,
           url: typeof state.url === 'string' ? state.url : url,
           title: typeof state.title === 'string' ? state.title : '',
-          loadState: typeof state.loadState === 'string' ? state.loadState : 'navigating',
+          loadState: typeof state.loadState === 'string' ? state.loadState : 'unknown',
           // issue #232：壳侧 status() 的 reason（BrowserHost.kt:818 `lastError`，如 `load-error:-1`）
           // 此前被整条丢弃 —— 回执既不知道失败、也无法诊断。整键缺席而非空串（lossless JSON 纪律）。
           ...(typeof state.reason === 'string' && state.reason !== '' ? { reason: state.reason } : {}),
@@ -487,8 +490,14 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
           url: { type: 'string' },
           changed: { type: 'boolean' },
           pageGeneration: { type: 'number' },
+          // N-14（issue #232 同族残留）：点击**会引发导航**（链接/按钮提交），回执必须能反映落点状态，
+          // 否则「点完仍然是错误页」与「点完正常」在回执上长得一样。schema 不声明即被通用判据豁免——见 K-2。
+          loadState: { type: 'string' },
+          title: { type: 'string' },
+          reason: { type: 'string' },
         }),
-        render: (_args, v: Record<string, unknown>) => [{ type: 'text', text: '已点击（' + String(v.url) + '）' }],
+        render: (_args, v: Record<string, unknown>) => [{ type: 'text', text: (loadStateOf(v) === 'error' ? '点击后页面失败 ' : '已点击 ') + String(v.url)
+          + renderTitle(v) + renderLoadState(v) }],
       },
       execute: async ({ ref }: { ref: string }, exec) => {
         const session = gate(exec)
@@ -506,6 +515,9 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
           url: typeof state.url === 'string' ? state.url : '',
           changed: result.data.changed === true,
           pageGeneration: pageGenerationOf({ ...state, ...result.data }),
+          loadState: typeof state.loadState === 'string' ? state.loadState : 'unknown',
+          title: typeof state.title === 'string' ? state.title : '',
+          ...(typeof state.reason === 'string' && state.reason !== '' ? { reason: state.reason } : {}),
         } as never
       },
     }),
@@ -522,11 +534,16 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
           url: { type: 'string' },
           value: { type: 'string' },
           pageGeneration: { type: 'number' },
+          // N-14：输入同样可能引发导航（表单提交），与 click 同一判据。
+          loadState: { type: 'string' },
+          title: { type: 'string' },
+          reason: { type: 'string' },
         }),
         // url 此前 schema 已声明却从不渲染（G2a-4 实测命中）：输入后模型看不到页面是否被跳转
         // （表单提交类输入会引发导航），也就无法判断该不该重新 snapshot。
-        render: (_args, v: Record<string, unknown>) => [{ type: 'text', text: '已输入文本（当前值 ' + String(v.value).slice(0, 40)
-          + (typeof v.url === 'string' && v.url !== '' ? '，当前页 ' + v.url : '') + '）' }],
+        render: (_args, v: Record<string, unknown>) => [{ type: 'text', text: (loadStateOf(v) === 'error' ? '输入后页面失败 ' : '已输入文本 ') + '（当前值 ' + String(v.value).slice(0, 40)
+          + (typeof v.url === 'string' && v.url !== '' ? '，当前页 ' + v.url : '') + '）'
+          + renderTitle(v) + renderLoadState(v) }],
       },
       execute: async ({ ref, text, replace }: { ref: string; text: string; replace?: boolean }, exec) => {
         const session = gate(exec)
@@ -540,11 +557,15 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
           kind: 'text', ref, text, replace: replace !== false, pageGeneration: memory.pageGeneration,
         }, 15_000)
         if (!result.ok) return denied(result) as never
+        const afterType = await stateOf()
         return {
           ok: true,
           url: typeof result.data.url === 'string' ? result.data.url : '',
           value: typeof result.data.value === 'string' ? result.data.value : '',
           pageGeneration: pageGenerationOf(result.data),
+          loadState: typeof afterType.loadState === 'string' ? afterType.loadState : 'unknown',
+          title: typeof afterType.title === 'string' ? afterType.title : '',
+          ...(typeof afterType.reason === 'string' && afterType.reason !== '' ? { reason: afterType.reason } : {}),
         } as never
       },
     }),
@@ -556,8 +577,13 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
         schema: objectSchema({
           url: { type: 'string' },
           canGoBack: { type: 'boolean' },
+          // N-14：Enter 会提交表单/触发导航，回执同样必须能反映落点状态。
+          loadState: { type: 'string' },
+          title: { type: 'string' },
+          reason: { type: 'string' },
         }),
-        render: (_args, v: Record<string, unknown>) => [{ type: 'text', text: '已发送按键（' + String(v.url) + '）' }],
+        render: (_args, v: Record<string, unknown>) => [{ type: 'text', text: (loadStateOf(v) === 'error' ? '按键后页面失败 ' : '已发送按键 ') + String(v.url)
+          + renderTitle(v) + renderLoadState(v) }],
       },
       execute: async ({ key }: { key: string }, exec) => {
         const session = gate(exec)
@@ -570,6 +596,9 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
           ok: true,
           url: typeof state.url === 'string' ? state.url : '',
           canGoBack: state.canGoBack === true,
+          loadState: typeof state.loadState === 'string' ? state.loadState : 'unknown',
+          title: typeof state.title === 'string' ? state.title : '',
+          ...(typeof state.reason === 'string' && state.reason !== '' ? { reason: state.reason } : {}),
         } as never
       },
     }),
@@ -724,7 +753,7 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
           ok: true,
           url: typeof state.url === 'string' ? state.url : url,
           title: typeof state.title === 'string' ? state.title : '',
-          loadState: typeof state.loadState === 'string' ? state.loadState : 'navigating',
+          loadState: typeof state.loadState === 'string' ? state.loadState : 'unknown',
           ...(typeof state.reason === 'string' && state.reason !== '' ? { reason: state.reason } : {}),
         } as never
       },
@@ -760,7 +789,7 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
           ok: true,
           url: typeof state.url === 'string' ? state.url : '',
           canGoBack: state.canGoBack === true,
-          loadState: typeof state.loadState === 'string' ? state.loadState : 'navigating',
+          loadState: typeof state.loadState === 'string' ? state.loadState : 'unknown',
           title: typeof state.title === 'string' ? state.title : '',
           ...(typeof state.reason === 'string' && state.reason !== '' ? { reason: state.reason } : {}),
         } as never
@@ -794,7 +823,7 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
           ok: true,
           url: typeof state.url === 'string' ? state.url : '',
           canGoForward: state.canGoForward === true,
-          loadState: typeof state.loadState === 'string' ? state.loadState : 'navigating',
+          loadState: typeof state.loadState === 'string' ? state.loadState : 'unknown',
           title: typeof state.title === 'string' ? state.title : '',
           ...(typeof state.reason === 'string' && state.reason !== '' ? { reason: state.reason } : {}),
         } as never
@@ -826,7 +855,7 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
         return {
           ok: true,
           url: typeof state.url === 'string' ? state.url : '',
-          loadState: typeof state.loadState === 'string' ? state.loadState : 'navigating',
+          loadState: typeof state.loadState === 'string' ? state.loadState : 'unknown',
           title: typeof state.title === 'string' ? state.title : '',
           ...(typeof state.reason === 'string' && state.reason !== '' ? { reason: state.reason } : {}),
         } as never
@@ -1011,7 +1040,16 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
           height: { type: 'number' },
           health: { type: 'string' },
         }),
-        render: (_args: unknown, v: Record<string, unknown>) => [{ type: 'text', text: '截图已保存：' + String(v.path) }],
+        render: (_args: unknown, v: Record<string, unknown>) => {
+          const path = typeof v.path === 'string' ? v.path : ''
+          // N-14：旧回执在 path 为空时仍渲染「截图已保存：」——把「没有文件」说成已保存
+          // （与 issue #232「回执与事实相反」同形）。
+          if (path === '') {
+            return [{ type: 'text', text: '截图失败：壳侧未返回文件路径（' + String(v.health ?? 'unknown') + '）' }]
+          }
+          const health = typeof v.health === 'string' && v.health !== '' ? v.health : 'unknown'
+          return [{ type: 'text', text: (health === 'ok' ? '截图已保存：' : '截图已保存（健康度 ' + health + '，画面可能不完整）：') + path }]
+        },
       },
       execute: async ({ inline }: { inline?: boolean }, exec: unknown) => {
         const session = gate(exec)
@@ -1025,7 +1063,9 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
           bytes: typeof result.data.bytes === 'number' ? result.data.bytes : 0,
           width: typeof result.data.width === 'number' ? result.data.width : 0,
           height: typeof result.data.height === 'number' ? result.data.height : 0,
-          health: typeof result.data.health === 'string' ? result.data.health : 'ok',
+          // 缺失 health 时回落 'unknown' 而**不是** 'ok'：壳侧从未产生 'ok' 以外的值时，
+          // 旧写法等于把「没测过」伪造成「测过且正常」（审查 R7 的同族形态）。
+          health: typeof result.data.health === 'string' && result.data.health !== '' ? result.data.health : 'unknown',
         } as never
       },
     }),
