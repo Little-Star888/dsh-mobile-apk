@@ -35,6 +35,18 @@ internal object SnapshotTransaction {
   const val PREVIOUS_NAME = ".snapshot-previous"
   /** stage 删不掉时被改名挪开的解压残渣前缀（写点在 EngineManager；回收见 [reclaimResidue]）。 */
   const val STAGE_ORPHAN_PREFIX = ".snapshot-stage-orphan-"
+
+  /**
+   * 已摘除的 profile 插件（[reconcileRemovedProfilePlugins] 的迁移清单）。
+   * 每条 = 「挂载 id + 包名」；摘除新插件时在这里加一条，老设备下次刷新即被清干净。
+   */
+  private val REMOVED_PROFILE_PLUGINS = listOf(
+    // 0.14.1 审查 §9（用户裁定）：第三方模型同步插件，理由见 profile-web.cordis.patch.yml 的注释。
+    RemovedProfilePlugin(mountId = "dsh-model-sync", packageName = "@aiwayds/dsh-model-sync"),
+  )
+
+  /** [REMOVED_PROFILE_PLUGINS] 的条目。 */
+  private data class RemovedProfilePlugin(val mountId: String, val packageName: String)
   const val MARKER_NAME = ".snapshot-transaction"
   private const val TMP_MARKER_NAME = ".snapshot-transaction.tmp"
 
@@ -344,6 +356,78 @@ internal object SnapshotTransaction {
    * 崩溃窗口只可能留下不带 journal 的 `.copying` 残渣（下次刷新清掉），恢复路径信任的
    * previous 一律是完整备份；宁可本次刷新失败（marker 不被清、下次重试），绝不半份覆盖。
    */
+  /**
+   * 已摘除插件的**存量迁移**（0.14.1 D-1 的设备侧收尾）。
+   *
+   * 为什么必须有它（设备实测，不是推演）：profile 根的两个清单是**用户面**（[mergeProfiles] 里
+   * `userFacingFiles` 的语义），所以 `cordis.patch.yml` 与 `node_modules` 里的第三方包在升级时
+   * **不会被工厂面替换**。于是「从注入集摘除一个插件」在**已完成升级的老设备上等于没摘**：
+   * 实测（16416 覆盖安装本轮构建）`profiles/web/node_modules/@aiwayds/dsh-model-sync` 仍在、
+   * 清单里的挂载条目仍在 3 处 —— 插件照旧加载、照旧写用户的模型设置，
+   * 而新装用户（净安装）完全正常。这正是「幽灵缺陷」的定义形态：一类用户有问题、另一类没有。
+   *
+   * 迁移内容（逐条具名，不做通用清理——用户自己装的第三方插件必须原样保留）：
+   *   ① 从每个 profile 的 `cordis.patch.yml` 摘掉该插件的 insert 条目（两行：id + name）；
+   *   ② 删除该插件在 profile `node_modules` 下的包目录。
+   * 幂等：条目/目录已不在时是空操作（每轮刷新都会跑，必须无副作用）。
+   *
+   * @param liveProfiles live 的 `home/.dsh/profiles`。
+   * @param notes [mergeProfiles] 的说明列表（迁移动作逐条留档，供 swapNotes 日志）。
+   */
+  private fun reconcileRemovedProfilePlugins(liveProfiles: File, notes: MutableList<String>) {
+    val profiles = liveProfiles.listFiles() ?: return
+    for (removed in REMOVED_PROFILE_PLUGINS) {
+      for (profile in profiles) {
+        if (!profile.isDirectory) continue
+        // ① 清单条目
+        val patch = File(profile, "cordis.patch.yml")
+        if (patch.isFile) {
+          val lines = patch.readLines()
+          val kept = mutableListOf<String>()
+          var dropped = 0
+          var index = 0
+          while (index < lines.size) {
+            val trimmed = lines[index].trim()
+            if (trimmed == "- id: " + removed.mountId) {
+              // 该行与其后的 `name:` 行同属一个 insert 条目；再确认 name 就是被摘除的包名，
+              // 避免误删「同 id 但不同包」的用户自定义条目。
+              val nameLine = lines.getOrNull(index + 1)?.trim().orEmpty()
+              val matches = nameLine == "name: '" + removed.packageName + "'" ||
+                nameLine == "name: \"" + removed.packageName + "\""
+              if (matches) {
+                dropped += 1
+                index += 2
+                continue
+              }
+            }
+            kept += lines[index]
+            index += 1
+          }
+          if (dropped > 0) {
+            val text = kept.joinToString("\n") + (if (kept.isNotEmpty()) "\n" else "") +
+              "# 0.14.1：已摘除 " + removed.mountId + "（升级迁移自动清理；本行由 SnapshotTransaction 写入）\n"
+            patch.writeText(text)
+            notes += "profile " + profile.name + "：摘除挂载 " + removed.mountId + "（" + dropped + " 处）"
+          }
+        }
+        // ② 包目录
+        val packageDir = File(File(profile, "node_modules"), removed.packageName)
+        if (SnapshotFs.exists(packageDir)) {
+          SnapshotFs.deletePath(packageDir)
+          if (!SnapshotFs.exists(packageDir)) {
+            notes += "profile " + profile.name + "：删除存量包 " + removed.packageName
+          }
+        }
+        // 作用域目录（`node_modules/@scope`）删空后一并清掉：留着空目录会让人误以为包还在
+        // （构建期的 prune 也是这个语义）。
+        val scopeDir = packageDir.parentFile
+        if (scopeDir != null && scopeDir.name.startsWith("@") && (scopeDir.listFiles() ?: emptyArray()).isEmpty()) {
+          SnapshotFs.deletePath(scopeDir)
+        }
+      }
+    }
+  }
+
   private fun mergeProfiles(
     filesDir: File,
     moved: MutableList<String>,
@@ -378,6 +462,7 @@ internal object SnapshotTransaction {
         userFacingFiles += File(profile, "cordis.patch.yml").absolutePath
       }
       mergeTree(stagedProfiles, liveProfiles, notes, userFacingFiles)
+      reconcileRemovedProfilePlugins(liveProfiles, notes)
       val suffix = if (notes.isEmpty()) "" else "；工厂语义纠正 " + notes.size + " 处"
       onEntry("home/.dsh/profiles (merged" + suffix + ")")
     } catch (t: Throwable) {

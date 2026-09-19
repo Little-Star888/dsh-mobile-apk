@@ -938,4 +938,79 @@ class SnapshotTransactionTest {
     }
   }
 
+
+  // ── 0.14.1 D-1 设备侧收尾：已摘除插件的存量迁移 ────────────────────────────────
+  //
+  // 设备实测（16416 覆盖安装本轮构建）：`profiles/web/node_modules/@aiwayds/dsh-model-sync` 与
+  // 清单里的挂载条目**都还在**（profile 根的两个清单是用户面，升级不替换）⇒ 摘除对老用户等于没摘，
+  // 而新装用户正常 —— 幽灵缺陷的定义形态。本用例把迁移钉死：条目摘掉、包目录删掉、其它挂载不动、
+  // 幂等（第二遍是空操作）。
+  @Test
+  fun removedProfilePluginsAreReconciledOutOfTheLiveProfile() {
+    val filesDir = tempDir()
+    try {
+      val live = File(filesDir, "live").apply { mkdirs() }
+      val stage = SnapshotTransaction.stageRoot(filesDir)
+      writeRuntime(stage, "new-node", "new-profile")
+      // 工厂面：新快照**不再**含该插件；用户面：老设备的清单与包目录仍在。
+      val liveWeb = File(live, "home/.dsh/profiles/web")
+      SnapshotFs.createDirectories(liveWeb)
+      File(liveWeb, "cordis.patch.yml").writeText(
+        listOf(
+          "- id: keep-me",
+          "  name: '@dsh-android/keep-me'",
+          "- insert:",
+          "    - id: dsh-model-sync",
+          "      name: '@aiwayds/dsh-model-sync'",
+          "- insert:",
+          "    - id: keep-me-too",
+          "      name: '@user/keep-me-too'",
+          "",
+        ).joinToString("\n"),
+      )
+      File(liveWeb, "package.json").writeText("{}\n")
+      val stalePackage = File(liveWeb, "node_modules/@aiwayds/dsh-model-sync/lib").apply { mkdirs() }
+      File(stalePackage, "index.js").writeText("stale")
+
+      SnapshotTransaction.swap(
+        filesDir = filesDir,
+        stagedRoot = stage,
+        usrDir = File(live, "usr"),
+        homeDir = File(live, "home"),
+        preservedNames = preserved,
+        fingerprint = "fp3",
+        startedAt = 3L,
+      )
+
+      val text = File(liveWeb, "cordis.patch.yml").readText()
+      assertFalse("被摘除插件的挂载条目必须消失", text.contains("id: dsh-model-sync"))
+      assertFalse("其包名也不得再出现", text.contains("@aiwayds/dsh-model-sync"))
+      assertTrue("其它挂载必须原样保留", text.contains("id: keep-me-too"))
+      assertTrue("用户自定义条目不得被误删", text.contains("@user/keep-me-too"))
+      assertFalse("存量包目录必须删除",
+        File(liveWeb, "node_modules/@aiwayds/dsh-model-sync").exists())
+      assertFalse("删空的作用域目录也应清理（留着空目录会让人以为包还在）",
+        File(liveWeb, "node_modules/@aiwayds").exists())
+
+      // 幂等：再来一次完整交换（必须重新铺好 staged 树——上一轮已把它换进 live），
+      // 迁移不得再有动作、更不得抛错。
+      val stage2 = SnapshotTransaction.stageRoot(filesDir)
+      SnapshotFs.createDirectories(stage2)
+      writeRuntime(stage2, "new-node-2", "new-profile-2")
+      val second = SnapshotTransaction.swap(
+        filesDir = filesDir,
+        stagedRoot = stage2,
+        usrDir = File(live, "usr"),
+        homeDir = File(live, "home"),
+        preservedNames = preserved,
+        fingerprint = "fp3",
+        startedAt = 4L,
+      )
+      assertTrue("第二遍不得再报迁移动作（幂等）：" + second.joinToString("；"),
+        second.filter { it.contains("dsh-model-sync") }.isEmpty())
+    } finally {
+      SnapshotFs.deletePath(filesDir)
+    }
+  }
+
 }
