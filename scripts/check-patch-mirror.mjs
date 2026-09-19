@@ -269,6 +269,10 @@ if (peer) {
     // 构建并发上限门禁（0.14.1 系统级约束）：它断言 lib/shell.mjs 的常量与三处消费面；单边演进
     // 会让一侧仍吃满全部核心（MuMu 卡顿/系统不稳），故脚本 + 上限模块都进镜像面。
     'scripts/check-build-parallel-cap.mjs',
+    // 屏幕范围判定的跨语言 fixture 同步器（0.14.1 审查 §8.3/§8.3b 收口）：它把插件侧权威源
+    // 复制成壳侧单测资源，是「引擎侧第一道门」与「壳侧执行点第二道门」等价的唯一真值链。
+    // 脚本单边演进 = 一侧按旧规则生成/校验副本，等价性无声失效。
+    'scripts/gen-screen-scope-fixture.mjs',
   ]
   /** 递归列出目录下所有文件（相对路径；node_modules/.git 排除）——目录级镜像面用。 */
   const walkAll = (dir, prefix = '') => {

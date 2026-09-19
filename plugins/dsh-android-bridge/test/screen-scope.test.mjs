@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict'
 import { test, after } from 'node:test'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { dirname, join } from 'node:path'
 import {
   currentScreenScope,
   controlOpNeedsRealScreen,
@@ -10,6 +11,7 @@ import {
   normalizeScreenScope,
   parseScreenScopePrefsXml,
   realScreenAdbCommandDenied,
+  screenCommandVerdict,
   adbCommandDisplayIds,
   adbCommandDisplayTokens,
   screenTokensFromSfDump,
@@ -504,4 +506,130 @@ test('F6：多处壳侧往返必须串行（控制队列单线程，并发会让
   // ④ 放行（并发实现会在此判红：第一跳后的并发请求被队列拒绝，token 集合恒空 → 拒绝而非投递）。
   const r = await out
   assert.equal(r.ok, true, '已注册虚拟屏的 SF token 必须放行；并发发请求的实现会在此判红：' + JSON.stringify(r))
+})
+
+// ── 0.14.1 复审 §8.3 / §8.3b：范围门的两条绕过（选项在前 / 多段洗白） ─────────────────
+//
+// 缺陷形态（两条都在 0.14.1 刚加固的执行点上，属**新引入**回归）：
+//   §8.3  命令词面要求动词**紧跟** `input`（`input\s+(?:tap|swipe|…)`），而 Android CLI 的正式形态是
+//         `input [-d DISPLAY_ID] <command>`（选项在**前**）⇒ `input -d 0 tap 500 800` 不进命令词面
+//         ⇒ 引擎侧与壳侧**两层同时**放行，输入落在真实屏 display 0。
+//   §8.3b 判定只看「命令里出现的每个 -d 值是否都属于虚拟屏」，**不看整条命令是否只作用于那块屏**
+//         ⇒ `screencap -p -d <虚拟屏 token> a.png; screencap -p /sdcard/real.png` 被第一段整行洗白。
+//
+// 修法（两侧同改，见 screen-scope.ts 的家族表 + 段级自证）：命令词在**归一化后**匹配、
+// 每段各自自证目标屏、嵌套执行体（反引号 / `$()` / `sh -c`）再切一层、引号不闭合即 fail-closed。
+
+/** 跨语言 fixture（权威源；壳侧 Kotlin 单测读 gen-screen-scope-fixture.mjs 生成的副本）。 */
+const FIXTURE = JSON.parse(
+  readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'screen-scope-cases.json'), 'utf8'),
+)
+
+/** 壳侧副本：两种布局各探一次（协调仓 <根>/dsh-mobile-apk；apk 自包含 <根>）——不得写死单侧路径。 */
+function shellFixturePath() {
+  const here = dirname(fileURLToPath(import.meta.url))
+  const cands = [
+    join(here, '..', '..', '..', 'dsh-mobile-apk', 'app', 'src', 'test', 'resources', 'screen-scope', 'screen-scope-cases.json'),
+    join(here, '..', '..', '..', 'app', 'src', 'test', 'resources', 'screen-scope', 'screen-scope-cases.json'),
+  ].map((p) => p.replace(/[\/]plugins[\/]dsh-android-bridge[\/]test[\/]\.\.[\/]\.\.[\/]/, ''))
+  return cands.find((p) => existsSync(p))
+}
+
+test('§8.3/§8.3b：fixture 判据逐条成立（两侧同名 verdict）', () => {
+  assert.ok(FIXTURE.cases.length >= 20, 'fixture 用例数不得缩水（当前 ' + FIXTURE.cases.length + '）')
+  for (const c of FIXTURE.cases) {
+    const owned = new Set(c.ownedTargets ?? [])
+    const verdict = screenCommandVerdict(c.command, (raw) => owned.has(raw) && raw !== '0')
+    assert.equal(verdict, c.expect, c.name + '（' + c.command + '）')
+  }
+})
+
+test('§8.3/§8.3b：壳侧 fixture 副本必须在场且与权威源逐字一致', () => {
+  const shell = shellFixturePath()
+  assert.ok(shell, '壳侧 fixture 副本缺席——跑 node scripts/gen-screen-scope-fixture.mjs 生成（两种布局各探过一次）')
+  const canonical = JSON.stringify(FIXTURE, null, 2) + '\n'
+  assert.equal(readFileSync(shell, 'utf8'), canonical,
+    '壳侧副本过期：跑 node scripts/gen-screen-scope-fixture.mjs 重新生成并提交')
+})
+
+// 反证（判别力）：把**修复前的语义**原样写在测试里，它必须在 §8.3/§8.3b 的用例上给出与 fixture
+// **相反**的答案。没有这条，「fixture 全绿」可能只是「用例恰好都在新实现的能力范围内」。
+// 旧语义两条：① 命令词要求动词紧跟 input（不归一化目标屏参数）；② 整条命令只需**存在**一个已注册
+// 目标值即放行（不看它属于哪一段）。
+function legacyVerdict(command, owned) {
+  const legacyFace = /\b(?:screencap|screenrecord|uiautomator|input\s+(?:tap|swipe|roll|draganddrop|motionevent|text|keyevent)|wm\s+(?:size|density|overscan)|dumpsys\s+(?:window|display|input)|am\s+(?:start|start-activity|force-stop|kill)|monkey)\b/i
+  if (!legacyFace.test(command)) return 'allow'
+  const tokens = [...command.matchAll(/(?:^|[\s=])(?:-d|--display|--display-id)[\s=]+(\d+)/g)].map((m) => m[1])
+  if (tokens.length === 0) return 'deny-uncertified-target'
+  return tokens.every((t) => owned.has(t)) ? 'allow' : 'deny-uncertified-target'
+}
+
+test('反证：修复前的语义在 §8.3/§8.3b 用例上给出相反答案（fixture 有判别力）', () => {
+  const cases = FIXTURE.cases.filter((c) => /^(S-1|S-2)/.test(c.name))
+  assert.ok(cases.length >= 10, '§8.3/§8.3b 覆盖用例不得缩水（当前 ' + cases.length + '）')
+  const flipped = cases.filter((c) => {
+    const owned = new Set(c.ownedTargets ?? [])
+    return legacyVerdict(c.command, owned) === 'allow' && c.expect !== 'allow'
+  })
+  assert.ok(flipped.length >= 6,
+    '旧语义必须在多数绕过用例上判「放行」（否则这些用例抓不到本次修的缺陷）：实测翻转为 '
+    + flipped.length + ' 条 -> ' + flipped.map((c) => c.name).join('、'))
+  // 反向对照：旧语义在「合法目标屏」用例上同样放行 —— 说明上面那条不是因为旧语义恒拒。
+  const legit = FIXTURE.cases.filter((c) => c.expect === 'allow' && c.command.includes('-d '))
+  assert.ok(legit.length >= 2)
+  for (const c of legit) {
+    const owned = new Set(c.ownedTargets ?? [])
+    assert.equal(legacyVerdict(c.command, owned), 'allow', '旧语义在合法用例上不得为拒：' + c.name)
+  }
+})
+
+test('§8.3/§8.3b：两条绕过在公开 API 上（带注册表真值）也必须拒，且合法目标仍放行', () => {
+  const VTOKEN = '11529215046816944610'
+  const opts = {
+    virtualDisplayIds: [7],
+    virtualAliases: ['virtual-1'],
+    sfVirtualDisplays: [{ alias: 'virtual-1', token: VTOKEN }],
+  }
+  // 复算命令（审查附录 A6）：修复前前三条输出 null（放行）。
+  for (const command of [
+    'input -d 0 tap 500 800',
+    'input --display 0 tap 500 800',
+    'input --display=0 tap 500 800',
+    'input -d 9999 tap 500 800',
+    `screencap -p -d ${VTOKEN} /sdcard/a.png; screencap -p /sdcard/real.png`,
+    `echo -d ${VTOKEN} ; uiautomator dump /sdcard/real.xml`,
+    `sh -c "screencap -d ${VTOKEN}; input tap 100 200"`,
+    `echo -d ${VTOKEN}; cat /sdcard/secret.png`,
+    `screencap -p -d ${VTOKEN} /sdcard/a.png && input tap 1 2`,
+    'am start -d 7 -n com.example/.Main',
+  ]) {
+    assert.notEqual(realScreenAdbCommandDenied('virtual-only', command, opts), null, command)
+  }
+  // 放宽面不得被这次修法吃掉（修成「全拒」同样是缺陷）。
+  for (const command of [
+    `screencap -p -d ${VTOKEN} /sdcard/a.png`,
+    'screencap -p -d 7 /sdcard/a.png',
+    'input -d 7 tap 100 200',
+    'am start --display 7 -n com.example/.Main',
+    "dumpsys SurfaceFlinger | grep -E '^(Virtual Display |    name=)'",
+    'getprop ro.product.model',
+  ]) {
+    assert.equal(realScreenAdbCommandDenied('virtual-only', command, opts), null, command)
+  }
+})
+
+// N-5：两侧「逐字同源」的正则其实不等价的两处（本次同批修掉）。
+test('N-5：目标屏参数的空白类只认 ASCII（JS 的 \s 含 Unicode 空白，会让两侧正则不等价）', () => {
+  // 全角空格（U+3000）不是 shell 的分隔符：`input\u3000-d 0 tap` 是一整条 argv[0]，不会被执行。
+  assert.deepEqual(adbCommandDisplayTokens('input\u3000-d 0 tap 1 2'), [],
+    'Unicode 空白不得被当作参数分隔符（否则判定看到的命令与 shell 执行的不是同一条）')
+  assert.deepEqual(adbCommandDisplayTokens('input -d 0 tap 1 2'), ['0'])
+  assert.deepEqual(adbCommandDisplayTokens('input\t-d 0 tap 1 2'), ['0'], '制表符是合法分隔符')
+})
+
+test('N-5：SF 反查输出容忍行尾空白（设备 dumpsys 常见尾随空格）', () => {
+  const withTrailing = 'Virtual Display 11529215046816944610   \n    name="DSH virtual-1"   \n'
+  assert.deepEqual(screenTokensFromSfDump(withTrailing), [{ alias: 'virtual-1', token: '11529215046816944610' }])
+  assert.deepEqual(screenTokensFromSfDump('Virtual Display 111\t\n'), [],
+    'token 行有尾随空白仍须被识别（不得因行尾空白丢掉整条配对）')
 })
