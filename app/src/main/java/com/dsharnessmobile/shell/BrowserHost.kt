@@ -147,6 +147,14 @@ internal class BrowserHost(
     var requestedVisible = false
     var stageVisible = false
     var stageBounds: StageBounds? = null
+    /**
+     * 最近一次可信 bounds 下推的 `uptimeMillis`（`0` = 从未下推）。
+     *
+     * 「记忆态」与「在场态」必须分开：`stageVisible` 只说明**上一次下推**说了什么，
+     * 它无法回答「现在还有没有发布者」。用户实报「收起侧边栏浏览器不卸载」正是这个缺口
+     * （见 [BrowserOverlayPolicy] 的 KDoc）——所以绘制判据加上了这个时间戳做保鲜。
+     */
+    var boundsAt = 0L
   }
 
   /** 全部会话工作台（键 = 会话 id；[ANONYMOUS_SESSION] 为非会话调用）。 */
@@ -372,6 +380,10 @@ internal class BrowserHost(
   /** Hide the browser surface without destroying its tab state. */
   fun hide(): String = onMain {
     requestedVisible = false
+    // 停画必须把两半都撤掉：只清 requestedVisible 会让 stageVisible 留成 true，
+    // 于是下一次 show()/switchTo 回到本工作台时**不需要任何在场 UI** 就又画出来
+    // （用户实报「收起侧边栏浏览器不卸载」的幽灵态由此而来）。见 [BrowserOverlayPolicy]。
+    stageVisible = false
     applyVisibility()
     status().toString()
   } ?: unavailable("main-thread-timeout")
@@ -428,6 +440,9 @@ internal class BrowserHost(
         viewportHeight = value.optDouble("viewportHeight", 0.0),
         visible = value.optBoolean("visible", false),
       )
+      // 记下「在场发布者刚刚说过话」的时刻：这是绘制判据的保鲜依据
+      // （见 [BrowserOverlayPolicy]）。必须在写完 stageBounds 之后、applyStageBounds 之前。
+      currentWorkspace?.boundsAt = SystemClock.uptimeMillis()
       if (lastError == "invalid-stage-bounds") lastError = ""
       applyStageBounds()
       status().toString()
@@ -516,6 +531,8 @@ internal class BrowserHost(
   fun destroy() {
     onMain {
       stageBounds = null
+      // 看门狗随 Activity 一起退场（否则它持有的 root/View 引用会泄漏到下一次 attach）。
+      root.removeCallbacks(boundsWatchdog)
       root.removeOnLayoutChangeListener(rootLayoutListener)
       disposeView()
       Unit
@@ -650,6 +667,9 @@ internal class BrowserHost(
     tab.view = created
     applyIdentityToView(created)
     appliedViewport = requestedViewport
+    // 覆盖层在场之后才需要看门狗：它守的是「发布者已经不在场」这件事（见 boundsWatchdog）。
+    root.removeCallbacks(boundsWatchdog)
+    root.postDelayed(boundsWatchdog, BrowserOverlayPolicy.STAGE_BOUNDS_WATCHDOG_MS)
     applyStageBounds()
     return created
   }
@@ -743,8 +763,18 @@ internal class BrowserHost(
     // 只处理当前工作台的 `view` 是不够的——别的会话的 WebView 仍然 attach 在 root 上且可见，
     // 那正是用户要求消除的「跨对话互相看见」。切到哪个会话，就只有那个会话的页面在场。
     val current = currentWorkspace
+    val now = SystemClock.uptimeMillis()
     for (workspace in workspaces.values) {
-      val visible = workspace === current && workspace.requestedVisible && workspace.stageVisible
+      // 判据 = 当前位置 ∧ 调用方意愿 ∧ 最近一次舞台判定 ∧ **发布者仍在场**（保鲜期）。
+      // 前三项都是粘滞记忆态，只有第四项能把「组件已经卸载、没人再来下推」这件事反映出来；
+      // 缺了它就会出现没有任何 UI 所有者、用户收起侧栏也撤不掉的幽灵覆盖层（用户实报）。
+      val visible = BrowserOverlayPolicy.visible(
+        isCurrent = workspace === current,
+        requestedVisible = workspace.requestedVisible,
+        stageVisible = workspace.stageVisible,
+        boundsAgeMs = BrowserOverlayPolicy.boundsAge(workspace.boundsAt, now),
+        ttlMs = BrowserOverlayPolicy.STAGE_BOUNDS_TTL_MS,
+      )
       for (tab in workspace.tabs.values) {
         // **INVISIBLE 而不是 GONE**（0.14.0 模拟器实锤）：
         // GONE 的 View 不参与布局 → WebView 内页面拿不到布局盒（innerWidth/innerHeight = 0），
@@ -752,6 +782,37 @@ internal class BrowserHost(
         // 两者对用户的观感完全一致（都不会盖在聊天界面上），但对 AI 的可读性是「全有 vs 全无」。
         tab.view?.visibility = if (visible) View.VISIBLE else View.INVISIBLE
       }
+    }
+  }
+
+  /**
+   * 保鲜看门狗：记忆态说自己可见、但保鲜期内没有任何新下推时，**立刻停画**。
+   *
+   * 为什么必须是个"主动"的定时器：`applyVisibility()` 只在有事件时被调用，而"发布者消失"
+   * 本身不产生任何事件（组件卸载、工具进程被回收、页面崩掉、别的会话抢走当前工作台……）。
+   * 没有这个看门狗，粘滞的 `stageVisible` 可以永久把 WebView 留在屏幕上——
+   * 那正是用户 2026-09-19 实报「收起侧边栏浏览器不卸载」的存活条件。
+   *
+   * 代价：每 [BrowserOverlayPolicy.STAGE_BOUNDS_WATCHDOG_MS] 一次主线程空转（绝大多数拍
+   * `stageVisible` 为 false 或保鲜期内，直接跳过），相比"永久盖住聊天界面"可以忽略。
+   */
+  private val boundsWatchdog = object : Runnable {
+    override fun run() {
+      val workspace = currentWorkspace
+      if (workspace != null) {
+        val age = BrowserOverlayPolicy.boundsAge(workspace.boundsAt, SystemClock.uptimeMillis())
+        if (BrowserOverlayPolicy.shouldDropStaleStage(
+            stageVisible = workspace.stageVisible,
+            boundsAgeMs = age,
+            ttlMs = BrowserOverlayPolicy.STAGE_BOUNDS_TTL_MS,
+          )
+        ) {
+          // 停画但**保留排版**：AI 的工作面独立于 UI 是否可见（0.14.0 既有口径）。
+          workspace.stageVisible = false
+          applyVisibility()
+        }
+      }
+      root.postDelayed(this, BrowserOverlayPolicy.STAGE_BOUNDS_WATCHDOG_MS)
     }
   }
 
