@@ -177,6 +177,10 @@ if (peer) {
     'scripts/ci-verify-snapshot.py',
     'scripts/build-snapshot-013.mjs',
     'scripts/lib/shell.mjs',
+    // 0.14.1：软链自净化模块（快照归档前归一化旧 Termux 前缀软链）同样双仓同源。
+    // build-snapshot-013.mjs 已在镜像面，其依赖模块若不入册就会出现「构建脚本同源、依赖单边演进」
+    // —— 云端自包含构建跑旧净化逻辑，产物照样带 111/113 条设备必然丢弃的软链。
+    'scripts/lib/symlink-sanitize.mjs',
     // 0.13.8-b 批 B2（ST-25/26/31 + §7.2）：制度性门禁、度量入口与 A1 seed 模块同样双仓同源
     // （云端自包含构建会跑它们；单边演进 = 云端跑旧门禁/旧 seed）。
     'scripts/check-state-registry.mjs',

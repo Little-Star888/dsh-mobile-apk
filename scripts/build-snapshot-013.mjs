@@ -10,11 +10,12 @@
 //
 // 用法：node scripts/build-snapshot-013.mjs <arm64|x86_64>   （基座缺省 .deploy-tmp/{arm64,x64}-base/base-usr.tar.xz）
 import { execSync, spawnSync } from 'node:child_process'
-import { mkdirSync, existsSync, writeFileSync, readFileSync, readdirSync, rmSync, statSync, renameSync, copyFileSync } from 'node:fs'
-import { join, dirname } from 'node:path'
+import { mkdirSync, existsSync, writeFileSync, readFileSync, readdirSync, rmSync, statSync, renameSync, copyFileSync, lstatSync, readlinkSync, symlinkSync } from 'node:fs'
+import { join, dirname, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
 import { wslPath, sh as wsl, XZ_THREADS } from './lib/shell.mjs'
+import { sanitizeSymlinks } from './lib/symlink-sanitize.mjs'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const ABI = process.argv[2] ?? 'arm64'
@@ -929,6 +930,41 @@ log('瘦身扩展完成（global 孤儿重复包已剔除）')
 // 权威落点是 inject-all.py 重打包时按内容判定（ELF/shebang=0700，数据文件=0600，目录=0700），
 // 门禁 scripts/check-snapshot-file-modes.mjs 校验的正是注入后快照（APK 内嵌 + 发布资产同源）。
 
+// ── 8a4. 软链自净化（0.14.1 P0，真机报错日志驱动）─────────────────────────
+//
+// 缺陷形态（用户 2026-09-19 报错日志，小米 21121210C / Android 33 / arm64）：
+//   W dsh-snap: skipping unsafe symlink: usr/etc/alternatives/editor -> /data/data/com.termux/files/usr/bin/nano
+//   W dsh-snap: skipping unsafe symlink: home/.dsh/profiles/node_modules/micromark
+//                                        -> /data/data/com.termux/files/usr/lib/node_modules/@deepseek-ai/dsh/node_modules/micromark
+// 设备侧提取器**必须**拒绝这批链接（沙箱边界：`SnapshotExtractor.isLinkTargetAllowed` 的 KDoc 明文
+// 「Termux residue（/data/data/com.termux/...）一律拒绝」「逃逸目标一律拒绝」）——在线更新快照走明文
+// HTTP，这一层是安全边界，**不能为了这批链接放宽**。
+//
+// 真因在**归档内容**：软链目标写的是构建机的 Termux 绝对前缀。
+//   - deb 数据树（`dpkg-deb --fsys-tarfile | tar --strip-components=6`）里的相对/绝对链原样落地，
+//     其绝对链是 Termux 惯例前缀 `/data/data/com.termux/files/usr/...`；
+//   - 基座 bootstrap 的 `home/.dsh/profiles/node_modules/<pkg>` 是**指向同树 usr 的 dedup 链接**，
+//     目标同样写成 Termux 绝对前缀。
+// 实测产物清点（`tar -tvJf` 全量）：arm64 **111 条**、x86_64 **113 条**指向旧前缀的绝对链；
+// 其中 arm64 有 **97 条**是 profiles/node_modules 的 dedup 链接，而它们的目标**就在同一份归档里**
+// （`usr/lib/node_modules/@deepseek-ai/dsh/node_modules/` 共 29393 条目）。后果：每台设备都静默丢这批
+// 链接 —— 实测设备 `home/.dsh/profiles/node_modules/` 198 条 vs 归档 264 条，属于
+// 「构建机环境 ≠ 设备环境」的幽灵缺失（构建机上解析得到，设备上必然解析不到）。
+//
+// 修法（归档**之前**归一化，幂等）：
+//   ① 相对链：保留（设备侧判据接受树内相对链）；
+//   ② 绝对链指向**本 App 前缀**：保留（设备侧按 runtimeCanon 接受，如 busybox applet 链接）；
+//   ③ 绝对链指向旧 Termux 前缀：剥前缀得树内候选路径 —— 存在则改写为**相对链**（功能等价、设备可解析），
+//      不存在则删除（纯残留，留着只会在每台设备上被丢弃）；
+//   ④ 其它越界绝对链：删除并计数（不删也必然被设备丢弃，留着只会让归档与设备不一致）。
+// 判据不是「链接看起来对不对」，而是**归档里不得存在任何设备必然丢弃的条目**（见本步之后的产物自检）。
+const STAGE_ROOT = join(STAGE, 'root')
+{
+  const stats = sanitizeSymlinks(STAGE_ROOT, ['usr', 'home/.dsh'])
+  log(`软链自净化: 共 ${stats.links} 条；相对化 ${stats.rewrote}；删除残留 ${stats.dropped}；保留 App 绝对链 ${stats.keptAppAbsolute}；其它绝对链 ${stats.keptOtherAbsolute}`)
+  if (stats.dropped > 0) console.log('    [drop] ' + stats.droppedSamples.join(' | '))
+}
+
 // ── 8. 归档 ────────────────────────────────────────────────────────────
 log('归档 snapshot.tar.xz…')
 const archive = join(OUT_DIR, 'snapshot.tar.xz')
@@ -973,6 +1009,29 @@ if (!(licCount >= 4)) {
   process.exit(1)
 }
 log(`归档内 LICENSES 自检通过（${licCount} 个标准文本）`)
+// 归档内软链自检（0.14.1 P0，与「LICENSES 归档缺件」同型：stage 对而归档错）：
+// 归档里**不得存在**任何指向旧 Termux 前缀的软链 —— 设备侧提取器必然丢弃它们
+// （SnapshotExtractor.isLinkTargetAllowed 的沙箱边界），留着就是「构建机看得见、设备上没有」的
+// 幽灵缺失。撤掉 8a4 的净化后再构建 → 此处必红（实测 arm64 111 / x86_64 113 条）。
+let termuxLinks = 0
+let termuxSamples = []
+try {
+  const pyLink = `import tarfile; t=tarfile.open(${JSON.stringify(archive.replace(/\\/g, '/'))},'r');`
+    + ` b=[m.name for m in t if m.issym() and m.linkname.startswith('/data/data/com.termux')];`
+    + ` print(len(b)); print('\\n'.join(b[:5]))`
+  const out = execSync(PYTHON + ' -c ' + JSON.stringify(pyLink), { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 }).trim().split('\n')
+  termuxLinks = Number(out[0] || 0)
+  termuxSamples = out.slice(1).filter((l) => l !== '')
+} catch (e) {
+  console.error(`  [软链归档自检执行失败] ${String(e)}`)
+  termuxLinks = -1
+}
+if (termuxLinks !== 0) {
+  console.error(`归档内仍有 ${termuxLinks} 条旧 Termux 前缀软链（设备侧必然丢弃）——快照不可发布`)
+  for (const s of termuxSamples) console.error('  ' + s)
+  process.exit(1)
+}
+log('归档内软链自检通过（0 条旧 Termux 前缀软链）')
 // A1 出厂声明值对账（P-AC-01，--require 严格档）：归档内 profiles/{web,headless}/package.json 必须带
 // patchReload=出厂值。seed 步在归档之前（本文件 0 段），此处是对**产物**的复核——stage 正确而归档缺件
 // 的同型缺陷此前在 LICENSES 上实锤过一次。
