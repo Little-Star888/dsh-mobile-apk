@@ -263,6 +263,7 @@ class NotificationContractTest {
       "UNKNOWN_KIND" to "notify skipped (unknown kind): ",
       "ERROR" to "notifyEvent THREW kind=",
       "POSTED" to "notify: kind=",
+      "DUPLICATE_SUPPRESSED" to "notify dropped (duplicate within ",
     )
     val missing = denyMars.filterValues { !center.contains(it) }.keys
     assertTrue("拒因记账串缺席（新增取值必须补记账）：" + missing.joinToString(","), missing.isEmpty())
@@ -280,12 +281,43 @@ class NotificationContractTest {
   @Test
   fun 最近汇报窄接口签名稳定() {
     // T5（OverlayReport）依赖此签名；改它就等于破坏跨任务契约。
+    // P2（0.14.1 停摆）：签名仍是无参 `fun latestReportLine(): String?`，但内部由「内存单槽」改为
+    // 「内存槽为空 → 倒读文件尾部」。旧断言把实现钉成 `= lastReportLineRaw` 一行式——那是**实现**
+    // 而非契约，且正是缺陷本身（消费一旦停摆，单槽永远不更新，长按面板只剩占位行）。
     val store = codeOnly(shellSource("NotifyStore.kt"))
-    assertTrue("必须暴露 `fun latestReportLine(): String?`",
-      store.contains("fun latestReportLine(): String? = lastReportLineRaw"))
+    assertTrue("必须暴露无参 `fun latestReportLine(): String?`", store.contains("fun latestReportLine(): String?"))
+    assertTrue("内存槽为空时必须回落到文件尾部", store.contains("val fromFile = try { tailReportLine(app) }"))
+    assertTrue("必须暴露尾部倒读实现", store.contains("fun tailReportLine(context: Context): String?"))
     assertTrue("挂点必须在 dispatch 的 report 分支", store.contains("if (entry.kind == \"report\") lastReportLineRaw = line"))
     assertTrue("登记必须在投递判定之前（被抑制也要能看到内容）",
       store.indexOf("lastReportLineRaw = line") < store.indexOf("NotifyCenter.notifyEvent(context, entry"))
+  }
+
+  @Test
+  fun 消费必须有事件之外的兜底驱动() {
+    // 0.14.1 真机停摆（#238）：报告的消费只挂在「FileObserver 事件」与「进程启动那一次」上，
+    // 事件一丢就永久停摆（文件涨到 9402 B、offset 冻在 8810、报告一条没投）。
+    // 本断言防的是**「兜底写了但没人调」**这类假绿：入口存在 + 真被 a 看门狗 tick 调用 + 在状态判定之前。
+    val store = codeOnly(shellSource("NotifyStore.kt"))
+    assertTrue("必须有兜底入口", store.contains("fun drainTick(context: Context)"))
+    assertTrue("drain 必须可重入加锁（三个驱动者并发跑同一份 offset 会重复投递）",
+      Regex("""@Synchronized\s+fun drain\(context: Context, trigger: String\)""").containsMatchIn(store))
+    val svc = codeOnly(shellSource("EngineService.kt"))
+    assertTrue("看门狗 tick 必须真的调它（写了不调 = 等于没做）", svc.contains("NotifyStore.drainTick(this)"))
+    assertTrue("兜底必须在引擎状态判定之前（DEAD/DEGRADED 态下它是唯一活着的消费者）",
+      svc.indexOf("NotifyStore.drainTick(this)") < svc.indexOf("WatchdogV2.assessProbe(this)"))
+  }
+
+  @Test
+  fun 重复投递必须去重且交互类豁免() {
+    // P3：真机同 id 同内容 80 ms 内被投 5 次（积压一次性放出）→ 横幅连打 5 次。
+    val code = codeOnly(shellSource("NotifyCenter.kt"))
+    assertTrue("必须消费去重判定", code.contains("isDuplicatePost(lastPostId, lastPostSig, lastPostAt, id, sig, now)"))
+    assertTrue("交互类必须豁免（同内容再问一次是真事件，吞掉等于丢掉作答入口）",
+      code.contains("val interactive = face == Face.QUESTION || face == Face.APPROVAL"))
+    assertTrue("去重只有在真投之后才记账（未投递不算已投，否则补投会被吞）",
+      code.indexOf("lastPostAt = now") > code.indexOf(".notify(id, notification)"))
+    assertTrue("新增取值必须有独立记账串（G-N3 表驱动同源）", code.contains("notify dropped (duplicate within "))
   }
 
   @Test

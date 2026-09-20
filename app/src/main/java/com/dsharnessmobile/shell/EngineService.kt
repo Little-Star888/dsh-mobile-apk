@@ -116,6 +116,11 @@ class EngineService : Service() {
         exec.scheduleWithFixedDelay({
           try {
             val now = System.currentTimeMillis()
+            // P1（0.14.1 通知停摆修复）：通知信道消费的**兜底驱动**（`NotifyStore` 的 drainTick）。
+            // 它必须在本拍的任何状态判定之前执行——引擎 HEALTHY 时也要消费，而在 DEAD/DEGRADED 各态下
+            // 更是唯一活着的消费者（真机停摆现场：`.notify.ndjson` 一直在长，而事件驱动的消费一条也没
+            // 投出去，只有这条 5 s 心跳的日志还在更新）。幂等 + 一次 stat，不改本拍语义，失败也不冒泡。
+            NotifyStore.drainTick(this)
             val state = WatchdogV2.assessProbe(this)
             // FX-210.2/.3/.4：决策与状态无关副作用全部落在 planTick 的前置段（先于一切早退，
             // 含熔断打开的那一拍），调用方只执行返回的破坏性动作。退避/熔断同用

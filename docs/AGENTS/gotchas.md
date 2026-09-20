@@ -611,3 +611,15 @@
     修法（单一来源，禁止两份实现）：把那条管线抽成 `uiautomatorTree()`，**两个工具共用**；schema 抽成 `TREE_SCHEMA`、行渲染抽成 `nodeListLines()`，`treeOutput()` 两处共用——「同等体验」因此是**构造上成立**的，不靠两份代码保持同步。描述改为「ADB / 纯 Shizuku **主路**」，明写「无障碍未开启时这就是控件树的唯一来源」与「只读默认屏（虚拟屏走别的路）」。
     判据（可判红，`plugins/dsh-android-manage/test/ui-tree-parity.test.mjs`）：① **同形**——两工具的 `output.schema` 逐字段深度相等（漂移即回归）；② **可用**——无障碍关时 `ui_tree` 返回节点数组、`count===nodes.length`、带 `detailHandle` 与每节点中心坐标；③ **可操作**——清单里的 ref 经 `android_ui_click` 必须恰好注入一次 `input tap <cx> <cy>`（模型只报 ref，**像素由引擎算**）。
     实现坑（同轮踩过）：共享 output 一旦把 schema 根放宽为 `json`，`render` 的参数就会被上下文推断取代——**独立 const 的 render 拿不到上下文类型会退化成隐式 any**，参数显式写成 `unknown` 才逆变兼容；另外 `schema` 抽取时别把外层的 `schema:` 包装一起套进去（运行时会报 `UNSUPPORTED_SCHEMA`，而 TS 因为 `as unknown as` 完全不报）。
+169. **通知消费只靠一次文件事件：事件一丢就永久停摆，而「另一个消费者还活着」把现场伪装成正常（0.14.1 真机实报 + 本轮实修）**：真机（V2425A / arm64 / SDK 36）上用户报「消息有但不弹横幅；必须划到后台才收到」「悬浮球长按查看汇报没有内容」。取证三份文件给出**同一个**形状：`files/home/.dsh/.notify.ndjson` 从 8810 长到 9402 B（引擎确实写出了 `kind=report` 行），`shared_prefs/dsh-notify.xml` 的 `notify.offset` **冻在 8810**，`files/notify-responder.log` 里没有任何 `kind=report` 的投递记录。即「文件在长、指针不动、一条也不投」——而同一时刻 `WatchdogV2` 的 `notify-debug.log` 还在按时更新，于是「通知面整体是活的」这个假象成立。
+    **真因（结构性）**：`NotifyStore.drain` 的触发点只有两个——`FileObserver` 的事件回调与进程启动时那一次；`NotifyStore` 内**没有任何 Timer/Handler/协程**。一次事件丢失（watcher 构造失败被吞、落盘方式换成「临时文件 + rename」而位集只有 `MODIFY|CREATE`、目录 inode 被换掉导致 inotify 监视静默失效——快照重解包就会重建 `files/home/.dsh`）即**永久停摆**；而 poll 驱动的 `WatchdogV2.consumeTaskDoneMarkers` 照常工作，正好解释「旧信道还活着、新信道死了」的不对称。
+    **可控复现（无需等真机复发，MuMu x86_64 实测）**：给同一个 inode 建第二个目录项，从那个名字追加——事件名不是 `.notify.ndjson`，白名单直接忽略，而文件长度确实在长：
+    ```bash
+    S=127.0.0.1:16416
+    adb -s $S shell "run-as com.dsharnessmobile.shell ln files/home/.dsh/.notify.ndjson files/home/.dsh/.notify-inject"
+    printf '%s\n' '<一条真实的 report 行>' | adb -s $S shell "run-as com.dsharnessmobile.shell sh -c 'cat >> files/home/.dsh/.notify-inject'"
+    # 20 s 后：文件 8733 -> 9064 B，而 notify.offset 仍是 8733，探针零 dispatch  ← 复现成功
+    ```
+    修法（三条互补，缺一条都不够）：① **兜底驱动**——`NotifyStore.drainTick` 挂到**既有看门狗 tick**（`EngineService` 每 5 s 一拍、持唤醒锁，且是现场唯一被证实还活着的消费者），不自起 Handler（多一处生命周期 = 多一处和事件一起死的东西）；② **监听位扩到 `MODIFY|CREATE|CLOSE_WRITE|MOVED_TO|DELETE|MOVED_FROM`** + 白名单命中 `FILE_NAME`/`ROTATED_NAME`/`path==null`；③ **`drain` 加锁 + 先投递再推进偏移**（三个驱动者并发跑同一份 offset 会重复投递——现场实测同 id 80 ms 内被投 5 次；先推进再投递则会静默丢）。
+    取证面同时补齐：每行消费记 `notify drain trigger=<start|tick|watch:名字> … offset a->b len=n`，tick 每 5 分钟记一行 `notify tick alive ticks= lag= watchEvents= watchEventAgeMs=`——**「文件在长但 watchEventAgeMs 一直很大」就是 watcher 失聪**，这一对读数把下次复发的定位从「三份文件对表」压到一行。
+    判据（可判红，`NotifyConsumptionStallTest.kt` 五例 + `NotificationContractTest.消费必须有事件之外的兜底驱动`）：①监听位必须含 `MOVED_TO`/`CLOSE_WRITE`（旧位集必红）②`drainStep`/`advanceOffset` 的 Skip/Rotated/Read 与单调性③同 id 同内容窗口内判重复、内容变/窗口外/换 id 不判④尾部倒读只取最后一条 report 行且丢弃被截断的首行；**外加源码级断言「兜底入口写了必须真被 tick 调用」**——防「兜底写了没人调」这类新型假绿。

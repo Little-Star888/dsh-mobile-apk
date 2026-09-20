@@ -196,6 +196,7 @@ real-only 反证；判据全在设备事实上，证据不足判 `INCONCLUSIVE` 
 | K-A | **侧栏浏览器自动落位的时机洞**：`browser-auto-place.ts` 的 `tick()` 在「首次观测到某 owner 且已有页面」时只建基线就 return（`seenEmpty` 守卫）；若 `browserCaps` 与 `browser_open` 落在同一拍 1s 轮询内，该页**永远不会注册成侧栏 tab** | 未修。修法：壳侧 `status()` 增页面创建时间戳（如 `lastPageAtMs`），前端按 `pageCreatedAt > UI 加载时刻` 判真实边沿，替代近似守卫 |
 | K-B | **A3 悬浮窗背景启动限制在多 ROM 上未复核**（0.14.1 块 H 自述残留） | 需多 ROM 真机各跑一次（权限缺失/开关关闭/无虚拟屏三种 fail-closed 形态） |
 | K-C | **块 J① FIX-3「双起点验收」设备级证据缺**：`files/notify-responder.log` 的 `result=` 判据此前读错文件（真因已修），修后需再装机复验 | 未复验 |
+| K-E | **通知消费停摆（真机 #238：有消息不弹横幅 / 长按查看汇报空白）** | **已修并设备验收**：消费不再只靠一次文件事件——看门狗 5 s tick 兜底 `NotifyStore.drainTick` + 监听位扩到 `MOVED_TO/CLOSE_WRITE` + `drain` 加锁且先投递再推进偏移 + 长按面板文件回落 + 同内容 2 s 去重。设备判据 `scripts/verify-notify-consumption.mjs`（PASS=5/FAIL=0，含「硬链接注入只有兜底能消费」这条主判据）与横幅截图见 `dsh-mobile/docs/0.14.1-preview-NOTIFY-CONSUMPTION-STALL-FIX-PLAN.md` §9.4。**遗留**：真机停摆的触发源未坐实（候选 C5：目录 inode 被换后 inotify 静默失效）；长按面板本身未在设备上截到（本机未开悬浮球开关） |
 | K-D | **execAdbLine 档位门的会话来源依赖工具入口绑定**（0.14.1 S-5 引入）：会话经 `guard()` 的 AsyncLocalStorage 绑定传递；若将来出现不经工具入口的后台调用路径，会被 fail-closed 拒（预期行为，但需要一条测试钉住） | 已在审查进度文档 §3.4 登记 |
 
 ### 0.14.1 设备验收轮补充发现（2026-09-19 晚）

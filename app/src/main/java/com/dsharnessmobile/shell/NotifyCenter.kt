@@ -501,7 +501,61 @@ object NotifyCenter {
     POSTED, DISABLED, PERMISSION_DENIED, UNKNOWN_KIND, SUPPRESSED_FOREGROUND, RESOLVED,
     /** DEF-NOTIFY-02：投递过程抛异常（已吞掉并落探针），绝不让异常冒到 MuxClient 读线程。 */
     ERROR,
+
+    /**
+     * P3 去重：同一通知身份 + 同一内容在 [DEDUP_WINDOW_MS] 内被重复投递，后到的那次丢弃。
+     *
+     * 真机实测：同一 `id=1949540996` 在约 80 ms 内被投 5 次（积压被一次性放出来）。同一 id 覆盖式
+     * 投递 5 次不会在通知栏留 5 条，但会**连打 5 次 heads-up**——用户看到的是横幅一闪一闪，
+     * 系统侧也可能因此取消正在展示的横幅（「消息有、不弹横幅」的观感来源之一）。
+     */
+    DUPLICATE_SUPPRESSED,
   }
+
+  /** P3 去重窗口：同 id 同内容在该窗口内只投一次。取值依据：真机突发间隔约 80 ms，两秒足够覆盖。 */
+  const val DEDUP_WINDOW_MS = 2_000L
+
+  // 三个驱动线程（消费、看门狗、Mux 读线程）都会走到投递，故用 @Volatile：去重本身是尽力而为，
+  // 竞态最坏结果是少去重一次（多打一次横幅），不值得为它引入锁序。
+  @Volatile
+  private var lastPostId = 0
+
+  @Volatile
+  private var lastPostSig: String? = null
+
+  @Volatile
+  private var lastPostAt = 0L
+
+  /**
+   * 纯逻辑：这次投递是否该按重复丢弃（JVM 单测覆盖）。
+   *
+   * 三个条件缺一不可：**同一通知身份**（id）、**同一可见内容**（[contentSignature]）、**窗口内**。
+   * 只比 id 会把「同一会话先后两轮汇报」当成重复（第二轮被吞，用户永远看不到新结果）。
+   */
+  fun isDuplicatePost(
+    lastId: Int,
+    lastSig: String?,
+    lastAt: Long,
+    id: Int,
+    sig: String,
+    now: Long,
+    windowMs: Long = DEDUP_WINDOW_MS,
+  ): Boolean = lastSig != null && lastId == id && lastSig == sig && now - lastAt in 0..windowMs
+
+  /**
+   * 纯逻辑：条目的**可见内容**指纹（不含 `ts`/延迟等不可见字段；同内容两次投递必须同指纹）。
+   *
+   * 覆盖 build() 真正渲染出来的每个字段（标题/正文/汇报行/进度/产出清单/交互字段），漏一个就会把
+   * 「内容变了但指纹相同」的两次投递判成重复——即用户看不到更新后的那条。反向（多含一个字段）
+   * 只会少去重一次，代价是横幅多打一次，属于可接受侧。
+   */
+  fun contentSignature(entry: NotifyEntry): String = listOf(
+    entry.kind, entry.title, entry.text, entry.summary, entry.outcome, entry.outcomeLabel,
+    entry.durationMs.toString(), entry.durationLabel, entry.toolCount.toString(),
+    entry.done.toString(), entry.total.toString(), entry.current,
+    entry.presentedFiles.joinToString(","), entry.event, entry.eventId, entry.sessionId,
+    entry.reason, entry.toolName, entry.count.toString(), entry.popup.toString(),
+  ).joinToString("\u0001")
 
   /** 单条事件的形态决策（DEF-NOTIFY-01；纯函数，JVM 单测覆盖）。 */
   data class FormDecision(val degradeToSilent: Boolean, val keepPopup: Boolean, val note: String)
@@ -589,8 +643,20 @@ object NotifyCenter {
       return Result.DISABLED
     }
     val id = notificationId(entry, face)
+    val sig = contentSignature(entry)
+    val now = System.currentTimeMillis()
+    // P3：交互类（提问/审批）**不做**去重——它们按 eventId 各一条，而「同内容再问一次」是需要用户
+    // 再答一次的真实事件，吞掉它等于丢掉唯一作答入口（与 DEF-02 的前台抑制例外同一条理由）。
+    val interactive = face == Face.QUESTION || face == Face.APPROVAL
+    if (!interactive && isDuplicatePost(lastPostId, lastPostSig, lastPostAt, id, sig, now)) {
+      NotifyProbe.log(app, "dsh-notify", "notify dropped (duplicate within " + DEDUP_WINDOW_MS + "ms): id=" + id + " kind=" + kind)
+      return Result.DUPLICATE_SUPPRESSED
+    }
     val notification = build(app, face, entry, fallback, form.degradeToSilent)
     (app.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).notify(id, notification)
+    lastPostId = id
+    lastPostSig = sig
+    lastPostAt = now
     val note = if (form.degradeToSilent) " silentDegrade=true" else ""
     NotifyProbe.log(
       app, "dsh-notify",

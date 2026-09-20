@@ -133,6 +133,10 @@ object NotifySuppressQueue {
     for (item in deliver) {
       when (NotifyCenter.deliverDeferred(app, item.entry)) {
         NotifyCenter.Result.POSTED -> posted++
+        // P3 去重（0.14.1）：同 id 同内容的条目在窗口内已被投过一次——用户已经看到它了，补投没有意义。
+        // 按「已结算」处理，**不得**放回队列：放回会每 FLUSH_TICK_MS 重试到 TTL 到期（探针里多一串
+        // ttl-expired），而重试永远不可能改变结论（内容相同就永远判重）。
+        NotifyCenter.Result.DUPLICATE_SUPPRESSED -> Unit
         else -> {
           // 补投未成功：放回队列（仍受 TTL 约束），下一轮再试。
           synchronized(lock) {
