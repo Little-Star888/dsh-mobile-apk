@@ -913,6 +913,10 @@ class SnapshotTransactionTest {
       val stage = SnapshotTransaction.stageRoot(filesDir)
       File(stage, "usr/bin").mkdirs()
       File(stage, "usr/bin/node").writeText("new-node-内容")
+      // live 的 profiles 树（交换会把它整份拷成 previous —— 这才是本检查要守的量）。
+      val liveProfiles = File(live, "home/.dsh/profiles/web/node_modules")
+      liveProfiles.mkdirs()
+      File(liveProfiles, "big.bin").writeBytes(ByteArray(1024 * 1024))
       var asked = 0L
       val failure = try {
         SnapshotTransaction.swap(
@@ -930,7 +934,13 @@ class SnapshotTransactionTest {
         t
       }
       assertTrue("空间不足必须抛专门类型（调用方据此给可照做的文案）", failure != null)
-      assertTrue("需求按 2.5× 解压体量算（实测口径）", asked > 0)
+      // 需求口径 = 交换真正会新占用的量（live profiles 备份 ×1.25 + 64MB）。
+      // 两侧都钉住：既要为正，又**不得**退化成「整棵解压树 ×2.5」——后者跑在解压之后会把
+      // 本可成功的刷新拒掉（过度拦截，本轮自查发现并修正的口径）。
+      val liveBytes = SnapshotFs.sizeOf(File(live, "home/.dsh/profiles"))
+      assertTrue("需求必须为正", asked > 0)
+      assertTrue("需求应约等于 live profiles 备份 + 25% + 64MB（含 1MB live 内容），实测 $asked",
+        asked >= 64L * 1024 * 1024 && asked <= liveBytes * 2 + 128L * 1024 * 1024)
       assertEquals("空间不足时**不得动 live 树**", "old-node", File(live, "usr/bin/node").readText())
       assertNull("也不得留下 marker（事务根本没开始）", SnapshotTransaction.readMarker(filesDir))
     } finally {

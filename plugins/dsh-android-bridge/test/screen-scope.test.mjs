@@ -717,6 +717,33 @@ test('S-5：内部白名单按**命令形态**校验，不是名字对了就放�
   assert.equal(await takeNext(queue, 80), null)
 })
 
+// 回归面（自查）：白名单必须接受 manage 那三个 helper 产出的**真实命令形态**——
+// 形态校验写严了会静默废掉 android_env_prepare（动画开关），而那条路径平时没人跑。
+test('S-5 回归面：白名单接受 manage 三个 helper 的真实命令形态（读/写/还原）', async () => {
+  a11yOnlinePrefs()
+  useScope('all')
+  const keys = ['window_animation_scale', 'transition_animation_scale', 'animator_duration_scale']
+  const forms = [
+    // readAnimScales()
+    'for k in ' + keys.join(' ') + '; do echo R:$k=$(settings get global $k); done',
+    // setAnimScales('0')
+    keys.map((k) => 'settings put global ' + k + ' 0').join('; '),
+    // restoreAnimScales()：值来自 settings get 的输出（实测见过 1.0 / 0.5 / 1；未设置时为 null）
+    keys.map((k) => 'settings put global ' + k + ' 1.0').join('; '),
+    'settings put global window_animation_scale null; settings put global transition_animation_scale 0.5'
+      + '; settings put global animator_duration_scale 1',
+  ]
+  for (const command of forms) {
+    const queue = new ControlQueue()
+    const svc = service(queue)
+    const run = svc.execAdbShell(command, { internal: 'animation-scales' })
+    const req = await takeNext(queue)
+    assert.equal(req?.op, 'shExec', '白名单必须放行真实命令形态：' + command)
+    queue.settle(req.reqId, { ok: true, data: { ok: true, stdout: '' } })
+    assert.equal((await run).ok, true, command)
+  }
+})
+
 test('S-5：SF token 反查（判定自身的一部分）经内部白名单可用，且与档位无关', async () => {
   a11yOnlinePrefs()
   useScope('virtual-only')

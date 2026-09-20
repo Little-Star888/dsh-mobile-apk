@@ -272,10 +272,18 @@ internal object SnapshotTransaction {
     val stagedUsr = File(stagedRoot, "usr")
     if (!SnapshotFs.exists(stagedUsr)) throw IOException("staged runtime is missing usr/")
     // 空间断言必须在**动第一棵树之前**：换到一半再 ENOSPC 只能靠回滚收拾，而回滚本身也要空间。
-    // 需求 = 2.5 × 解压体量（解压树 + 合并期的 profiles 拷贝 + 余量），见 §7.6-1 的实测口径。
+    //
+    // 需求口径 = **交换这一步真正会新占用的字节**（不是「整棵解压树 ×2.5」——那个口径是给
+    // 「解压前」检查用的，而本检查跑在解压**之后**：stage 的空间已经付过了，再按整树要 2.5 倍
+    // 会把「本可成功」的刷新拒掉，属过度拦截）。swap 的新分配来自：
+    //   · `mergeProfiles` 把 live 的 profiles 树整份拷成 previous（主导项，且**必须**留得下）；
+    //   · `mergeTree` 把 staged 里 live 缺的文件补进去（相对小）。
+    // 其余（usr/home 顶层条目、profiles 换位）都是 rename，不占新空间。
+    // 余量取 25% + 64MB：覆盖补入文件与文件系统元数据（小文件多时块开销可观）。
     if (spaceCheck != null) {
-      val stagedBytes = SnapshotFs.sizeOf(stagedRoot)
-      val required = stagedBytes * 5 / 2
+      val liveProfiles = File(File(homeDir, ".dsh"), "profiles")
+      val backupBytes = SnapshotFs.sizeOf(liveProfiles)
+      val required = backupBytes + backupBytes / 4 + 64L * 1024L * 1024L
       val refusal = spaceCheck(required)
       if (refusal != null) throw InsufficientSpaceException(required, refusal)
     }
