@@ -1309,8 +1309,11 @@ function tools(svc: AndroidPrivilegeService, shellFace?: { resolve?(spec: Record
               return 'Shizuku 特权通道：' + shizukuLine(ready)
                 + (ready === undefined ? '（android_capabilities 会触发一次实测补探）' : '')
             })(),
-            gates?.a11yEnabled ? '结论：设备控制可用（走无障碍通道）——下一步用 android_ui_dump（manage）拿语义清单'
-              : gates?.adbReady ? '结论：设备控制可用（走 ADB 通道，仅兜底）——下一步用 android_ui_dump（无障碍优先）或 android_ui_tree（ADB）'
+            // 0.14.1：无障碍关时**不得再把模型引向 android_ui_dump**——那条路在纯 Shizuku 下恒不可用，
+            // 会白撞一堵墙；此时控件树的唯一来源是 android_ui_tree（与 ui_dump 同形，可 ref 操作）。
+            gates?.a11yEnabled ? '结论：设备控制可用（走无障碍通道）——下一步用 android_ui_dump 拿语义清单'
+              : gates?.shizukuReady === true ? '结论：设备控制可用（走 Shizuku 特权通道）——**无障碍未开启，控件树用 android_ui_tree**（与 android_ui_dump 同形、可 ref 操作）'
+                : gates?.adbReady ? '结论：设备控制可用（走 ADB 通道）——**无障碍未开启，控件树用 android_ui_tree**'
                 : '结论：不可用——开启任一通道即可（推荐无障碍：系统设置 → 无障碍 → DSH 设备控制，一步即用）',
             v.message ? `通道说明：${String(v.message)}` : '',
             (() => {

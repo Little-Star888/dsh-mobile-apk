@@ -6,14 +6,14 @@
  *
  * 工具集（全部经 ctx.androidPrivilege 前置校验 + 审计）：
  *  - android_screenshot      截屏（接既有视觉链路读图；授权通道执行 screencap）
- *  - android_ui_tree         控件树原始 XML 导出（uiautomator dump，高级/脚本面）
+ *  - android_ui_tree         控件树（uiautomator）：**无障碍关时的控件树来源**，与 ui_dump 同形、可 ref 操作
  *  - android_device_info     设备与屏幕信息 + 前台应用（dumpsys 为只读面）
  *  - android_act_input       输入事件（点按/滑动/按键/文本）——高风险动作类，主屏审批前不执行
  *  - android_ui_dump         语义控件清单（ADB 2.0 Phase A：解析+剪枝+编号，紧凑 JSON）
  *  - android_ui_click        语义点击（按 id/text/desc 引用，bounds 中心 tap；不可点回退祖先）
  *  - android_ui_scroll       语义滚动（按节点或屏幕方向/fraction swipe）
  *  - android_ui_input        语义文本输入（ASCII 走 input text；非 ASCII 走 ADBKeyboard 广播）
- *  调用序（PRD-0.13.2 §3.2）：先 android_ui_dump 拿语义清单，失败再截图兜底。
+ *  调用序（PRD-0.13.2 §3.2）：无障碍开 → android_ui_dump；无障碍关（纯 Shizuku）→ android_ui_tree；两者失败再截图兜底。
  *
  * 边界声明（PRD F1.6）：仅操作已授权设备；不做账号接管/验证码/支付/绕过风控；
  * 不隐藏 ADB 或自动化信号。敏感操作（截图/界面树）默认提供脱敏选项（文本脱敏摘要模式）。
@@ -614,7 +614,7 @@ function tools(ctx: Context, priv: PrivilegeFace) {
     description:
       '【两级披露第二级】按需取回 dump 的全量明细：给 ref 取单个节点的逐字段记录（完整文本/几何/祖先，'
       + '不受默认渲染压缩影响）；给 all=true 分页取整表（offset/limit，默认 60 行并如实报告省略量）。'
-      + '只在默认清单不够用时用——日常定位用 android_ui_dump。需先执行过 android_ui_dump。',
+      + '只在默认清单不够用时用——日常定位用取树工具。需先执行过一次取树（android_ui_dump 或 android_ui_tree）。',
     parameters: {
       ref: { type: 'string', description: '节点引用（id:nN / text:… / desc:… / rid:…；与 all 二选一）' },
       all: { type: 'boolean', description: 'true = 取整表分页（配 offset/limit）' },
@@ -651,7 +651,7 @@ function tools(ctx: Context, priv: PrivilegeFace) {
       const a = await guard('ui_detail', args as Record<string, unknown>, exec as { agent?: { session?: unknown } })
       if (!a.ok) return { ok: false, denied: true, text: a.guidance }
       if (!uiCache || Date.now() - uiCache.ts > UI_CACHE_TTL) {
-        return { ok: false, denied: false, text: '没有最近的控件清单——请先 android_ui_dump，再按需取明细' }
+        return { ok: false, denied: false, text: '没有最近的控件清单——请先取树（android_ui_dump 或 android_ui_tree），再按需取明细' }
       }
       const handle = detailHandle
       const path = detailPath
@@ -1362,7 +1362,7 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
       + '产出结构化节点表（id/父id/文本/描述/类型/bounds/可点/可滚动/可编辑，不截断）；'
       + '界面未变时返回「未变」摘要（传 fresh:true 强制重抓）。'
       + '下一步用 android_ui_click / android_ui_input / android_ui_scroll；页面大幅变化后重新 dump。'
-      + '需 danger-full-access；原始 XML 用 android_ui_tree。',
+      + '需 danger-full-access；无障碍未开启时改用 android_ui_tree（uiautomator，返回同形节点清单）。',
     parameters: {
       fresh: { type: 'boolean', description: 'true = 跳过「界面未变」快路径，强制完整重抓（默认 false）' },
       screenId: SCREEN_PARAM,
@@ -1394,7 +1394,7 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
               + (targetScreen !== 'real'
                 ? '② 纯 Shizuku 下虚拟屏改用 android_vdisplay_input（tap/swipe/keyevent/text，坐标基于该屏像素）；'
                   + '③ 或用 android_vdisplay_status 复核屏幕是否还在。'
-                : '② 或 android_screenshot 直接看画面；③ ADB 已配对时用 android_ui_tree（uiautomator）。'),
+                : '② 无障碍未开启时用 android_ui_tree（uiautomator，同形节点清单，可 ref 操作）；③ 或 android_screenshot 直接看画面。'),
           }
         }
         const data = (r.data ?? {}) as A11ySnapshot
@@ -1413,7 +1413,7 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
           if (!dec.ok) {
             return {
               ok: false, denied: false, screen: { w: 0, h: 0 }, rotation: 0, count: 0, rawCount: 0, nodes: [],
-              text: `无障碍载荷解码失败（协议 V2，拒绝产出不可信清单）：${dec.error}——请更新 APK，或改用 ADB 通道（android_ui_tree）`,
+              text: `无障碍载荷解码失败（协议 V2，拒绝产出不可信清单）：${dec.error}——请更新 APK，或改用 android_ui_tree（uiautomator，无需无障碍，返回同形节点清单）`,
             }
           }
           v2 = dec.value

@@ -104,13 +104,16 @@ const CAPABILITY_SKILLS: ReadonlyArray<{ name: string; description: string; sour
       '设备工具默认不在工具列表里：先调用 `android_capabilities`（group=phone），下一步起可用。',
       '',
       '## 真实屏',
-      '1. `android_ui_dump` 取语义树（节点有 id / 类型 / 文本 / bounds / 可点可滚）。',
+      '1. 取控件树：**无障碍开着**用 `android_ui_dump`；**无障碍关着（纯 Shizuku）**用 `android_ui_tree`——'
+      + '两者返回同形节点清单（id / 类型 / 文本 / bounds / 可点可滚），都能按 ref 操作。',
       '2. `android_ui_click {ref}` / `android_ui_input {ref, text}` / `android_ui_scroll` / `android_act_input`。',
       '3. `android_screenshot` 看画面。ref 是同一次 dump 的代次句柄；界面变化后重新 dump，不要按旧 ref 猜点。',
       '',
       '## 虚拟屏',
       '1. `android_vdisplay_create` 建屏（编号 1..N，本版上限 1）。',
-      '2. 以 `screenId: "virtual-1"` 调 `android_ui_dump` / `android_ui_click` 等；先 `android_app_launch` 把 App 拉到该屏。',
+      '2. 以 `screenId: "virtual-1"` 调 `android_ui_dump` / `android_ui_click` 等；先 `android_app_launch` 把 App 拉到该屏。'
+      + '虚拟屏上的**按键与文本**用 `android_vdisplay_input`（android_ui_input 只对可编辑节点生效）；'
+      + '注意 `android_ui_tree` **读不到虚拟屏**（uiautomator 只 dump 默认屏）。',
       '3. 语义树需要无障碍；纯 Shizuku 下返回 `actionMode: "coordinate"`，只能坐标操作。',
       '',
       '## 屏幕范围',
@@ -333,8 +336,9 @@ export function capabilityTool(
         groups,
         channels: facts,
         text: [head, '能力组：', ...stateLines, '通道：', ...channelLines,
-          '用法：phone 用 android_ui_dump 取语义树后 android_ui_click（ref）；browser 用 browser_open 后 browser_snapshot（ref）；'
-          + '虚拟屏用 android_vdisplay_create，再以 screenId="virtual-N" 调 phone 工具。',
+          '用法：phone 取控件树用 android_ui_dump（无障碍开）或 android_ui_tree（无障碍关，两者同形），再 android_ui_click（ref）；'
+          + 'browser 用 browser_open 后 browser_snapshot（ref）；虚拟屏用 android_vdisplay_create，再以 screenId="virtual-N" 调 phone 工具，'
+          + '按键/文本用 android_vdisplay_input。',
         ].join('\n'),
       } as never
     },
