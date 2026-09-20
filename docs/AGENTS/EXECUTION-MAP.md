@@ -151,6 +151,7 @@ sequenceDiagram
 | 高 | B02 | Kotlin 单测数量门禁可被**整类删除**绕过（A 判据只看现存类，B 判据对缺席类直接 continue） | `scripts/check-kotlin-test-count.mjs:129`、`scripts/check-kotlin-test-count.mjs:153` | 「防防线删失」被部分架空 | 未修 |
 | 高 | B03 | `verify-vdisplay-float` 的「非法档位必须被拒」是**永久假通过**，且顺手改设备档位 | `scripts/verify-vdisplay-float.mjs:95-103` | 该断言永远绿；跑一次就把设备 scale 写成 `coerce` 后的值 | 未修 |
 | 高 | B03 | `verify-browser-panel` 的 `newTab:true` 是死参数（壳侧不解析） | `scripts/verify-browser-panel.mjs:123-128`、`app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt:384-394` | 「多页签」断言实际没建页签，属假覆盖 | 未修 |
+| 高 | B02 | apk CI 的「工具输出 schema 契约门禁」结构必红：它只自建 manage 一个包，而门禁要求 7 个插件的 lib 在场；且一条门禁红会让后续 11 条全部 skipped | `.github/workflows/pr-gate.yml` | 分支 CI 长期红，且掩盖其余门禁的真实结果 | **已修（本轮）**：schema 门禁移到「插件单测门禁」的全量构建之后；第一个 job 的全部门禁步骤补 `if: always()`（失败不再掩盖后续）；本地按 CI 顺序复跑该门禁 PASSED（7 插件 153 分支） |
 | 中 | K01 | 主 WebView 渲染进程死亡后没有任何重建路径 | `app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:605-619`、`app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:193` | 崩溃后引导页被藏、看门狗刷 Toast，用户只能杀进程 | 未修 |
 | 中 | K09 | 面板 `addView` 失败被静默吞掉，而 `expanded` 已置 true | `app/src/main/java/com/dsharnessmobile/shell/OverlayService.kt:299`、`app/src/main/java/com/dsharnessmobile/shell/OverlayService.kt:274` | 状态说面板在、屏幕上没有，且无日志 | 未修 |
 | 中 | K04 | 审计 `result` 恒 `ok`、拒绝完全不落账 | `app/src/main/java/com/dsharnessmobile/shell/ControlAudit.kt:34` | 审计无法回答「谁执行了什么、结果如何」 | 未修 |
