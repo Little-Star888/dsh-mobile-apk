@@ -2,6 +2,7 @@ package com.dsharnessmobile.shell
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -128,12 +129,18 @@ class BrowserHostNavigationPolicyTest {
   // 整段注入脚本解析失败，回执却报 `stale-ref`（与真因毫无关系的错误码）。
   @Test
   fun javascriptStringLiteralsEscapeLineSeparators() {
-    val lineSeparator = "\u2028"
-    val paragraphSeparator = "\u2029"
-    for (code in listOf(lineSeparator, paragraphSeparator)) {
-      val escaped = jsString("a" + code + "b")
-      assertFalse("注入字面量里不得出现裸行分隔符：$escaped", escaped.contains(code))
-      assertTrue("必须写成 uXXXX 转义序列（反斜杠 u 打头）：$escaped", escaped.contains("\\u20"))
+    // 纯函数面：不依赖 org.json 的实现差异（Android 的 quote 不转义行分隔符，而单测类路径上的
+    // org.json:json 会转义——这正是此前「恒等替换 + 断言通过」的假绿来源）。这里按**形态**判：
+    val cases = linkedMapOf("\u2028" to "a\\u2028b", "\u2029" to "a\\u2029b")
+    for ((code, expected) in cases) {
+      val raw = "a" + code + "b"
+      val escaped = escapeLineSeparators(raw)
+      assertNotEquals("必须是真实替换，恒等替换等于没修：$escaped", raw, escaped)
+      assertEquals("裸行分隔符必须变成字面量形态的转义文本", expected, escaped)
+      assertFalse("转义后不得再有裸行分隔符：$escaped", escaped.contains(code))
+      // 端到端：无论 quote 产出裸字符还是已转义文本，jsString 的输出都不得含裸行分隔符。
+      val viaQuote = jsString(raw)
+      assertFalse("jsString 输出不得含裸行分隔符：$viaQuote", viaQuote.contains(code))
     }
     // 反向对照：普通文本不得被这次转义改变（否则所有注入脚本都会变形）。
     assertEquals("\"aéb\"", jsString("aéb"))

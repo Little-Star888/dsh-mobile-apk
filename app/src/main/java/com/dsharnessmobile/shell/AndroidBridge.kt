@@ -412,11 +412,17 @@ class AndroidBridge(
  *
  * 审查 §3.1-C3：`JSONObject.quote` 只处理 `" \ /` 与控制字符（< 0x20），**不转义
  * U+2028/U+2029**；而 ES2019 之前，行分隔符出现在字符串字面量里是 **SyntaxError**
- * （Chromium < 92）。后果形态很阴：模型 `browser_type` 一段含 U+2028 的正文（网页/JSON 里常见）
+ * （Chrome 74；minSdk 26 的机器可能带旧 WebView，故按旧引擎口径防御）。后果形态很阴：模型 `browser_type` 一段含 U+2028 的正文（网页/JSON 里常见）
  * → 整段注入脚本解析失败 → `evaluateJavascript` 回调拿不到对象 → 工具回 **stale-ref**
  * （一个与真因毫无关系的错误码）→ 模型去重新 snapshot 而不是改变输入方式。
  * 一处修、全仓受益（所有经本函数拼装的注入脚本：TYPE_JS、ConfigTransfer 等）。
  */
-internal fun jsString(value: String): String = JSONObject.quote(value)
-  .replace(" ", "\u2028")
-  .replace(" ", "\u2029")
+internal fun jsString(value: String): String = escapeLineSeparators(JSONObject.quote(value))
+
+/**
+ * 把**裸行分隔符**换成 `\uXXXX` 转义文本（纯函数：单测直接判形态，不受 org.json 实现差异影响）。
+ * 方向只能是「裸字符 → 转义文本」；反向替换（把转义文本再转义一次）会改变字符串语义。
+ */
+internal fun escapeLineSeparators(quoted: String): String = quoted
+  .replace(" ", "\\u2028")
+  .replace(" ", "\\u2029")
