@@ -39,6 +39,12 @@ object WatchdogV2 {
   /** DEGRADED_HTTP 阶梯阈值：6 拍 × 5s = 30s（与 restartDeadConfirmations 同量级，远小于 90s 冷启动上限）。 */
   const val DEGRADED_RESTART_CONFIRMATIONS = 6
 
+  /** 引擎日志尾部签名：插件树装配失败（`plugin tree failed to load`）。 */
+  const val SIGNATURE_PLUGIN_TREE = "plugin-tree"
+
+  /** 引擎日志尾部签名：其它未捕获异常（不参与升级，保留「HTTP 活着就不打扰」语义）。 */
+  const val SIGNATURE_UNCAUGHT = "uncaught"
+
   @Volatile
   var consecutiveFailures = 0
     private set
@@ -46,6 +52,22 @@ object WatchdogV2 {
   @Volatile
   var consecutiveDegradedHttp = 0
     private set
+
+  /**
+   * 插件树装配失败的连续拍数（2026-09-21 新增）。
+   *
+   * 为什么必须单独立账：`DEGRADED_LOG` 原来在 `planTick` 里**直接早退 IDLE**（HTTP 活着就不打扰），
+   * 于是「插件树 failed to load」这条形态既没有阶梯、也永远求值不到 `undoReady()`——设备实测
+   * （注入坏插件 → 重启引擎）：引擎 HTTP 活着但插件树挂死，`undo-gate.log` 里连 arm 都没有，
+   * 用户只能手动重启。装配失败与「活动 turn 里炸了一次」是两回事，前者必须能自救。
+   */
+  @Volatile
+  var consecutivePluginTreeFailures = 0
+    private set
+
+  /** 最近一次探活读到的日志签名（[assessProbe] 写、[recordProbe]/[planTick] 读）。 */
+  @Volatile
+  private var lastLogSignature: String? = null
 
   /**
    * 退避阶梯（纯函数，JVM 单测）：5s → 10s → 20s → 40s → 80s 封顶。
@@ -64,14 +86,29 @@ object WatchdogV2 {
   fun recordProbe(state: ProbeState) {
     consecutiveFailures = if (state == ProbeState.DEAD) consecutiveFailures + 1 else 0
     consecutiveDegradedHttp = nextDegradedCount(state, consecutiveDegradedHttp)
+    consecutivePluginTreeFailures = nextPluginTreeCount(state, lastLogSignature, consecutivePluginTreeFailures)
   }
 
   /** 纯函数（JVM 单测）：DEGRADED_HTTP 自增，其余状态清零。 */
   fun nextDegradedCount(state: ProbeState, count: Int): Int =
     if (state == ProbeState.DEGRADED_HTTP) count + 1 else 0
 
+  /** 纯函数（JVM 单测）：**只认**插件树签名（不跟 DEGRADED_LOG 整类计数，见字段注释）。 */
+  fun nextPluginTreeCount(state: ProbeState, signature: String?, count: Int): Int =
+    if (pluginTreeHung(state, signature)) count + 1 else 0
+
+  /** 纯函数：是否「插件树挂死」（HTTP 活着但 loader entry 导入失败）。 */
+  fun pluginTreeHung(state: ProbeState, signature: String?): Boolean =
+    state == ProbeState.DEGRADED_LOG && signature == SIGNATURE_PLUGIN_TREE
+
+  /**
+   * 测试缝：让 [planTick] 的插件树分支能在 JVM 上被驱动（生产写入方只有 [assessProbe]）。
+   * 不用反射：本对象已是全局单例，测试用 `@Before reset` 的同一套路复位。
+   */
+  internal fun setLogSignatureForTest(signature: String?) { lastLogSignature = signature }
+
   /** 熔断与退避共用同一计数（#175：半死阶梯与 DEAD 共用退避，防重启风暴）。 */
-  fun effectiveFailureCount(): Int = maxOf(consecutiveFailures, consecutiveDegradedHttp)
+  fun effectiveFailureCount(): Int = maxOf(consecutiveFailures, consecutiveDegradedHttp, consecutivePluginTreeFailures)
 
   fun tripped(): Boolean = effectiveFailureCount() >= MAX_CONSEC_FAILURES
 
@@ -80,6 +117,8 @@ object WatchdogV2 {
   fun reset() {
     consecutiveFailures = 0
     consecutiveDegradedHttp = 0
+    consecutivePluginTreeFailures = 0
+    lastLogSignature = null
   }
 
   /**
@@ -93,8 +132,10 @@ object WatchdogV2 {
   fun assessProbe(context: Context): ProbeState {
     val base = EngineProbe.check(2_500).optBoolean("running", false)
     if (!base) return if (EngineProbe.portReachable(1_000)) ProbeState.DEGRADED_HTTP else ProbeState.DEAD
-    if (engineLogShowsFailure(context)) {
-      LogCollector.log(TAG, "engine log reports a recoverable warning while HTTP remains alive")
+    val signature = engineLogFailureSignature(context)
+    lastLogSignature = signature
+    if (signature != null) {
+      LogCollector.log(TAG, "engine log reports a recoverable warning while HTTP remains alive: " + signature)
       return ProbeState.DEGRADED_LOG
     }
     return ProbeState.HEALTHY
@@ -133,9 +174,17 @@ object WatchdogV2 {
       logs += "DEGRADED_HTTP 连续 " + consecutiveDegradedHttp + " 拍（端口可连但 HTTP 持续失败）→ 升级为受控重启"
     }
     // DEGRADED_LOG 保留「绝不重启」语义：HTTP 存活时重启会打断活动 turn。
-    if (alive && !degradedLadderTripped) return TickPlan(TickAction.IDLE)
+    // **例外：插件树装配失败**（[pluginTreeHung]）。那一刻引擎没起来，且不会自愈——设备实测
+    // （2026-09-21，注入坏插件后重启）：本行早退 IDLE ⇒ 自动 undo 永不被求值（调用方还会在 IDLE
+    // 拍 disarm），用户只剩手动重启。放行到 undo 决策后，配置回滚才有机会把坏插件剔出去。
+    if (alive && !degradedLadderTripped && !pluginTreeHung(state, lastLogSignature)) {
+      return TickPlan(TickAction.IDLE)
+    }
     if (!engineReady) return TickPlan(TickAction.HOLD)
-    if (!degradedLadderTripped && consecutiveFailures < restartDeadConfirmations) {
+    // 「confirmed-dead sample」这一档是给**进程死亡**留的观察期；插件树挂死形态下 consecutiveFailures
+    // 恒为 0（那是 DEAD 专用计数），不放行的话这里会永远 HOLD，undo 决策同样到不了。
+    if (!degradedLadderTripped && !pluginTreeHung(state, lastLogSignature) &&
+      consecutiveFailures < restartDeadConfirmations) {
       return TickPlan(
         TickAction.HOLD,
         listOf("confirmed-dead sample " + consecutiveFailures + "/" + restartDeadConfirmations + "; observing before restart"),
@@ -158,7 +207,10 @@ object WatchdogV2 {
     if (undoReady()) {
       return TickPlan(TickAction.UNDO, logs + ("auto-undo trigger after confirmed failures=" + effectiveFailureCount()))
     }
-    if (tripped()) {
+    // 熔断守的是「undo 不可用时不得盲目反复重启」。插件树挂死是例外：此时 undo 可能被 30 分钟重试窗
+    // 闸掉，若再被熔断锁进 HOLD，就再也没有任何自动路径（引擎不会自愈、也永远等不到 HEALTHY 去解锁）
+    // ——只剩手动重启。放行重启（仍受退避节流）比锁死好；坏配置下次启动照旧失败，但至少不是死局。
+    if (tripped() && !pluginTreeHung(state, lastLogSignature)) {
       return TickPlan(TickAction.HOLD, logs + "watchdog circuit open after confirmed-dead failures; destructive recovery paused")
     }
     if (now < nextRestartAllowedAt) {
@@ -309,21 +361,30 @@ object WatchdogV2 {
   }
 
   /** 引擎日志尾部异常扫描（最近 4KB 内 fatal/Error 关键字；命中率控制：只取尾部）。 */
-  private fun engineLogShowsFailure(context: Context): Boolean {
+  /** 读引擎日志尾部 4KB，返回命中的签名（[SIGNATURE_PLUGIN_TREE] 优先；无命中 null）。 */
+  private fun engineLogFailureSignature(context: Context): String? = logSignatureOf(readEngineLogTail(context))
+
+  /** 纯函数：日志尾部文本 → 签名（插件树优先于未捕获异常）。 */
+  internal fun logSignatureOf(tail: String): String? = when {
+    tail.contains("plugin tree failed to load") -> SIGNATURE_PLUGIN_TREE
+    tail.contains("UncaughtException") -> SIGNATURE_UNCAUGHT
+    else -> null
+  }
+
+  private fun readEngineLogTail(context: Context): String {
     return try {
       val f = java.io.File(context.filesDir, "engine.log")
-      if (!f.exists()) return false
+      if (!f.exists()) return ""
       java.io.RandomAccessFile(f, "r").use { raf ->
         val len = raf.length()
         val off = (len - 4096).coerceAtLeast(0)
         raf.seek(off)
         val buf = ByteArray((len - off).toInt().coerceAtMost(4096))
         val n = raf.read(buf)
-        val tail = String(buf, 0, n.coerceAtLeast(0), Charsets.UTF_8)
-        tail.contains("UncaughtException") || tail.contains("plugin tree failed to load")
+        String(buf, 0, n.coerceAtLeast(0), Charsets.UTF_8)
       }
     } catch (_: Exception) {
-      false
+      ""
     }
   }
 

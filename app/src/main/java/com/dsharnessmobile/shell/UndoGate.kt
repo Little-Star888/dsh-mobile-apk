@@ -155,8 +155,85 @@ object UndoGate {
     armFile(context).takeIf { it.exists() }?.readText()?.trim()?.toLongOrNull()
 
   /**
+   * 记录「已知良好快照 id」——**只由壳侧自己的健康观测写入**（引擎探活 HEALTHY 的那一拍）。
+   *
+   * 为什么必须由壳侧判：急救 CLI 的 `restore-last-good` 目标是插件自报的
+   * `boot-state.json.lastGoodAt`，而那个 `ok=true` 是**插件 apply 阶段/30s 定时**写的，并不代表
+   * 引擎整体起来了（2026-09-21 设备实测：注入坏插件后，引擎起不来，而 boot-state 仍写 ok、
+   * `lastGoodAt` 前移到崩溃那次启动 ⇒ `restore-last-good` 选中的正是**含坏配置的那份快照**，
+   * 回滚把坏配置原样写回，日志却报 `executed ok`）。
+   * 壳侧的唯一硬证据是**引擎 HTTP 活着**（看门狗 5s 一拍的两级探活）——那就用它来定义「好」。
+   *
+   * 幂等且廉价：一次目录列举 + 一次字符串比较；值不变不落盘（5s 一拍，不刷文件）。
+   */
+  fun noteHealthy(context: Context, engine: EngineManager) {
+    val id = newestSnapshotId(autoSnapshotIds(engine)) ?: return
+    // 无安装指纹就不记：没有指纹就无法回答「这份快照属于哪次安装」，而跨版本的配置回滚正是要禁止的
+    // （见 [knownGoodUsable]）——宁可退回「不自动回滚」，也不做一次归属不明的写回。
+    val fp = installFingerprint(context) ?: return
+    if (id == knownGoodId(context) && fp == knownGoodFp(context)) return
+    try {
+      knownGoodFile(context).writeText(id + "\n" + fp + "\n")
+      record(context, "known-good snapshot=" + id + " fp=" + fp.take(12))
+    } catch (t: Throwable) {
+      Log.e(TAG, "known-good write failed", t)
+    }
+  }
+
+  /**
+   * 纯逻辑：这份「已知良好」记录能否用于**本次安装**的回滚（JVM 单测覆盖）。
+   *
+   * 版本护栏（2026-09-21 用户追问「已有插件与新插件冲突时，会不会为了救旧插件而把新版本的改动回退掉」
+   * 的正面回答）：只有当记录里的安装指纹与当前安装一致时才允许写回配置。否则会出现一种最坏的混合态：
+   * **新版本的代码（APK 已装）+ 旧版本的配置（快照写回）**——新版本的补丁/挂载项被静默删掉，
+   * 用户看到的是「升级后功能反而没了」，且无从归因。跨版本时正确的恢复路径是内嵌快照重解包/工厂复位，
+   * 不是把上一次安装的配置写回。
+   *
+   * @return 可用的快照 id；不可用（跨版本 / 记录缺指纹 / id 为空）返回 null。
+   */
+  internal fun knownGoodUsable(storedId: String?, storedFp: String?, currentFp: String?): String? =
+    storedId?.takeIf { it.isNotEmpty() && !storedFp.isNullOrEmpty() && storedFp == currentFp }
+
+  /** 当前安装的快照指纹（`files/.snapshot-fingerprint`，EngineManager 写入；缺失返回 null）。 */
+  private fun installFingerprint(context: Context): String? =
+    File(context.filesDir, ".snapshot-fingerprint")
+      .takeIf { it.exists() }?.readText()?.trim()?.takeIf { it.isNotEmpty() }
+
+  /** 快照目录里的 id 列表（排除 `boot-state.json` / `env-vault` 等非快照条目）。 */
+  private fun autoSnapshotIds(engine: EngineManager): List<String> {
+    val dir = File(File(engine.homeDir, ".dsh/undo-snapshots"), "auto")
+    return try {
+      dir.list()?.toList() ?: emptyList()
+    } catch (t: Throwable) {
+      Log.w(TAG, "snapshot dir unreadable: " + t.message)
+      emptyList()
+    }
+  }
+
+  /**
+   * 纯逻辑：取最新快照 id（JVM 单测覆盖）。
+   *
+   * id 形如 `20260920-235635-524b`（本地时间 + 4 位随机），字典序即时间序；非该形状的名字
+   * （`boot-state.json`、`env-vault`、`*.tmp`）一律不认——否则会把状态文件当成快照 id 传给 CLI。
+   */
+  internal fun newestSnapshotId(names: List<String>): String? =
+    names.filter { SNAPSHOT_ID.matches(it) }.maxOrNull()
+
+  /** 已知良好快照 id（无则 null）。 */
+  internal fun knownGoodId(context: Context): String? =
+    knownGoodFile(context).takeIf { it.exists() }?.readText()?.lineSequence()?.firstOrNull()?.trim()?.takeIf { it.isNotEmpty() }
+
+  /** 写入该记录时的安装指纹（第二行；无则 null）。 */
+  internal fun knownGoodFp(context: Context): String? =
+    knownGoodFile(context).takeIf { it.exists() }?.readText()?.lineSequence()?.drop(1)?.firstOrNull()?.trim()?.takeIf { it.isNotEmpty() }
+
+  /** 该快照 id 在 auto 目录里是否仍存在（快照会被 prune 掉，选目标前必须核对）。 */
+  private fun snapshotExists(context: Context, engine: EngineManager, id: String): Boolean =
+    File(File(File(engine.homeDir, ".dsh/undo-snapshots"), "auto"), id).isDirectory
+
+  /**
    * 执行自动 undo（必须后台线程调用）：
-   * 1. 急救 CLI restore-last-good（快照回滚）
+   * 1. 急救 CLI 回滚（**优先 `restore <已知良好 id>`**，无可用 id 才退回 `restore-last-good`）
    * 2. 写 .undo-auto-done 标记（幂等 + 供启动页显示）
    * 3. 返回是否执行了回滚（+ 摘要）
    */
@@ -184,12 +261,29 @@ object UndoGate {
         record(context, "skipped no-snapshots listLines=" + list.size)
         return UndoResult(false, "无快照可回滚", null)
       }
-      val out = runCli(context, engine, cli, dsh, listOf("restore-last-good"))
+      // 2026-09-21 主修：回滚目标 = **壳侧确认健康那一刻的最新快照**（而不是 CLI 自报的 lastGood），
+      // 且**只允许回滚本次安装建立的快照**（跨版本一律不回滚，见 [knownGoodUsable]）。
+      // 无可用目标时返回「不执行」并写明理由——旧实现在这里退回 restore-last-good，而设备实测证明
+      // 那条路会把**含坏配置的快照**（崩溃那次启动建的）或**上一次安装的配置**写回，日志却是 ok。
+      val known = knownGoodUsable(knownGoodId(context), knownGoodFp(context), installFingerprint(context))
+      if (known == null) {
+        record(
+          context,
+          "aborted no-known-good-for-this-install stored=" + (knownGoodId(context) ?: "none") +
+            "/" + (knownGoodFp(context)?.take(12) ?: "none") + " current=" + (installFingerprint(context)?.take(12) ?: "none"),
+        )
+        return UndoResult(false, "本次安装尚未建立已知良好快照：不自动回滚（避免把旧版本配置写回）", null)
+      }
+      if (!snapshotExists(context, engine, known)) {
+        record(context, "aborted known-good pruned id=" + known)
+        return UndoResult(false, "已知良好快照已被轮转回收（" + known + "）：不自动回滚", null)
+      }
+      val out = runCli(context, engine, cli, dsh, listOf("restore", known))
       val ok = out.any { it.contains("完成：还原") }
       val summary = out.joinToString("\n")
       if (ok) {
         markerFile(context).writeText(System.currentTimeMillis().toString())
-        record(context, "executed ok snapshot=" + (restoreTarget(out) ?: "?"))
+        record(context, "executed ok snapshot=" + (restoreTarget(out) ?: known) + " via=known-good")
       } else {
         Log.e(TAG, "auto-undo failed: " + summary)
         record(context, "executed failed exitSummary=" + summary.take(160).replace('\n', ' '))
@@ -279,8 +373,14 @@ object UndoGate {
     "auto-undo pending: " + it.readText()
   }
 
+  /** 快照 id 形状：`yyyyMMdd-HHmmss-rrrr`（本地时间 + 4 位随机；字典序 = 时间序）。 */
+  private val SNAPSHOT_ID = Regex("^20[0-9]{6}-[0-9]{6}-[0-9a-f]{4}$")
+
   private fun markerFile(context: Context) = File(context.filesDir, ".undo-auto-done")
   private fun armFile(context: Context) = File(context.filesDir, ".undo-auto-armed")
+
+  /** 壳侧确认过健康的那份快照 id（[noteHealthy] 写、[execute] 读）。 */
+  private fun knownGoodFile(context: Context) = File(context.filesDir, ".undo-known-good")
 
   /** 上次自动 undo 时间（毫秒）；从未执行返回 null。 */
   private fun lastUndoAt(context: Context): Long? =

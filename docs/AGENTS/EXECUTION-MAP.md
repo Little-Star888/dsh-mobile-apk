@@ -120,7 +120,7 @@ sequenceDiagram
 | S01 | 引擎侧注入层（三个子仓） | 页面内发布标记与桥入口、钳面板几何、装配老内核垫片 | 客户端插件 apply() 装载；每个 index 响应经 tapIndex 注入 | 交互面 | K04（壳侧 androidBridge/dshBackBridge 桥面） | 引擎插件系统按 profile-web.cordis.patch.yml 的 insert 行拉起 | dsh-client-ui-responsive/src/client/index.ts,dsh-host-web-compat/lib/index.js,dsh-shell-termux/src/index.ts | 高 |
 | B01 | 构建链与快照注入 | 快照构建 插件注入 门禁收口 到 APK 出包 | 人手动 pwsh -File scripts\build-apk-013.ps1 或发布链/CI 调用 | 构建与发布 | 门禁块,壳侧快照解压,插件源码与 vendor 固化面 | 开发者手动,发布链 build-release.ps1,CI 与云端 build-apk.mjs | scripts/build-apk-013.ps1,scripts/build-snapshot-013.mjs,scripts/inject-all.py,scripts/patches/apply-patches.mjs | 高 |
 | B02 | 静态门禁链与 CI | 33 个静态门禁脚本与三层接线的唯一声明处 | PR/CI、两条打包链、发布链 | 测试与门禁 | B01,B03 | 提交 PR、推 main、构建/发版 | scripts/check-release-gates.mjs,scripts/check-gate-skips.mjs,.github/workflows/pr-gate.yml,scripts/build-apk-013.ps1 | 高 |
-| B03 | 设备验收套件（CDP 与 adb 面） | 7 个 CDP 断言套件 + 5 个部署冒烟脚本的设备侧验收入口 | 人手动逐个执行 node scripts/verify-*.mjs 与 pwsh scripts/*.ps1 | 测试与门禁 | S-12 双 ABI 包装机、快照刷新完成、桥面 / 浏览器宿主 / 虚拟屏 / 注入层各块 | 人（PR 前设备门禁，无 CI 接入） | scripts/verify-webview-015.mjs,scripts/verify-state-sync.mjs,scripts/verify-browser-host.mjs,scripts/verify-browser-panel.mjs,scripts/verify-vdisplay-viewer.mjs,scripts/verify-vdisplay-float.mjs,scripts/verify-engine-log-copy.mjs,scripts/verify-screen-scope-matrix.mjs,scripts/verify-adb-only-tree.mjs,scripts/device-smoke.ps1,scripts/deploy-device.ps1,scripts/deploy-embedded.ps1,scripts/t0-check.ps1,scripts/e2e-phone-test.ps1 | 高 |
+| B03 | 设备验收套件（CDP 与 adb 面） | 9 个 CDP/设备断言套件 + 5 个部署冒烟脚本的设备侧验收入口 | 人手动逐个执行 node scripts/verify-*.mjs 与 pwsh scripts/*.ps1 | 测试与门禁 | S-12 双 ABI 包装机、快照刷新完成、桥面 / 浏览器宿主 / 虚拟屏 / 注入层各块 | 人（PR 前设备门禁，无 CI 接入） | scripts/verify-webview-015.mjs,scripts/verify-state-sync.mjs,scripts/verify-browser-host.mjs,scripts/verify-browser-panel.mjs,scripts/verify-vdisplay-viewer.mjs,scripts/verify-vdisplay-float.mjs,scripts/verify-engine-log-copy.mjs,scripts/verify-screen-scope-matrix.mjs,scripts/verify-adb-only-tree.mjs,scripts/verify-notify-consumption.mjs,scripts/verify-auto-undo.mjs,scripts/device-smoke.ps1,scripts/deploy-device.ps1,scripts/deploy-embedded.ps1,scripts/t0-check.ps1,scripts/e2e-phone-test.ps1 | 高 |
 
 ## 3. 疑点清单（证据 + 影响 + 状态）
 
@@ -143,6 +143,7 @@ sequenceDiagram
 | 高 | K10 | `NotifySuppressQueue` 是纯进程内 `@Volatile List`，而解释偏移已被推进 | `app/src/main/java/com/dsharnessmobile/shell/NotifySuppressQueue.kt:83`、`app/src/main/java/com/dsharnessmobile/shell/NotifyStore.kt:246` | 进程在抑制窗口被杀，该通知**永久丢失**（无补投路径） | 未修 |
 | 高 | K05 | 壳侧范围门比引擎侧宽 3 个 op（`state`/`webSnapshot`/`webAction`） | `app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:678` | 默认 `virtual-only` 范围下相关 op 必然误拒 | 未修 |
 | 高 | K02 | `LogCollector.writeBootDiag/writeBootFail` 出口不过 `EngineAuth.redact` | `app/src/main/java/com/dsharnessmobile/shell/LogCollector.kt:458-480` | 启动诊断与失败日志可能带 token 落盘 | 未修（评审 I-5/H-12 点名） |
+| 高 | K03 | 自动回滚目标取自**崩溃那次启动自己建的**快照（快照在建/挂载阶段就写，早于健康判定），于是「回滚成功」而状态没变好；跨版本还会把上一次安装的配置写回 | `app/src/main/java/com/dsharnessmobile/shell/UndoGate.kt:240`、`:194`、`vendor/dsh-undo-savepoint/lib/index.js:2198`（快照创建点） | 坏插件仍被挂载、引擎仍起不来而 `undo-gate.log` 报 `executed ok`；升级后若新版本从未健康启动，回滚会把新版本的补丁/挂载项静默删掉（新 APK + 旧配置） | 已修（2026-09-21：known-good 由壳侧探活健康定义 + 安装指纹护栏；设备验收 PASS=9） |
 | 高 | K03 | 刷新失败路径不判 `rollback` 返回值即清 marker；残留 `previous` 会被下次失败路径当回滚源 | `app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt:196-198` | 回滚结果被掩盖，坏树可能被「回滚」成更坏状态 | 未修（D-3 实效性缺口） |
 | 高 | K03 | 在线更新的 `usr` 换位是非事务两步 `renameTo`，不写指纹也不写 marker | `app/src/main/java/com/dsharnessmobile/shell/UpdateManager.kt:69-80` | 中途中断即半新半旧且无恢复源；指纹口径不同还会让下次启动重解压 | 未修 |
 | 高 | P01 | `sh -c "屏幕命令" 尾随词` 形态绕过屏幕范围门（引擎侧与壳侧同源） | `plugins/dsh-android-bridge/src/screen-scope.ts:200` | 范围门在带尾随词的 `sh -c` 形态下漏判 | 未修（S-1/S-2 家族） |
@@ -174,7 +175,7 @@ sequenceDiagram
 - [K02] 1. 【已确认，评审 §5.14 / I-5 / H-12 点名】`LogCollector.writeBootDiag`/`writeBootFail` 出口不过 `EngineAuth.redact`：LogCollector.kt:458-480 直接 `appendText(line)`，:544/562-590 的 `bootFailLine` 也不脱敏 detail；MainActivity.kt:569-573 却把 `url=${request.url}` 写进 boot-diag，而页面 URL 形态是 `ENGINE_URL + "/?token=" + token`（MainActivity.kt:822）。影响：一次 401/5xx 即把 launch token 明文落进 `files/boot-diag.log`（对照 :885 是唯一过 redact 的日文件咽喉）。
 - [K02] 2. 【已确认，注释与实现不符】`startEngine` 的 90s 冷却窗不是闸门：`withinCooldown`（:831）只用于打一行日志（:845-847），真门槛是 `portReachable || managedProcessAlive`（:832-834）。影响：端口未开且句柄已失（孤儿 linker64 / 句柄被覆盖）时任何调用方都能立刻再 spawn；`START_COOLDOWN_MS` 注释（:1519-1524「no new start within this window」）会让排障者误判「90s 内不会再起」。
 - [K02] 3. 【已确认的代码事实，现场未证实】启动窗保护依赖同一个可被清零的时间戳：`bootAgeMs = now - EngineManager.lastStartAttemptAt`（EngineService.kt:129 + WatchdogV2.kt:146），而该字段在 stopEngine:1271 / resetCooldown:1333 / rollbackToOld:1382 / EngineStartFlow.restart:702 都被置 0，置 0 后 bootAgeMs 变成 epoch 量级，「托管子进程仍在启动窗内」这条保护立即失效，刚 spawn 的引擎可能被 RESTART(force) 再杀一次；且时间戳取的是 kill 前的 `now`（:825 取、:867 写，中间 killExistingEngine 最长约 13s），实际启动窗比 90s 短。
-- [K02] 4. 【未证实，属设计取舍】`DEGRADED_LOG` 无计数、无阶梯：WatchdogV2.kt:96-99 命中 engine.log 尾 4KB 的 `plugin tree failed to load`/`UncaughtException` 即判 DEGRADED_LOG，而 :70-71 只对 DEGRADED_HTTP 计数、:136 直接早退 IDLE（EngineService.kt:140 还每拍 `UndoGate.disarm`）。影响：HTTP 活着但插件树挂死的引擎永不自愈（理由「重开会打断活动 turn」成立），但也没有任何升级路径或用户提示，只能手动重启。
+- [K02] 4. 【未证实，属设计取舍】`DEGRADED_LOG` 无计数、无阶梯：WatchdogV2.kt:96-99 命中 engine.log 尾 4KB 的 `plugin tree failed to load`/`UncaughtException` 即判 DEGRADED_LOG，而 :70-71 只对 DEGRADED_HTTP 计数、:136 直接早退 IDLE（EngineService.kt:140 还每拍 `UndoGate.disarm`）。影响：HTTP 活着但插件树挂死的引擎永不自愈（理由「重开会打断活动 turn」成立），但也没有任何升级路径或用户提示，只能手动重启。 **2026-09-21 部分修复**：`plugin tree failed to load` 这条签名（装配失败，**不可自愈**）已放行到 undo 决策并免于熔断锁死（`WatchdogPluginTreeTest` 5 例，含改前必红断言）；`UncaughtException` 仍保持 IDLE（活动 turn 不得被打扰）。
 - [K02] 5. 【已确认的代码事实，误杀未证实】`killExistingEngine` 的 pkill 比注释宽：注释称「pnpm/脚本子进程不含 bin.js web 特征，不会被误杀」（:1314-1316），实际命令是 `pkill -f "bin.js"`（:1318），没有 web 约束；同 uid 下任何命令行含 `bin.js` 的进程（例如 agent 工具里跑 `node xxx/bin.js`）都会被每次启动/重启杀掉。另 `.waitFor()` 无超时，同步阻塞调用线程（含看门狗线程）。
 - [K02] 漂移：`docs/AGENTS/BRIDGE-API.md:114` 说 `shellEnv()` 注入 `DSH_ADB_*`/`DSH_ADB_FULLACCESS`，源码 `EngineManager.kt:1464-1465` 注明 0.14.0 内置 adb 已退役、环境 map 里没有这两个键。
 - [K02] 漂移：`docs/AGENTS/ARCHITECTURE.md:45` 说 WatchdogV2.kt 负责「boot 恢复用户同意状态」，源码该文件已无任何 Receiver（`ActivityManager`/`BroadcastReceiver`/`Intent`/`IntentFilter` 只剩零使用的 import，WatchdogV2.kt:3-8），BOOT_COMPLETED 处理在 `BootReceiver.kt:23-36`。
@@ -405,7 +406,7 @@ sequenceDiagram
 | K02 | K01 | 启动全程用引导页阶段承载文案，成功才切 WebUI | EngineStartFlow.kt:442-476、MainActivity.kt:145-155 |
 | K02 | K03 | 刷新期禁启动、事务恢复、update-pending 健康 3 拍才删 usr-old 三处握手 | EngineManager.kt:813、1344-1369 |
 | K02 | UpdateManager | .update-pending/.update-pending-at 与 usr-old 的生产者 | UpdateManager.kt:84-85 |
-| K02 | UndoGate | 看门狗 UNDO 分支与启动超时两条路走同一闸门，配置层回撤 | EngineService.kt:134、EngineStartFlow.kt:349 |
+| K02 | UndoGate | 看门狗 UNDO 分支与启动超时两条路走同一闸门，配置层回撤（回滚被拒时须复位锁存，否则引擎不再被重试） | EngineService.kt:157、EngineStartFlow.kt:349 |
 | K02 | 通知链 NotifyStore/NotifyCenter | 每拍按字节偏移消费 .task-done.ndjson，双读不双发 | WatchdogV2.kt:258-309、NotifyCenter.kt:179 |
 | K02 | 控制载体 ControlCarrier | 随前台引擎服务起停，a11y 关着也承载 browser*/vd* | EngineService.kt:43 |
 | K02 | ConsoleSession | 复用 usrDir 与 shellEnv 起交互 shell，不起第二个引擎 | ConsoleSession.kt:33-50 |
@@ -2600,6 +2601,8 @@ scripts/verify-vdisplay-float.mjs
 scripts/verify-engine-log-copy.mjs
 scripts/verify-screen-scope-matrix.mjs
 scripts/verify-adb-only-tree.mjs
+scripts/verify-notify-consumption.mjs
+scripts/verify-auto-undo.mjs
 scripts/device-smoke.ps1
 scripts/deploy-device.ps1
 scripts/deploy-embedded.ps1

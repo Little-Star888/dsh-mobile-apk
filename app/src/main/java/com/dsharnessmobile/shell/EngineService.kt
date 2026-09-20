@@ -122,6 +122,12 @@ class EngineService : Service() {
             // 投出去，只有这条 5 s 心跳的日志还在更新）。幂等 + 一次 stat，不改本拍语义，失败也不冒泡。
             NotifyStore.drainTick(this)
             val state = WatchdogV2.assessProbe(this)
+            // 自动回滚的目标选择（2026-09-21）：**壳侧探活 HEALTHY 是「好」的唯一硬证据**。
+            // 急救 CLI 的 restore-last-good 认的是插件自报的 boot-state（apply 阶段/30s 定时写 ok，
+            // 不代表引擎整体起来了）——设备实测过「引擎起不来但 boot-state 仍 ok」的形态，于是回滚
+            // 会把**含坏配置的那份快照**原样写回。这里在健康拍记下当时的最新快照 id，UndoGate 回滚时
+            // 优先用它回滚。幂等 + 一次目录列举，值不变不落盘。
+            if (state == WatchdogV2.ProbeState.HEALTHY) UndoGate.noteHealthy(this, engineManager)
             // FX-210.2/.3/.4：决策与状态无关副作用全部落在 planTick 的前置段（先于一切早退，
             // 含熔断打开的那一拍），调用方只执行返回的破坏性动作。退避/熔断同用
             // effectiveFailureCount（半死阶梯与 DEAD 共用计数，见 #175/#210.2）。
@@ -159,6 +165,13 @@ class EngineService : Service() {
                     engineManager.startEngine()
                   } else {
                     LogCollector.log("dsh-watchdog", "auto-undo not executed: " + result.summary.take(160))
+                    // 回滚不可用时必须**解除失败计数与熔断锁存**，否则本拍之后再没有恢复路径：
+                    // planTick 在锁存打开后恒 HOLD（不再 RESTART），而「引擎一直死」又永远不会出现
+                    // HEALTHY 拍去解开它 —— 用户看到的是「引擎死了、App 也不再重试」的死局。
+                    // 2026-09-21 设备实测：跨版本护栏拒绝回滚（UndoGate 返回 executed=false）后正是这个形状
+                    // （引擎进程消失、HTTP 000，直到进程重启才恢复）。复位只清计数/锁存，不清 arm 文件；
+                    // 重启仍受退避约束（≤80s），不会打风暴。
+                    WatchdogV2.reset()
                   }
                 }.start()
               }
