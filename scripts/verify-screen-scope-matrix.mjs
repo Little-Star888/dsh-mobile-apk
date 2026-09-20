@@ -162,14 +162,19 @@ async function runModelTask(promptText) {
     return { sent: undefined, reason: '页面里找不到输入框（应用不在前台？）：' + JSON.stringify(sent).slice(0, 120) }
   }
   // 等模型编排完成：断言在设备侧，这里只等一个宽松窗口（页面上出现「已完成/停止」类状态或超时）。
+  // 完成判据（2026-09-19 设备实测修正）：**不能**去匹配「停止/Stop」——本界面在跑的时候显示
+  // 「深度求索中…」，匹配不到就直接判 idle，于是「模型还在想」被误判成「任务结束」，
+  // 后续断言全部落在半成品状态上（首跑就是这样得出 3 条 INCONCLUSIVE）。
+  // 改为「最短等待 + 文本连续两次不变」：既不会早退，也不会白等到超时。
   const deadline = Date.now() + TIMEOUT_S * 1000
+  const minWaitUntil = Date.now() + 60_000
+  let prev = ''
   while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 4000))
-    let running
-    try {
-      running = (await bridge([`(document.body.innerText.match(/停止|Stop|running/i) ? 'running' : 'idle')`]))[0]
-    } catch { running = 'idle' }
-    if (running === 'idle') break
+    await new Promise((r) => setTimeout(r, 6000))
+    const now = await pageConversationText()
+    if (/MISSING_CREDENTIAL|no API key for provider/i.test(now)) break
+    if (Date.now() > minWaitUntil && now !== '' && now === prev) break
+    prev = now
   }
   return { sent, blocker: detectBlocker(await pageConversationText()) }
 }
