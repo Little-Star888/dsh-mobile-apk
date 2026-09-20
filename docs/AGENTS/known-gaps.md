@@ -25,7 +25,18 @@
 - **BrowserHost 与浏览器控制面：工作区已实现、未设备回归**：壳侧 `BrowserHost`（隔离 WebView + 拒绝面 + 视口 letterbox）与六条桥 op、面板视口下拉已就绪；`plugins/dsh-android-browser` 的 17 条工具契约与 `tools.ts` 实现（open/snapshot/click/type/press/scroll/get_text/wait/navigate/back/forward/reload/tabs/identity/viewport/screenshot/tier）已在工作区落地——**但 0.14.0-preview 发布时壳侧宿主未落地（面板只读），工作区代码未过设备端到端回归**；页代次/旧 ref 拒绝、截图权限与身份切换的设备验收待补。
 - **虚拟屏多屏能力：工作区已实现、未设备回归**：壳侧已含实时 display registry（stable alias + 动态 displayId）、controller 自有选择目标、每查看器独立 bounds、查看器仲裁（同一 Surface 不能挂两个查看器，冲突返回 `viewer-target-occupied`）、`MAX_VIRTUAL_DISPLAYS=1`（0.14.0 发布提交起就是 1；旧文档写 2 是漂移）；面板已渲染「呈现目标」下拉（调 `vdisplaySelect`）。**发布版（0.14.0-preview）不含这些；工作区的 viewer 接管/重挂、双查看器冲突、横竖屏几何与截图仍未过设备回归。** 真实屏明确不可镜像（`screen-not-selectable`）。
 - **Shizuku 完整特权体验未收口**：UserService/AIDL v1 与固定 argv 执行已落地、建屏/launch/back 探针设备通过；「无障碍关闭时 Shizuku 提供完整特权体验」（U-4）仍缺工具面改名/能力迁移与设备矩阵；ADB 配对页仍作为迁移/诊断面保留，未按 U-4 退役。
+  **2026-09-19 设备实测更正**：本条登记的「设备矩阵」已由用户手工跑出，结论不是「未测」而是**确已损坏**——
+  工具面 `android_capabilities` 在冷启动后报「Shizuku 未就绪」而壳侧实测已授权（模型据此放弃可用能力），
+  且 `android_privilege_status` 把 Shizuku 结论挂在 `ADB 提示：` 标签下。根因与落点见协调仓
+  `docs/0.14.1-preview-DEVICE-DEFECT-TRIAGE-AND-TEST-REFLECTION.md` §2（A1/A2）。
 - **开放屏幕范围**：native 真源与执行点复查已落地；`virtual-only` 下真实屏观察面（含无障碍直连队列）的完整设备矩阵未跑。
+  **2026-09-19 设备实测更正**：矩阵已跑，**`virtual-only` 下的工具可用性是坏的**——
+  `android_act_input` 声明的 `screenId` 永远无法兑现（`input <verb>` 无屏幕维度，范围门在
+  `bridge/src/index.ts:710` 早退恒拒）；`android_ui_tree` 因 `uiautomator` 家族被断言「无目标屏参数」而恒拒
+  （与本仓 `:127` 的设备读数冲突）；`android_ui_click` 生效校验不带屏、在 virtual-only 下必然报
+  `screen-out-of-scope`（根因是引擎/壳侧两份真实屏 op 清单不一致）；指引承诺的 `android_vdisplay_input`
+  从未实现；`android_app_launch {screenId}` 无落点回读，会报成功而应用落在真实屏。
+  根因、方案与新增门禁清单见协调仓同名文档 §3/§4/§6/§7。
 - **按需 skill 注入（U-5）未实施**：控制流程仍会进入常驻上下文/schema 的部分未清点，token 预算门禁未做。
 - **Shizuku 许可登记缺口**：gradle aar 依赖不在 `check-third-party.mjs` 的 dpkg 矩阵覆盖内，`assets/licenses/THIRD_PARTY_NOTICES.md` 无 Shizuku 条目（Apache-2.0）——发版合规需补。
 - **性能 A1 结论未定**：`check-perf-instrumentation` 的 P-AC-01 要求出厂值 `patchReload: startup`，但 0.14.0 设备 A/B 观测 `live` 组中位约 12.5-13.0s 快于 `startup` 组 14.6-15.0s（n 小、compose 探针缺失、单机型）——方向与方案主张相反，需 owner 拍板是锁正确性语义还是改基线（见 `docs/0.14.0-preview-VERIFICATION-LOG.md` §50）。
