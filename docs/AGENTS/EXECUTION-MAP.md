@@ -152,13 +152,14 @@ sequenceDiagram
 | 高 | B03 | `verify-vdisplay-float` 的「非法档位必须被拒」是**永久假通过**，且顺手改设备档位 | `scripts/verify-vdisplay-float.mjs:95-103` | 该断言永远绿；跑一次就把设备 scale 写成 `coerce` 后的值 | 未修 |
 | 高 | B03 | `verify-browser-panel` 的 `newTab:true` 是死参数（壳侧不解析） | `scripts/verify-browser-panel.mjs:123-128`、`app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt:384-394` | 「多页签」断言实际没建页签，属假覆盖 | 未修 |
 | 高 | B02 | apk CI 的「工具输出 schema 契约门禁」结构必红：它只自建 manage 一个包，而门禁要求 7 个插件的 lib 在场；且一条门禁红会让后续 11 条全部 skipped | `.github/workflows/pr-gate.yml` | 分支 CI 长期红，且掩盖其余门禁的真实结果 | **已修（本轮）**：schema 门禁移到「插件单测门禁」的全量构建之后；第一个 job 的全部门禁步骤补 `if: always()`（失败不再掩盖后续）；本地按 CI 顺序复跑该门禁 PASSED（7 插件 153 分支） |
+| 高 | P04 | `android_file_incoming_status` 的 execute 会**抛异常**而不是返回错误对象：`queueDir()` 里的 `mkdirSync(tmpWorkspace())` 在只读/不可建环境直接 EACCES | `plugins/dsh-android-file-open/src/index.ts:43`、`:504` | 环境不可建时模型拿到引擎级异常（而不是结构化错误）；契约要求「工具永不抛、失败回错误对象」 | 未修（0.14.1 apk CI 实测：`工具输出 schema 契约门禁` 报 `branch#1 execute 抛错：EACCES: permission denied, mkdir '/data/user/0/com...'`；本机 Windows 同名路径会落到盘符根目录故不报——**环境相关的假绿**。修法建议：`execute` 包 try/catch 返回 `{ok:false,error}`，并同步在 `output.schema` 声明这两个字段，否则引擎会按整值拒绝） |
 | 中 | K01 | 主 WebView 渲染进程死亡后没有任何重建路径 | `app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:605-619`、`app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:193` | 崩溃后引导页被藏、看门狗刷 Toast，用户只能杀进程 | 未修 |
 | 中 | K09 | 面板 `addView` 失败被静默吞掉，而 `expanded` 已置 true | `app/src/main/java/com/dsharnessmobile/shell/OverlayService.kt:299`、`app/src/main/java/com/dsharnessmobile/shell/OverlayService.kt:274` | 状态说面板在、屏幕上没有，且无日志 | 未修 |
 | 中 | K04 | 审计 `result` 恒 `ok`、拒绝完全不落账 | `app/src/main/java/com/dsharnessmobile/shell/ControlAudit.kt:34` | 审计无法回答「谁执行了什么、结果如何」 | 未修 |
 | 中 | P02 | `verifyClick` 不认屏、`ui_tree`/`act_input` 收 `screenId` 却不投递、`vdInput` 把 `displayId` 塞进 `x` | `plugins/dsh-android-manage/src/index.ts:394`、`plugins/dsh-android-manage/src/index.ts:728`、`plugins/dsh-android-manage/src/index.ts:1537` | 多屏会话下点击与取树落到错误屏幕，回执字段语义被污染 | 未修 |
 | 中 | S01 | `smoke-injections.mjs` 断言 `transforms.length === 1`，而源码已注册两次 `tapIndex` | `dsh-host-web-compat/scripts/smoke-injections.mjs:50`、`dsh-host-web-compat/lib/index.js:783` | 子仓「注入冒烟」门禁当下是红的（apk 仓 CI 不跑它，所以没人看见） | 未修 |
 | 中 | B01 | `build-apk-013.ps1` 无条件重设 `$apkDir`，作废「apk 仓自包含布局」检测 | `scripts/build-apk-013.ps1:166` | 从 apk 仓根直跑时布局检测失效 | 未修 |
-| 中 | B02 | vdisplay 插件测试用 `../../../dsh-mobile-apk/app/...` 相对路径 | `plugins/dsh-android-vdisplay/test/tools-callable.test.mjs:122` | 在 apk 树内跑该测试结构性必红 | 未修（S-11 同族） |
+| 中 | B02 | vdisplay 插件测试用 `../../../dsh-mobile-apk/app/...` 相对路径（只在协调仓布局成立） | `plugins/dsh-android-vdisplay/test/tools-callable.test.mjs:122` | 在 apk 树内跑该测试结构性必红 | **已修（本轮）**：改为「先试 `<repo>/app/...`、再试 `<repo>/dsh-mobile-apk/app/...`，都找不到即抛」；两种布局各 12 例全绿（S-11 同族） |
 | 中 | B01 | `build-apk-013.ps1` 注释称「Kotlin 单测由发布链保证」，而 `build-release.ps1` 全文没有 `testDebugUnitTest` | `scripts/build-apk-013.ps1:141-144` | 「跑过单测」的保证不成立 | 未修（与 K11 可疑点 1 同源） |
 
 ### 3.2 逐块原始清单（未分级，按查点排列）
