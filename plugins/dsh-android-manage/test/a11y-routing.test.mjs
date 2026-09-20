@@ -510,3 +510,53 @@ test('F4b：android_web_dump 仍然受会话档位门约束（移出范围判定
   assert.match(String(r.text), /danger-full-access/)
   assert.equal(calls.control.length, 0, '被档位门拒时不得触碰壳侧')
 })
+
+// ── B1（0.14.1 设备实测缺陷）：android_act_input 的 screenId 此前永远无法兑现 ──────────
+//
+// 缺陷形态：工具声明了 screenId，执行面却是 `input <verb> <args>`——`/system/bin/input` 没有屏幕
+// 维度，范围门对这条命令直接早退恒拒。于是 screenId=virtual-N 只会被反复重试。
+// 修法：目标是虚拟屏时改走壳侧 vdInput（`input -d <displayId>`，argv 原生构造）。
+
+test('act_input 指定虚拟屏时走 vdInput，且绝不落到真实屏的 input 命令', async () => {
+  const { face, calls } = makeFace({ backend: 'adb' })
+  const { byName } = applyManage(face)
+  const r = await byName('android_act_input').execute({ action: 'tap', x: 11, y: 22, screenId: 'virtual-1' }, exec)
+  assert.equal(r.ok, true, '带虚拟屏目标的注入必须成功: ' + JSON.stringify(r))
+  assert.equal(calls.control.length, 1, '必须经控制队列走 vdInput')
+  assert.equal(calls.control[0].op, 'vdInput')
+  assert.equal(calls.control[0].args.verb, 'tap')
+  assert.equal(calls.control[0].args.target, 'virtual-1', '别名以 target 键下行')
+  assert.equal(calls.control[0].args.x, 11)
+  assert.equal(calls.control[0].args.y, 22)
+  assert.ok(!calls.adbShell.some((c) => /^input /.test(c)), '虚拟屏路径不得再拼真实屏 input 命令：' + JSON.stringify(calls.adbShell))
+})
+
+test('act_input 虚拟屏路径的 text 不受真实屏 ASCII 白名单限制（argv 直传，不经 shell）', async () => {
+  const { face, calls } = makeFace({ backend: 'adb' })
+  const { byName } = applyManage(face)
+  const r = await byName('android_act_input').execute({ action: 'text', text: '中文输入', screenId: 'virtual-1' }, exec)
+  assert.equal(r.ok, true, '中文文本必须可用（真实屏路径才需要 ASCII 限制）: ' + JSON.stringify(r))
+  assert.equal(calls.control[0].args.text, '中文输入')
+  assert.equal(calls.adbShell.length, 0)
+})
+
+test('act_input 不带 screenId 仍走真实屏 input（原路径不得被改坏）', async () => {
+  const { face, calls } = makeFace({ backend: 'adb' })
+  const { byName } = applyManage(face)
+  const r = await byName('android_act_input').execute({ action: 'tap', x: 3, y: 4 }, exec)
+  assert.equal(r.ok, true)
+  assert.equal(calls.control.length, 0, '真实屏路径不得走控制队列')
+  assert.ok(calls.adbShell.some((c) => /^input tap 3 4$/.test(c)), '真实屏路径仍是 input tap：' + JSON.stringify(calls.adbShell))
+})
+
+test('act_input 虚拟屏路径：壳侧拒绝时如实转述，不得谎报成功', async () => {
+  const { face, calls } = makeFace({ backend: 'adb' })
+  face.controlExec = async (op, args) => {
+    calls.control.push({ op, args })
+    return { ok: true, data: { ok: false, guidance: '虚拟屏幕尚未创建' } }
+  }
+  const { byName } = applyManage(face)
+  const r = await byName('android_act_input').execute({ action: 'keyevent', keycode: 4, screenId: 'virtual-1' }, exec)
+  assert.equal(r.ok, false, '壳侧说没成，工具面不得说成功')
+  assert.match(r.text, /虚拟屏幕尚未创建/)
+})

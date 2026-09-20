@@ -105,6 +105,19 @@ Write-Host "== 控制 op 登记链门禁 =="
 node (Join-Path $Root "scripts\check-control-ops.mjs") 2>&1
 if ($LASTEXITCODE -ne 0) { Write-Host "控制 op 登记链漂移（六处集合不一致），拒绝打包"; exit 1 }
 
+# 跨语言 op 清单对等（0.14.1）：引擎 REAL_SCREEN_CONTROL_OPS 与壳侧 REAL_SCREEN_OPS 必须逐条相同。
+# 两份漂移就是「virtual-only 下点击生效校验/WebView ref 路径全不可用」的根因（坑 162）——壳侧曾多带
+# state/webSnapshot/webAction 三条**不读设备屏**的 op，被范围门按真实屏拦死。离线可跑，无需快照。
+Write-Host "== op 清单跨语言对等门禁 =="
+node (Join-Path $Root "scripts\check-op-registry-parity.mjs") 2>&1
+if ($LASTEXITCODE -ne 0) { Write-Host "两份「会读设备屏的 op」清单不一致，拒绝打包"; exit 1 }
+
+# 工具名「承诺 vs 实现」（0.14.1）：指引里提到的 android_* 工具名必须真有声明位。
+# 原形：android_vdisplay_input 被三处模型可见文案与 Skill 文档承诺却从未 defineTool（坑 163）。
+Write-Host "== 工具名承诺门禁 =="
+node (Join-Path $Root "scripts\check-tool-name-promises.mjs") 2>&1
+if ($LASTEXITCODE -ne 0) { Write-Host "指引承诺了未实现的工具名，拒绝打包"; exit 1 }
+
 # 插件单测门禁（0.14.1 §1.1b 决策 1 / §2.4 前置项 1）：脚本自 0.14.0 起存在却从未被任何路径调用，
 # 7 个插件的 34 个测试文件全部没人跑。判据：有 test/*.test.mjs 必须真跑通且有效通过数 > 0（全 skip = 假绿）。
 # 需 plugins/*/lib 构建产物（本链在注入前已构建）；产物的新鲜度由 check-tool-output-schema 等另行守。

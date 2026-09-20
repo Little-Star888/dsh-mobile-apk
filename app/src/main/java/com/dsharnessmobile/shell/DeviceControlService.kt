@@ -675,8 +675,21 @@ class DeviceControlService : AccessibilityService() {
     return result
   }
 
+  /**
+   * 真实屏内容 op = **会读设备屏幕**的那 8 条，与引擎 `screen-scope.ts` 的
+   * `REAL_SCREEN_CONTROL_OPS` 逐条相同（由 `scripts/check-op-registry-parity.mjs` 守相等）。
+   *
+   * 2026-09-19 设备实测更正：本集合此前是 **11 条**，多出的 `state`/`webSnapshot`/`webAction`
+   * 是 `control-policy.ts` 的 `A11Y_OPS`（**后端能力**清单）的陈旧拷贝，与「是否读设备屏」无关：
+   *   - `state`（[handleState]）：只回内存快照代次与失效标记，签名不收 args，不读无障碍根/截屏/displayId；
+   *   - `webSnapshot`/`webAction`（[handleWebSnapshot]/[handleWebAction]）：目标是**壳自有 WebView** 的 DOM。
+   * 三条都不带 `screenId` ⇒ 默认 `real` ⇒ 被本范围门拦死；而 `virtual-only` 是缺省范围（fail-closed），
+   * 于是 `android_web_dump`、`android_ui_click`/`android_ui_input` 的 WebView ref 路径、以及点击生效
+   * 校验（`verifyClick` 读 `state`）在缺省范围下一律报 `screen-out-of-scope`——用户实测到的
+   * 「virtual-only 下工具和不存在一样」有一半出自这里。收敛到 8 条即修好。
+   */
   private val REAL_SCREEN_OPS = setOf(
-    "snapshot", "click", "longClick", "setText", "scroll", "global", "screenshot", "state", "nodeText", "webSnapshot", "webAction",
+    "snapshot", "click", "longClick", "setText", "scroll", "global", "screenshot", "nodeText",
   )
 
   /** A scope transition is a screen barrier: old real-screen refs cannot regain validity later. */

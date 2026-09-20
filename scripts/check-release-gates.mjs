@@ -35,6 +35,12 @@ const GATES = [
   { script: 'check-tool-output-schema.mjs', ci: true, needsSnapshot: false },
   { script: 'check-protocol-v2.mjs', ci: true, needsSnapshot: false },
   { script: 'check-control-ops.mjs', ci: true, needsSnapshot: false },
+  // 「会读设备屏的 op」两份清单的跨语言对等（0.14.1）：引擎 `REAL_SCREEN_CONTROL_OPS` 与壳侧
+  // `REAL_SCREEN_OPS` 必须逐条相同。设备实测缺陷 B4 的根因就是它们不一致——壳侧那份是
+  // `A11Y_OPS` 后端能力清单的陈旧拷贝，多带 `state`/`webSnapshot`/`webAction` 三条**不读设备屏**的 op，
+  // 于是这三条在缺省范围 virtual-only 下被壳侧范围门拦死：android_web_dump、WebView ref 路径、
+  // 以及点击生效校验（verifyClick 读 `state`）在缺省范围下全不可用，而引擎侧毫无察觉。
+  { script: 'check-op-registry-parity.mjs', ci: true, needsSnapshot: false },
   { script: 'check-runtime-assets.mjs', ci: false, needsSnapshot: true },
   // 机密门禁（review C3）：归档不可读/成员为空 = 硬失败（旧实现垃圾文件也 PASS 的假绿）；严格档 --require。
   { script: 'check-snapshot-secrets.mjs', ci: false, needsSnapshot: true },
@@ -64,6 +70,11 @@ const GATES = [
   // 双口径。掩蔽组名单从 capability-gate 实现导出，门禁不另写一份（防清单漂移假绿）。
   // 离线可跑（真跑各插件 apply()，只需 plugins/*/lib 构建产物）-> CI 与两条链都跑。
   { script: 'check-tool-surface-budget.mjs', ci: true, needsSnapshot: false },
+  // 工具名「承诺 vs 实现」（0.14.1）：指引里提到的 `android_*` 工具名必须真有声明位。
+  // 设备实测缺陷 B2 的原形是 `android_vdisplay_input` 被三处模型可见文案与 Skill 文档承诺，却从未
+  // `defineTool`——模型照指引调用只拿到 `unknown tool`，且会把这当成自己参数写错而反复重试。
+  // 判据零启发式：声明位字面量集合 ⊇ 全仓 `android_*` 提及集合（白名单为空，加任何一条都要被质疑）。
+  { script: 'check-tool-name-promises.mjs', ci: true, needsSnapshot: false },
   // 插件单测（0.14.1 §1.1b 决策 1 / §2.4 前置项 1）：该脚本自 0.14.0 起就存在，却**从未被任何
   // 路径调用**（不在 GATES、不在接线断言、两条链与两仓 CI 均无引用）——7 个插件的 34 个测试文件
   // 全部没人跑，「已新增该门禁」的声明与事实不符。此处接入声明集合即同时被两条构建链与两仓 CI

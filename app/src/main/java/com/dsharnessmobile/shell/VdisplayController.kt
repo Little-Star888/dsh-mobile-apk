@@ -40,6 +40,17 @@ object VdisplayController {
   private const val MAX_VIRTUAL_DISPLAYS = 1
   private const val MIN_EDGE = 240
   private const val MAX_EDGE = 4096
+
+  /**
+   * 跨屏拉起的落点回读命令（**固定字面量**：不含任何模型可控文本，故可经 `sh -c` 执行）。
+   *
+   * 为什么必须服务端过滤（2026-09-19 设备实测）：直接 `dumpsys activity activities` 有 42 KB，
+   * 会被 `ShizukuUserService` 的 16 KiB stdout 上限截断；而 display 段按号**递增**排列
+   * ⇒ 截断掉的恰好是虚拟屏那一段，回读会得出「没落在虚拟屏」的**反向错误结论**。
+   * 过滤后实测 1,969 B（保留 `Display #<n>` 分组锚点与 `ActivityRecord` 行）。
+   */
+  private const val ACTIVITY_DISPLAY_PROBE =
+    "dumpsys activity activities | grep -E '^ *Display #|ActivityRecord'"
   /** 随内容旋转：游戏等强制横屏应用在虚拟屏上真横屏运行（VIRTUAL_DISPLAY_FLAG_ROTATES_WITH_CONTENT）。 */
   private const val FLAG_ROTATES_WITH_CONTENT = 1 shl 7
 
@@ -367,8 +378,12 @@ object VdisplayController {
         // FLAG_DESTROY_CONTENT_ON_REMOVAL`（**没有 FLAG_PUBLIC**——Android 13+ 起 PUBLIC 只对系统应用生效，
         // 应用自建的虚拟屏一律为 private，只能显示 owner 自己的窗口）。
         //
-        // 这条结论有直接后果，见 launchApp()：private 屏上**无法把第三方应用拉进来**
-        // （`SafeActivityOptions.checkPermissions` 拒；已验证 uid 2000 与 uid 10053 两条路都被拒）。
+        // 这条结论的直接后果见 launchApp()。**2026-09-19 判定性实测更正**：原文写「private 屏上
+        // **无法把第三方应用拉进来**（SafeActivityOptions.checkPermissions 拒；已验证 uid 2000 与
+        // uid 10053 两条路都被拒）」——该结论在 MuMu x86_64 / API 35 上**不成立**：第三方应用
+        // `com.endday.game` 经 `am start --display 2` 成功落在 display 2（普通 adb shell uid 2000
+        // 与壳侧 UserService 两条路都试过）。故按实测改写为：**本机型成立、其它 ROM 待复核**；
+        // 判定落点不靠这条前提，而由 launchApp 的落点回读（displaysRunning）如实回报。
         val flags = FLAG_PUBLIC or FLAG_OWN_CONTENT_ONLY or FLAG_SUPPORTS_TOUCH or
           FLAG_DESTROY_CONTENT_ON_REMOVAL or FLAG_ROTATES_WITH_CONTENT
         val manager = appContext.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
@@ -691,13 +706,81 @@ object VdisplayController {
       appContext,
       arrayOf("am", "start", "--display", id.toString(), "-n", component),
     )
+    val amTail = result.optString("stdout", result.optString("error", "")).trim().takeLast(400)
     val out = status(appContext).put("displayId", id).put("screenId", record.alias)
-    if (result.optBoolean("ok")) {
-      out.put("ok", true).put("code", "vd-launched")
-        .put("guidance", "已把 " + pkg + " 拉起到 " + record.alias + "（displayId=" + id + "，组件 " + component + "）；真实屏前台不变。")
-    } else {
-      out.put("ok", false).put("code", "vd-launch-failed")
-        .put("guidance", "虚拟屏已创建，但跨屏拉起失败：" + result.optString("stdout", result.optString("error", "")))
+    if (!result.optBoolean("ok")) {
+      return out.put("ok", false).put("code", "vd-launch-failed")
+        .put("guidance", "虚拟屏已创建，但跨屏拉起失败（am 退出码非 0）：" + amTail)
+    }
+    // ── 落点回读（C1；0.14.1 设备实测缺陷）──────────────────────────────────────
+    //
+    // **退出码 0 不等于落在目标屏。** 2026-09-19 设备实测：目标包已在真实屏有 task 时，
+    // `am start --display 2` 依旧回 0，同时打印
+    //   Warning: Activity not started, intent has been delivered to currently running top-most instance.
+    // 修复前本函数在这条路径上无条件报「已拉起到 virtual-N；真实屏前台不变」——**假成功**，
+    // 用户的「在虚拟屏里启动软件却跳到真实屏」正是它。判据改为**设备事实**：按 displayId 分组
+    // 读回该包的 ActivityRecord（见 [displaysRunning]）。
+    //
+    // 三态如实回报（与 A1 的同一条纪律：不确定就说不知道，不得说成功）：
+    //   - 包在目标屏  → ok=true  vd-launched
+    //   - 包只在别的屏 → ok=false vd-launch-denied（带 landedDisplayIds）
+    //   - 读不到       → ok=true  vd-launched-unverified（明写「不构成落点证明」并给出复核手段）
+    val probe = ShizukuTransport.runShell(appContext, ACTIVITY_DISPLAY_PROBE, 15_000)
+    if (!probe.optBoolean("ok")) {
+      return out.put("ok", true).put("code", "vd-launched-unverified")
+        .put("guidance", "已请求把 " + pkg + " 拉起到 " + record.alias + "（displayId=" + id + "），但**落点回读不可用**"
+          + "（" + probe.optString("code", probe.optString("error", "dumpsys 调用失败")) + "）——本次不构成落点证明。"
+          + "请用 android_ui_dump { screenId=\"" + record.alias + "\" } 复核该屏内容。" + amTail)
+    }
+    val landed = displaysRunning(pkg, probe.optString("stdout", ""))
+    out.put("landedDisplayIds", org.json.JSONArray(landed.toList()))
+    if (landed.isEmpty()) {
+      return out.put("ok", true).put("code", "vd-launched-unverified")
+        .put("guidance", "已请求把 " + pkg + " 拉起到 " + record.alias + "（displayId=" + id + "），但回读里找不到该包的任何 "
+          + "ActivityRecord（应用可能已崩溃/退出）——本次不构成落点证明，请用 android_ui_dump 复核该屏内容。" + amTail)
+    }
+    if (!landed.contains(id)) {
+      return out.put("ok", false).put("code", "vd-launch-denied")
+        .put("guidance", "拉起未落在虚拟屏：" + pkg + " 实际出现在 displayId=" + landed.joinToString(",")
+          + "（目标是 " + id + "）。可能原因：该应用已在真实屏有任务并被系统带到前台（am 仍回退出码 0）。"
+          + "可先 android_ui_global home 回到桌面，或改用该应用在虚拟屏内的启动入口重试。" + amTail)
+    }
+    out.put("ok", true).put("code", "vd-launched")
+      .put("guidance", "已把 " + pkg + " 拉起到 " + record.alias + "（displayId=" + id + "，组件 " + component
+        + "）；落点已回读确认，真实屏前台不变。")
+    return out
+  }
+
+  /**
+   * 从 `dumpsys activity activities` 的输出里解析「某包当前出现在哪些 display」。
+   *
+   * 纯函数（无 IO、无全局态）⇒ 直接单测（含真实设备输出样本）。
+   *
+   * 输出形态（API 35 / MuMu x86_64 实测，按屏分组、`Display #<n>` 是分组锚点）：
+   * ```
+   * Display #0 (activities from top to bottom):
+   *     topResumedActivity=ActivityRecord{... u0 com.x/.MainActivity t123}
+   * Display #2 (activities from top to bottom):
+   *     topResumedActivity=ActivityRecord{... u0 com.y/.MainActivity t494}
+   * ```
+   * 判据刻意收窄到 `ActivityRecord{` 行 + `包名/` 精确前缀：Task 行里的 `A=10051:com.x`
+   * 是 **affinity** 不是落点，拿它判会得出错误结论。解析不出任何分组时返回空集——
+   * 调用方据此报「回读不可用」，**绝不据此判成功**（空集与「不在目标屏」是两件事，见 [launchApp]）。
+   */
+  internal fun displaysRunning(pkg: String, activitiesDump: String): Set<Int> {
+    val out = LinkedHashSet<Int>()
+    if (pkg.isBlank()) return out
+    val header = Regex("""^\s*Display #([0-9]+)""")
+    val member = Regex("""(^|[\s:])""" + Regex.escape(pkg) + """/""")
+    var current = -1
+    for (line in activitiesDump.lineSequence()) {
+      val hit = header.find(line)
+      if (hit != null) {
+        current = hit.groupValues[1].toIntOrNull() ?: -1
+        continue
+      }
+      if (current < 0 || !line.contains("ActivityRecord{")) continue
+      if (member.containsMatchIn(line)) out += current
     }
     return out
   }

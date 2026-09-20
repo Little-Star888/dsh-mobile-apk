@@ -267,17 +267,102 @@ export function apply(ctx: Context): void {
     output: lifecycleOutput('虚拟屏销毁') as never,
     execute: async (_args: unknown, exec: unknown) => callVdOp('vdDestroy', 30_000, sessionOf(exec)) as never,
   }))
-  // **本插件不新增模型面工具**（0.14.0 工具面 wire 预算门禁的硬约束，且此处本就不该有）。
-  //
-  // 虚拟屏的两个新执行面（壳侧 vdLaunchApp / vdInput）不在工具面另开近义工具，原因有两条：
-  //   1. **预算**：新增两个工具实测 +1.7KB wire，直接越过 2% 阈值（47 个工具已是上限附近）；
-  //   2. **模型体验**：模型已经熟悉 `android_app_launch`（拉起应用）与 `android_ui_click`（点击），
-  //      再暴露近义的 vdisplay 版本会让它在同义工具间反复试探。
-  //
-  // 正确落法 = **复用既有工具、用 screenId 选屏**（两个执行面已接好）：
-  //   android_app_launch { pkg, screenId: 'virtual-N' } → 壳侧 vdLaunchApp
-  //   android_ui_click    { x, y, screenId: 'virtual-N' } → 壳侧 vdInput tap
-  // 能力可达、工具面零增长、模型调用习惯不变。
+  /** 输入工具的拒绝形态（与 callVdOp 的失败形态同形，便于模型统一处理）。 */
+  const rejectInput = (guidance: string): Record<string, unknown> => ({ ok: false, code: 'invalid-arguments', guidance })
+
+  /** 输入工具的输出 schema（回执里带屏身份，让模型能自证注入落在哪块屏）。 */
+  const inputOutput = (label: string) => ({
+    schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        ok: { type: 'boolean', required: true },
+        code: { type: 'string', required: true },
+        guidance: { type: 'string', required: true },
+        verb: { type: 'string' },
+        screenId: { type: 'string' },
+        displayId: { type: 'integer' },
+      },
+    },
+    render: (_args: unknown, v: Record<string, unknown>) => [{
+      type: 'text',
+      text: label + (v.ok === true ? '成功' : '失败')
+        + '（code=' + String(v.code ?? '')
+        + (typeof v.screenId === 'string' ? '，screenId=' + v.screenId : '')
+        + (typeof v.displayId === 'number' ? '，displayId=' + String(v.displayId) : '')
+        + '）：' + String(v.guidance ?? ''),
+    }],
+  })
+
+  ctx.tools.register(defineTool({
+    name: 'android_vdisplay_input',
+    description:
+      '向虚拟屏注入输入（tap/swipe/keyevent/text）：坐标基于**该虚拟屏自身像素**（先用 android_vdisplay_status 看宽高），'
+      + '经壳侧 `input -d <displayId>` 的固定 argv 执行，真实屏前台不受影响。'
+      + '虚拟屏上的**按键与文本**只有这一条路；能按语义节点点击时优先 android_ui_click（ref）。'
+      + 'screenId 缺省取当前选中的虚拟屏。',
+    parameters: {
+      verb: { type: 'string', required: true, enum: ['tap', 'swipe', 'keyevent', 'text'], description: '输入动作类型' },
+      x: { type: 'number', description: 'tap/swipe 起点 X（该屏像素）' },
+      y: { type: 'number', description: 'tap/swipe 起点 Y（该屏像素）' },
+      x2: { type: 'number', description: 'swipe 终点 X（该屏像素）' },
+      y2: { type: 'number', description: 'swipe 终点 Y（该屏像素）' },
+      duration: { type: 'number', description: 'swipe 时长 ms（默认 300，上限 20000）' },
+      keycode: { type: 'number', description: 'keyevent 键码（如 4=返回、3=主页、26=电源）' },
+      text: { type: 'string', description: 'text 要输入的文本（1-500 字符；argv 直传，中文可用）' },
+      screenId: { type: 'string', description: '目标虚拟屏别名 virtual-N（缺省取当前选中）' },
+    },
+    output: inputOutput('虚拟屏输入') as never,
+    execute: async (args: Record<string, unknown> | undefined, exec: unknown) => {
+      const a = (args ?? {}) as {
+        verb?: string; x?: number; y?: number; x2?: number; y2?: number
+        duration?: number; keycode?: number; text?: string; screenId?: string
+      }
+      const verb = a.verb ?? ''
+      const payload: Record<string, unknown> = { verb }
+      if (typeof a.screenId === 'string' && a.screenId !== '') payload.target = a.screenId
+      // 逐 verb 校验后在**本地**拦一次：壳侧也有同源校验，但先拦能省一次往返并给出可执行文案。
+      const coord = (n: unknown): boolean => Number.isInteger(n) && (n as number) >= 0 && (n as number) <= 99999
+      if (verb === 'tap') {
+        if (!coord(a.x) || !coord(a.y)) return rejectInput('tap 需要合法整数坐标 (x, y)') as never
+        payload.x = a.x
+        payload.y = a.y
+      } else if (verb === 'swipe') {
+        if (!coord(a.x) || !coord(a.y) || !coord(a.x2) || !coord(a.y2)) {
+          return rejectInput('swipe 需要合法整数 (x, y, x2, y2)') as never
+        }
+        const d = a.duration ?? 300
+        if (!Number.isInteger(d) || d < 0 || d > 20_000) return rejectInput('swipe 的 duration 需为 0-20000 毫秒') as never
+        payload.x = a.x
+        payload.y = a.y
+        payload.x2 = a.x2
+        payload.y2 = a.y2
+        payload.duration = d
+      } else if (verb === 'keyevent') {
+        if (!Number.isInteger(a.keycode) || a.keycode! < 0 || a.keycode! > 255) {
+          return rejectInput('keyevent 需要合法整数 keycode（0-255）') as never
+        }
+        payload.keycode = a.keycode
+      } else if (verb === 'text') {
+        const raw = a.text ?? ''
+        if (raw.length === 0 || raw.length > 500) return rejectInput('text 长度需为 1-500 字符') as never
+        payload.text = raw
+      } else {
+        return rejectInput('verb 必须是 tap / swipe / keyevent / text') as never
+      }
+      return { ...(await callVdOp('vdInput', 15_000, sessionOf(exec), payload)), verb } as never
+    },
+  }))
+
+  // 工具面决策更正（0.14.1 设备实测，2026-09-19）：此处原文写「本插件不新增模型面工具」，理由是
+  // 「预算 + 模型在同义工具间试探」，并主张用 android_app_launch/android_ui_click 传 screenId 承担。
+  // 该结论被设备实测推翻：**指引三处承诺 `android_vdisplay_input` 而它从未存在**
+  // （manage 的工具描述与两处失败文案、bridge 的坐标模式指引），模型按指引调用只得 `unknown tool`；
+  // 而虚拟屏上的 keyevent/text 在工具面**完全无路可达**（android_ui_input 只对可编辑节点生效）。
+  // 「指引指向一条不存在的路」比拒绝更难排查——本仓已为同一形态的缺陷修过一次（manage 的 x/y 分支）。
+  // 故本轮**补实现**（能力早已在壳侧 `vdInput`：固定 argv `input -d <displayId>`），不删文档承诺。
+  // 预算代价：注册集 +1 个工具，已按流程重算 `scripts/tool-surface-budget.json`（初始可见集不变——
+  // 本工具归入 virtual-display 组，受渐进披露掩蔽）。
 
   // 右侧栏面板的数据源（只读；与工具面同源）。webServer 服务缺席时只告警：面板会走
   // "状态源不可达 → blocked"，不影响引擎启动，也不假装可用。

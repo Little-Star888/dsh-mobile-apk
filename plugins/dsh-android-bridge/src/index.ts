@@ -31,7 +31,7 @@ import {
 } from './screen-scope.js'
 import { negotiateProtocol } from './control-queue.js'
 import { translateAdbLine } from './shell-ops.js'
-import { installCapabilityGate, DEVICE_TOOL_GROUPS, DEVICE_TOOLS, CAPABILITY_TOOL_NAME } from './capability-gate.js'
+import { installCapabilityGate, DEVICE_TOOL_GROUPS, DEVICE_TOOLS, CAPABILITY_TOOL_NAME, shizukuLine } from './capability-gate.js'
 import {
   ControlQueue,
   controlTokenFrom,
@@ -304,6 +304,12 @@ function engineLevelReady(st: AdbStatus): boolean {
 /** ST-23：无障碍在线的新鲜窗口（队列取活心跳与壳侧独立心跳共用同一口径）。 */
 export const A11Y_FRESH_MS = 20_000
 
+/**
+ * Shizuku caps 补探的最小间隔（0.14.1 缺陷 A1）：窗口内重复询问不再打控制队列。
+ * 取值小于队列取活心跳（20s）——真值一旦变化，下一轮询问即能看到新回执。
+ */
+const CAPS_PROBE_TTL_MS = 10_000
+
 export interface ControlGateFacts {
   a11yEnabled: boolean
   /**
@@ -557,6 +563,9 @@ export class AndroidPrivilegeService {
   /** 最近一次连接校验缓存的设备型号（F4 多设备消歧；空 = 未校验/校验失败）。 */
   private liveModel = ''
 
+  /** 最近一次 Shizuku caps 补探时刻（0.14.1 缺陷 A1；TTL 见 CAPS_PROBE_TTL_MS）。 */
+  private capsProbeAt = 0
+
   constructor(
     private readonly ctx: Context,
     private readonly defaultMode?: () => string | undefined,
@@ -580,9 +589,48 @@ export class AndroidPrivilegeService {
     return st
   }
 
-  /** 壳侧 live caps 声明的特权 shell 通道事实（0.14.0 §6：Shizuku UserService 可用）。 */
+  /**
+   * 壳侧 live caps 声明的特权 shell 通道事实（0.14.0 §6：Shizuku UserService 可用）。
+   *
+   * **三态**：`true` 就绪 / `false` 已实测未就绪 / `undefined` 尚未探测到（caps 从未抵达）。
+   * 消费面**必须**区分后两者——把「未知」当「未就绪」正是 0.14.1 设备实测缺陷 A1：
+   * 工具面报「Shizuku 未就绪」，模型据此放弃了一个当时完全可用的虚拟屏能力。
+   */
+  shizukuChannel(): boolean | undefined {
+    const cached = this.controlQueue?.stats().caps?.shizuku
+    return typeof cached === 'boolean' ? cached : undefined
+  }
+
+  /** 兼容旧调用点的布尔视图：只有**实测为真**才算就绪（未知按未就绪处理，仅用于不需三态的判据）。 */
   shizukuReady(): boolean {
-    return this.controlQueue?.stats().caps?.shizuku === true
+    return this.shizukuChannel() === true
+  }
+
+  /**
+   * 冷启动补探（0.14.1 缺陷 A1 的修法）。
+   *
+   * 为什么需要：caps 只随**执行过的控制 op** 的回执信封抵达（`ControlQueue.noteShell`），
+   * 而 `android_capabilities` 自己不入队 ⇒ 会话首次询问它时 caps 必然缺席，工具面只能报「未就绪」。
+   * 这里在 caps 缺席时补一次**最廉价且不受档位门约束**的读面 op（`vdInfo` 不在
+   * `TIER_REQUIRED_OPS` 内，注释明写「读面/管理面不纳入」），让回执把 caps 带回来。
+   *
+   * 纪律：
+   *  - TTL 内不重复探（避免连续询问各打一发控制队列——队列是单槽的）；
+   *  - 探测失败/超时**保持 undefined**，绝不降级成 `false`（三态语义）；
+   *  - 探到结果后由 `shizukuChannel()` 自然读取后续回执，无需额外状态。
+   */
+  async shizukuChannelProbed(): Promise<boolean | undefined> {
+    const cached = this.shizukuChannel()
+    if (cached !== undefined) return cached
+    const now = Date.now()
+    if (now - this.capsProbeAt < CAPS_PROBE_TTL_MS) return undefined
+    this.capsProbeAt = now
+    try {
+      await this.controlExec('vdInfo', {}, 4000)
+    } catch {
+      // 探测失败即「未知」——不是「不可用」。
+    }
+    return this.shizukuChannel()
   }
 
   /** 两条通道任一就绪即引擎级放行（不掺会话档位）：无障碍见 a11yEnabled，特权面 = ADB 或 Shizuku。 */
@@ -1252,10 +1300,19 @@ function tools(svc: AndroidPrivilegeService, shellFace?: { resolve?(spec: Record
               + (control?.tokenConfigured === true ? ' · 令牌已配置' : '')
               + `${queueFresh ? ' · 壳侧轮询在线' : ' · 壳侧轮询离线'}`,
             `ADB 通道：${gates?.adbReady ? '已就绪' : `未就绪（完全访问=${String(gates?.fullAccess)} 允许访问=${String(gates?.allowSwitch)} 配对=${String(gates?.paired)} 无线调试=${String(gates?.wirelessDebug)}）`}`,
+            // A2（0.14.1 缺陷）：Shizuku 事实必须有**自己的行**。旧实现只按 adbReady 三选一，
+            // 并把 Shizuku 的 message 挂在「ADB 提示：」标签下——唯一用来诊断通道的工具却把
+            // 正确结论挂在了错误的通道名下。此处按三态如实渲染（caps 缺席 = 未知，不是未就绪）。
+            (() => {
+              const caps = (v.shell as { caps?: { shizuku?: unknown } | null } | undefined)?.caps
+              const ready = typeof caps?.shizuku === 'boolean' ? caps.shizuku : undefined
+              return 'Shizuku 特权通道：' + shizukuLine(ready)
+                + (ready === undefined ? '（android_capabilities 会触发一次实测补探）' : '')
+            })(),
             gates?.a11yEnabled ? '结论：设备控制可用（走无障碍通道）——下一步用 android_ui_dump（manage）拿语义清单'
               : gates?.adbReady ? '结论：设备控制可用（走 ADB 通道，仅兜底）——下一步用 android_ui_dump（无障碍优先）或 android_ui_tree（ADB）'
                 : '结论：不可用——开启任一通道即可（推荐无障碍：系统设置 → 无障碍 → DSH 设备控制，一步即用）',
-            v.message ? `ADB 提示：${String(v.message)}` : '',
+            v.message ? `通道说明：${String(v.message)}` : '',
             (() => {
               const shell = v.shell as { protocol?: { shell?: number; engine?: number; ok?: boolean; reason?: string }; caps?: { ops?: unknown[] } | null } | undefined
               if (!shell?.protocol) return ''
@@ -1271,11 +1328,15 @@ function tools(svc: AndroidPrivilegeService, shellFace?: { resolve?(spec: Record
         }]
       },
     },
-    execute: async (_args, exec) => buildPrivilegeStatusToolPayload(
-      svc,
-      (exec as { agent?: { session?: unknown } } | undefined)?.agent?.session,
-      controlTokenConfigured(),
-    ),
+    execute: async (_args, exec) => {
+      // A1：构建前先补探一次 caps（探不到则保持三态缺席），使 status/gates/shell.caps 同源新鲜。
+      await svc.shizukuChannelProbed()
+      return buildPrivilegeStatusToolPayload(
+        svc,
+        (exec as { agent?: { session?: unknown } } | undefined)?.agent?.session,
+        controlTokenConfigured(),
+      )
+    },
   })
   const termuxChannelTool = defineTool({
     name: 'android_termux_channel_exec',
@@ -1651,7 +1712,15 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
   // android_capabilities 解锁；facade 之外的工具不再常驻系统提示词。
   installCapabilityGate(
     ctx as unknown as Parameters<typeof installCapabilityGate>[0],
-    () => ({ a11y: svc.a11yEnabled(), shizuku: svc.shizukuReady() }),
+    async () => {
+      // A1 修法：caps 缺席时由引擎补探一次（三态）。
+      const shizuku = await svc.shizukuChannelProbed()
+      // **未知时必须整体缺席该键**，不得写成 `shizuku: undefined`——工具出口会把它判成
+      // 「返回值含 undefined 成员」（无损 JSON 契约），整条工具返回值被拒、模型拿不到任何数据。
+      return shizuku === undefined
+        ? { a11y: svc.a11yEnabled() }
+        : { a11y: svc.a11yEnabled(), shizuku }
+    },
   )
   // 状态端点（浏览端面/设置页查询与展示）。**只读**：无任何写面——授权变更经
   // window.androidBridge.setAdbAllow/setAdbPair/revokeAdbPair 由壳侧原生 AdbState 执行
@@ -1675,6 +1744,11 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
           sendMobileRouteRejection(res, rejection)
           return
         }
+        // A1（0.14.1 设备实测缺陷）：渲染前先把 caps 补探一次，让 status / gates / shell.caps 三处
+        // 读的是同一份**新鲜**事实。此前这条路由只回显「上一次控制 op 带回的 caps」，而冷启动后
+        // 没有任何 op ⇒ 引擎面报 shizukuReady:false，而壳侧同一时刻报「已授权且就绪」——
+        // 同一个事实两种读数，就是用户看到的自相矛盾。探测失败保持三态缺席（不是 false）。
+        await svc.shizukuChannelProbed()
         sendJson(res, 200, buildPrivilegeStatusPayload(svc, controlToken() !== undefined))
       },
     })

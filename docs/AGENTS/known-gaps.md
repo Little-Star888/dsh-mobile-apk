@@ -136,6 +136,12 @@
   虚拟屏 active、a11y 服务 bound）：
   - `dumpsys window windows` → `WindowsForAccessibilityObserver{mDisplayId=10, mInitialized=true}`
   - `uiautomator dump --display 10` → 1916 B 真实节点表（可解析、非空）
+    **2026-09-19 判定性实测更正（见坑 165）**：这一条当时被当成「`--display` 生效」的证据，**结论不成立**。
+    在虚拟屏 `virtual-1`（displayId=2）上放好 Settings（`dumpsys` 确认 task 在 display 2）后，
+    **无参 dump / `--display 2` / `--display 0` 三者输出逐字节相同**（7799 B、19 节点、全是真实屏上的应用）
+    ⇒ `uiautomator dump` **收下 `--display` 但不生效**，恒 dump 默认屏。上面那 1916 B 几乎确定是**真实屏**的树。
+    由此：`screen-scope.ts` 把 `uiautomator` 家族的目标屏参数判为「无」**实质正确**，不得放开；
+    `android_ui_tree` 已删除它无法兑现的 `screenId` 参数（坑 163）。
   即 **a11y 通道对虚拟屏可达**；原「不可用」判读作废（原文与更正见坑 152）。
   - **仍未确证**：`takeScreenshot(displayId≠0)` 对**应用自建 private display** 是否成功（详档 §6 U5），
     需引擎工具面端到端调用定性。故 **ADB 回落仍是已验证可用的承重路径**，上面的 SF token 修法不是兜底。
@@ -151,6 +157,38 @@
   - 装机后最小复验：调 `android_screenshot {screenId:"virtual-1"}`，断言返回 675x1200 级别像素、
     非真实屏画面（与真机 900x1600 对照）、非全黑。
 
+## 0.14.1 设备缺陷修复轮（2026-09-19，三个 P0）
+
+本轮修的是**设备实测**暴露的三类缺陷（定性见协调仓 `docs/0.14.1-preview-DEVICE-DEFECT-TRIAGE-AND-TEST-REFLECTION.md`，
+坑 161-165）：A1 工具面把「尚未探测」渲染成「Shizuku 未就绪」；B 缺省 virtual-only 下工具大面积不可用
+（跨语言 op 清单漂移 + 参数无法兑现 + 承诺的工具不存在）；C 跨屏拉起以退出码判成功、应用落在真实屏。
+
+**已修并在代码层/门禁层验证**（逐条判据见坑位）：
+
+- A1：三态 + caps 补探（`shizukuChannelProbed`）；`android_privilege_status` 独立特权行；状态路由同步补探。
+- B：壳侧 `REAL_SCREEN_OPS` 11 → 8 条并与引擎锁死（新门禁 `check-op-registry-parity.mjs`）；
+  `android_act_input` 虚拟屏路径走 `vdInput`；`android_ui_tree` 删掉无法兑现的 `screenId`；
+  **补实现 `android_vdisplay_input`**（新门禁 `check-tool-name-promises.mjs` 守承诺面）。
+- C：`launchApp` 落点回读（三态：`vd-launched` / `vd-launch-denied` / `vd-launched-unverified`），
+  并为避开 16 KiB stdout 截断改用固定字面量过滤（42 KB → 1.97 KB）。
+
+**新增设备套件**：`scripts/verify-screen-scope-matrix.mjs`（跨面一致性 + 落点回读 + 双屏像素对照 +
+real-only 反证；判据全在设备事实上，证据不足判 `INCONCLUSIVE` 而非通过；`--self-test` 6 例判别力）。
+**它刻意不进聚合门禁**：无设备环境下强行声明只会制造「SKIP 即通过」的假绿；当前定位是
+**发布前设备门禁**，由操作者按 `docs/AGENTS/emulator-test-protocol.md` 在真机/模拟器上跑。
+
+**仍未做 / 待设备判定（如实登记）**：
+
+- **本套件尚未在装机版上跑过一次**：本轮改动完成打包，但套件的首次真跑证据尚未产出——
+  下一个动作就是跑它并把结论贴进 PR 描述（三层验收的 B 轨）。
+- **`takeScreenshot(displayId≠0)` 对应用自建 private display 是否成功**仍未知（承接上文 U5；
+  套件的 P3 用 SF token 的 `screencap -d <token>` 取虚拟屏像素，走的是另一条路，不回答这个问题）。
+- **第三方应用能否被拉起到 private 虚拟屏**：本次判定性实测在 MuMu x86_64/API 35 上**成功**
+  （`com.endday.game` 落在 display 2），且 `am start --display 2` 经普通 adb shell（uid 2000）也成立——
+  这与 `VdisplayController.kt` 创建处注释「uid 2000 与 10053 两条路实测被拒」**冲突**；
+  只在本机型证实，未在第二台 ROM 复核。注释已按实测改写为「本机型成立、他机型待复核」。
+- **虚拟屏上限仍为 1**（`MAX_VIRTUAL_DISPLAYS`）：套件的多屏分支未覆盖。
+
 ## 0.14.1 审查轮登记的缺口（承接 `docs/COMPAT-REVIEW-0.14.0-2026-09-19.md`，进度见协调仓 `0.14.1-REVIEW-CHECKLIST-PROGRESS.md`）
 
 | # | 缺口 | 现状 |
@@ -159,3 +197,17 @@
 | K-B | **A3 悬浮窗背景启动限制在多 ROM 上未复核**（0.14.1 块 H 自述残留） | 需多 ROM 真机各跑一次（权限缺失/开关关闭/无虚拟屏三种 fail-closed 形态） |
 | K-C | **块 J① FIX-3「双起点验收」设备级证据缺**：`files/notify-responder.log` 的 `result=` 判据此前读错文件（真因已修），修后需再装机复验 | 未复验 |
 | K-D | **execAdbLine 档位门的会话来源依赖工具入口绑定**（0.14.1 S-5 引入）：会话经 `guard()` 的 AsyncLocalStorage 绑定传递；若将来出现不经工具入口的后台调用路径，会被 fail-closed 拒（预期行为，但需要一条测试钉住） | 已在审查进度文档 §3.4 登记 |
+
+### 0.14.1 设备验收轮补充发现（2026-09-19 晚）
+
+- **`com.endday.game`（Godot 游戏）在虚拟屏上会 SIGSEGV 崩溃**：crash 缓冲实测两次
+  （`19:30:30` 与 `21:05:53`，`fault addr 0x134`），栈落在
+  `org.godotengine.godot.input.GodotInputHandler.onInputDeviceAdded / handleJoystickConnectionChangedEvent`
+  ——输入设备变化事件触发。**本包一次都没崩**（crash 缓冲内 `grep -c dsharnessmobile` = 0），
+  即这是第三方应用自身的健壮性问题，不是壳侧缺陷。影响：`verify-screen-scope-matrix.mjs` 用该包做
+  「虚拟屏落点」样本时，任务期间它可能自行退出 → P2 会得 INCONCLUSIVE（回读找不到 ActivityRecord），
+  这是**如实的证据不足**而非假绿。换一个更稳的第三方样本（或有 launcher 入口的系统应用）可缓解。
+- **自然提示（不写工具名、不写解锁）那一轮的观察**：模型**自己**发现要先解锁——实测它调用了
+  `android_capabilities · all`（见证据目录 `p2-conversation.txt`），随后仍在推理中被本轮取证打断，
+  未取到完成态。故「解锁链路是否被模型自主走通」目前只有**一次未完成的观察**，
+  尚不足以判定（既不能算通过，也不能算断链）。

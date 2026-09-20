@@ -129,6 +129,64 @@ test('服务缺席时给结构化拒绝（不抛异常、不静默）', async ()
   assert.equal(value.code, 'vdisplay-control-unavailable')
   assert.equal(typeof value.guidance, 'string')
 })
+
+// ── B2（0.14.1 设备实测缺陷）：`android_vdisplay_input` 是**承诺过却从未存在**的工具 ──────
+//
+// 设备实录：Skill 文档与三处工具文案都让模型用 `android_vdisplay_input`，实际调用报 `unknown tool`；
+// 而虚拟屏上的按键/文本在工具面完全无路可达。本轮补实现（后端能力早已在壳侧 vdInput）。
+// 下面两条钉住「参数如实映射到 vdInput」与「本地先拦非法 verb、不打无效往返」。
+
+test('android_vdisplay_input 必须注册，且参数如实映射到壳侧 vdInput', async () => {
+  const { face, calls } = strictFace()
+  const tools = loadTools(face)
+  const input = tools.find((t) => t.name === 'android_vdisplay_input')
+  assert.ok(input, 'android_vdisplay_input 必须注册（文档承诺过它存在）')
+  const value = await input.execute(
+    { verb: 'tap', x: 12, y: 34, screenId: 'virtual-2' },
+    { agent: { session: 't' } },
+  )
+  assert.doesNotMatch(JSON.stringify(value ?? {}), LOST_RECEIVER, '不得出现服务方法接收者丢失')
+  assert.equal(calls.length, 1, '必须真的经控制队列调用到壳侧')
+  assert.equal(calls[0].op, 'vdInput')
+  assert.equal(calls[0].args.verb, 'tap')
+  assert.equal(calls[0].args.target, 'virtual-2', '别名必须以 target 键下行（壳侧读 target）')
+  assert.equal(calls[0].args.x, 12)
+  assert.equal(calls[0].args.y, 34)
+  assert.equal(value.ok, true)
+  assert.equal(value.verb, 'tap')
+})
+
+test('android_vdisplay_input：非法 verb 由框架按 schema 挡在 execute 之前', async () => {
+  const { face, calls } = strictFace()
+  const input = loadTools(face).find((t) => t.name === 'android_vdisplay_input')
+  await assert.rejects(
+    () => input.execute({ verb: 'teleport', x: 1, y: 2 }, { agent: { session: 't' } }),
+    /must be one of/,
+    '非法枚举应在参数校验层被拒（不到执行面、更不到壳侧）',
+  )
+  assert.equal(calls.length, 0, '被参数校验拒掉的调用不得打到壳侧')
+})
+
+test('android_vdisplay_input：越界坐标在本地拦（schema 表达不了的跨字段约束）', async () => {
+  const { face, calls } = strictFace()
+  const input = loadTools(face).find((t) => t.name === 'android_vdisplay_input')
+  const oor = await input.execute({ verb: 'tap', x: -1, y: 2 }, { agent: { session: 't' } })
+  assert.equal(oor.ok, false)
+  assert.equal(oor.code, 'invalid-arguments')
+  assert.equal(calls.length, 0, '本地拦下的调用不得打到壳侧')
+})
+
+test('android_vdisplay_input：text 直传不过 shell（中文可用），长度按壳侧上限拦', async () => {
+  const { face, calls } = strictFace()
+  const input = loadTools(face).find((t) => t.name === 'android_vdisplay_input')
+  const ok = await input.execute({ verb: 'text', text: '中文输入' }, { agent: { session: 't' } })
+  assert.equal(ok.ok, true)
+  assert.equal(calls[0].args.text, '中文输入', '文本作为单个 argv 元素直传，不应被 ASCII 白名单拒绝')
+  const tooLong = await input.execute({ verb: 'text', text: 'x'.repeat(501) }, { agent: { session: 't' } })
+  assert.equal(tooLong.ok, false)
+  assert.equal(tooLong.code, 'invalid-arguments')
+  assert.equal(calls.length, 1, '超长文本本地拦下，不再打一发')
+})
 // ── 0.14.0 用户实报回归：序号复用 / 空闲回收 / 销毁权限 ──────────────────────
 
 test('序号复用：建→销毁→再建 的别名必须回到最小空闲号（不得单调递增）', async () => {

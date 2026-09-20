@@ -70,6 +70,8 @@ const GATE_SCRIPTS = [
   'check-protocol-v2.mjs',
   'check-tool-output-schema.mjs',
   'check-control-ops.mjs',
+  'check-op-registry-parity.mjs',
+  'check-tool-name-promises.mjs',
   'check-state-registry.mjs',
   'check-bridge-symmetry.mjs',
   'check-gate-skips.mjs',
@@ -175,6 +177,13 @@ try {
   run('node', [gate('check-tool-output-schema.mjs')])
   log('门禁：控制 op 六处登记链…')
   run('node', [gate('check-control-ops.mjs')])
+  // 跨语言 op 清单对等（0.14.1）：引擎 REAL_SCREEN_CONTROL_OPS 与壳侧 REAL_SCREEN_OPS 必须逐条相同。
+  // 漂移即「virtual-only 下点击生效校验/WebView ref 路径全不可用」（坑 162）。离线可跑。
+  log('门禁：op 清单跨语言对等…')
+  run('node', [gate('check-op-registry-parity.mjs')])
+  // 工具名「承诺 vs 实现」（0.14.1）：指引里提到的 android_* 工具名必须真有声明位（坑 163 同族预防）。
+  log('门禁：工具名承诺 vs 实现…')
+  run('node', [gate('check-tool-name-promises.mjs')])
   // 插件单测门禁（0.14.1 §1.1b 决策 1 / §2.4 前置项 1）：脚本自 0.14.0 起存在却从未被调用。
   // 判据：有 test/*.test.mjs 必须真跑通且有效通过数 > 0（全 skip = 假绿）。需 plugins/*/lib 产物。
   log('门禁：插件单测（真跑，全 skip 即假绿）…')

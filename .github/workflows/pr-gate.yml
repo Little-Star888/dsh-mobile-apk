@@ -54,6 +54,16 @@ jobs:
       - name: 控制 op 登记链门禁
         if: always()
         run: node scripts/check-control-ops.mjs
+      # 跨语言 op 清单对等（0.14.1）：引擎 REAL_SCREEN_CONTROL_OPS 与壳侧 REAL_SCREEN_OPS 必须逐条相同。
+      # 两份清单漂移就是「virtual-only 下点击校验/WebView 路径全不可用」的根因（壳侧多带 3 条不读屏的 op）。
+      - name: op 清单跨语言对等门禁
+        if: always()
+        run: node scripts/check-op-registry-parity.mjs
+      # 工具名「承诺 vs 实现」（0.14.1）：指引里提到的 android_* 工具名必须真有声明位
+      # （android_vdisplay_input 曾被三处文案与 Skill 文档承诺却从未 defineTool）。
+      - name: 工具名承诺门禁
+        if: always()
+        run: node scripts/check-tool-name-promises.mjs
       # 插件单测门禁（0.14.1 §1.1b 决策 1 / §2.4 前置项 1）：脚本存在却从未被调用，34 个测试文件无人跑。
       # 真跑各插件 test/*.test.mjs（全 skip 判假绿）——需 plugins/*/lib 产物，故先构建。
       - name: 插件单测门禁

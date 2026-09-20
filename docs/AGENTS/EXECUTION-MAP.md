@@ -120,7 +120,7 @@ sequenceDiagram
 | S01 | 引擎侧注入层（三个子仓） | 页面内发布标记与桥入口、钳面板几何、装配老内核垫片 | 客户端插件 apply() 装载；每个 index 响应经 tapIndex 注入 | 交互面 | K04（壳侧 androidBridge/dshBackBridge 桥面） | 引擎插件系统按 profile-web.cordis.patch.yml 的 insert 行拉起 | dsh-client-ui-responsive/src/client/index.ts,dsh-host-web-compat/lib/index.js,dsh-shell-termux/src/index.ts | 高 |
 | B01 | 构建链与快照注入 | 快照构建 插件注入 门禁收口 到 APK 出包 | 人手动 pwsh -File scripts\build-apk-013.ps1 或发布链/CI 调用 | 构建与发布 | 门禁块,壳侧快照解压,插件源码与 vendor 固化面 | 开发者手动,发布链 build-release.ps1,CI 与云端 build-apk.mjs | scripts/build-apk-013.ps1,scripts/build-snapshot-013.mjs,scripts/inject-all.py,scripts/patches/apply-patches.mjs | 高 |
 | B02 | 静态门禁链与 CI | 33 个静态门禁脚本与三层接线的唯一声明处 | PR/CI、两条打包链、发布链 | 测试与门禁 | B01,B03 | 提交 PR、推 main、构建/发版 | scripts/check-release-gates.mjs,scripts/check-gate-skips.mjs,.github/workflows/pr-gate.yml,scripts/build-apk-013.ps1 | 高 |
-| B03 | 设备验收套件（CDP 与 adb 面） | 7 个 CDP 断言套件 + 5 个部署冒烟脚本的设备侧验收入口 | 人手动逐个执行 node scripts/verify-*.mjs 与 pwsh scripts/*.ps1 | 测试与门禁 | S-12 双 ABI 包装机、快照刷新完成、桥面 / 浏览器宿主 / 虚拟屏 / 注入层各块 | 人（PR 前设备门禁，无 CI 接入） | scripts/verify-webview-015.mjs,scripts/verify-state-sync.mjs,scripts/verify-browser-host.mjs,scripts/verify-browser-panel.mjs,scripts/verify-vdisplay-viewer.mjs,scripts/verify-vdisplay-float.mjs,scripts/verify-engine-log-copy.mjs,scripts/device-smoke.ps1,scripts/deploy-device.ps1,scripts/deploy-embedded.ps1,scripts/t0-check.ps1,scripts/e2e-phone-test.ps1 | 高 |
+| B03 | 设备验收套件（CDP 与 adb 面） | 7 个 CDP 断言套件 + 5 个部署冒烟脚本的设备侧验收入口 | 人手动逐个执行 node scripts/verify-*.mjs 与 pwsh scripts/*.ps1 | 测试与门禁 | S-12 双 ABI 包装机、快照刷新完成、桥面 / 浏览器宿主 / 虚拟屏 / 注入层各块 | 人（PR 前设备门禁，无 CI 接入） | scripts/verify-webview-015.mjs,scripts/verify-state-sync.mjs,scripts/verify-browser-host.mjs,scripts/verify-browser-panel.mjs,scripts/verify-vdisplay-viewer.mjs,scripts/verify-vdisplay-float.mjs,scripts/verify-engine-log-copy.mjs,scripts/verify-screen-scope-matrix.mjs,scripts/device-smoke.ps1,scripts/deploy-device.ps1,scripts/deploy-embedded.ps1,scripts/t0-check.ps1,scripts/e2e-phone-test.ps1 | 高 |
 
 ## 3. 疑点清单（证据 + 影响 + 状态）
 
@@ -1699,7 +1699,7 @@ flowchart TD
   - 环境变量与路径：`DSH_FILES_DIR` + `adb-keyboard-nonce`（`:39-43`，壳侧 `app/src/main/java/com/dsharnessmobile/shell/AdbKeyboardService.kt:166` 写、`app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:255` 幂等补建）；`TMPDIR` + `dsh-tmp/`（`:446`），前缀 `dsh-shot-`（保留 20）/`dsh-ui-`（10）/`ui-detail-`（20）。
   - 输入法实体与广播：硬编码 `com.dsharnessmobile.shell/.AdbKeyboardService`（`:1874`、`:2119`），广播 action `ADB_INPUT_TEXT`/`ADB_CLEAR_TEXT` + `--es msg`/`--es auth`（`:1889`）。
   - 引擎服务面：`ctx.get('attachments')`（`:339`）、`ctx.get('llm').resolveModelInfo`（`:352`）供截图内联一次性读图；`ctx.tools.register`（`:2295`）；日志 tag `ctx.logger('dsh-android-manage')`（`:2289`，仅服务缺失时 warn）。
-  - 跨块文案/入口：工具描述把模型引向 `android_vdisplay_input`/`android_vdisplay_status`/`android_vdisplay_create`（`:1268`、`:1511`）与 `android_web_dump`（`:1339`）；`android_screen_list` 的别名枚举真源是壳侧 `vdInfo` 注册表，不硬编码 virtual-1（`:248`）。
+  - 跨块文案/入口：工具描述把模型引向 `android_vdisplay_input`/`android_vdisplay_status`/`android_vdisplay_create`（`:1268`、`:1511`；其中 `android_vdisplay_input` 在 0.14.1 之前**并不存在**，是「指引指向不存在的路」，本轮已补实现）与 `android_web_dump`（`:1339`）；`android_screen_list` 的别名枚举真源是壳侧 `vdInfo` 注册表，不硬编码 virtual-1（`:248`）。
   - 偏好与门禁：屏幕范围偏好 `ScreenScopePrefs`（壳侧 XML → `currentScreenScope()`，默认 `virtual-only`）由 `guard` 每次调用现读；审计落 `files/audit/audit.ndjson`（bridge 与壳侧 ControlAudit 同路径同格式）。
 - **关键坐标**：
   - `plugins/dsh-android-manage/src/index.ts:114` — `SCREEN_ACTIONS`：范围门覆盖的 10 个 action（`device_info` 与 `web_dump` 已被刻意移出，注释给出理由）。
@@ -1770,7 +1770,7 @@ flowchart TD
 - **一句话**：把模型面的 `browser_*`（开页/导航/快照/点击/输入/按键/截图/多页签/档位）与 vdisplay 的 `android_vdisplay_*`（状态/建屏/销毁）逐条翻译成壳侧控制 op，并把壳侧真值（loadState/title/reason、四态能力）如实回执给模型。
 
 - **入口/触发**：
-  - 工具调用：模型调 `browser_open`/`browser_snapshot`/`browser_click`/`browser_type`/`browser_press`/`browser_scroll`/`browser_get_text`/`browser_wait`/`browser_navigate`/`browser_back`/`browser_forward`/`browser_reload`/`browser_list_tabs`/`browser_follow_tab`/`browser_close_tab`/`browser_set_identity`/`browser_set_viewport`/`browser_screenshot`/`android_browser_tier`，以及 `android_vdisplay_status`/`android_vdisplay_create`/`android_vdisplay_destroy`（`BROWSER_TOOLS` 在 `plugins/dsh-android-browser/src/contract.ts:14`，vdisplay 工具在 `plugins/dsh-android-vdisplay/src/index.ts:96/:251/:262`）。
+  - 工具调用：模型调 `browser_open`/`browser_snapshot`/`browser_click`/`browser_type`/`browser_press`/`browser_scroll`/`browser_get_text`/`browser_wait`/`browser_navigate`/`browser_back`/`browser_forward`/`browser_reload`/`browser_list_tabs`/`browser_follow_tab`/`browser_close_tab`/`browser_set_identity`/`browser_set_viewport`/`browser_screenshot`/`android_browser_tier`，以及 `android_vdisplay_status`/`android_vdisplay_create`/`android_vdisplay_input`/`android_vdisplay_destroy`（`BROWSER_TOOLS` 在 `plugins/dsh-android-browser/src/contract.ts:14`，vdisplay 工具在 `plugins/dsh-android-vdisplay/src/index.ts:96/:251/:321/:388`；`android_vdisplay_input` 是 0.14.1 补实现的承诺工具，见坑 163）。
   - 注册：引擎启动时 `apply(ctx)` 里注册（`plugins/dsh-android-browser/src/index.ts:274`、`plugins/dsh-android-vdisplay/src/index.ts:92`），两个插件都在装配集 `scripts/plugin-dirs.json` 内。
   - 只读 HTTP：`GET /api/android/browser/status`（`index.ts:295`，自带令牌/同源鉴权）、`GET /api/android/vdisplay/status`（vdisplay `index.ts:298`，exact 路由 + 回环栅栏 + 405/403）。
   - 侧栏面板：浏览器面板与虚拟屏 Tab 在注入层/客户端侧（`dsh-client-ui-responsive/src/client/mobile/browser-tab.tsx:229`、`plugins/dsh-android-vdisplay/src/client/index.ts:171`），数据面走 `window.androidBridge` 直连壳侧，不经控制队列。
@@ -2591,6 +2591,7 @@ scripts/verify-browser-panel.mjs
 scripts/verify-vdisplay-viewer.mjs
 scripts/verify-vdisplay-float.mjs
 scripts/verify-engine-log-copy.mjs
+scripts/verify-screen-scope-matrix.mjs
 scripts/device-smoke.ps1
 scripts/deploy-device.ps1
 scripts/deploy-embedded.ps1

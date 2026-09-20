@@ -54,6 +54,7 @@ export const DEVICE_TOOL_GROUPS: Readonly<Record<string, readonly string[]>> = {
   'virtual-display': [
     'android_vdisplay_create',
     'android_vdisplay_destroy',
+    'android_vdisplay_input',
     'android_vdisplay_status',
   ],
 }
@@ -158,16 +159,40 @@ const CAPABILITY_SKILLS: ReadonlyArray<{ name: string; description: string; sour
   },
 ]
 
-/** 通道就绪度（facade 如实汇报，避免模型误判「没解锁」或盲目建屏）。 */
+/**
+ * 通道就绪度（facade 如实汇报，避免模型误判「没解锁」或盲目建屏）。
+ *
+ * `shizuku` 是**三态**（0.14.1 设备实测缺陷 A1）：`true` 就绪 / `false` 已实测未就绪 /
+ * 缺席 = **尚未探测到**。壳侧 caps 只随控制 op 的回执抵达，冷启动首次询问必然缺席；
+ * 旧实现把它折成 `false` 并渲染「未就绪（虚拟屏建屏需要它）」，模型据此放弃了一个**当时可用**的能力。
+ * 纪律：**「未知」不得渲染成「未就绪」**，也不得阻止模型尝试（见 {@link shizukuLine}）。
+ */
 export interface ChannelFacts {
   a11y: boolean
-  shizuku: boolean
+  shizuku?: boolean
+}
+
+/**
+ * Shizuku 通道的**三分文案**（A1 的判据面）。
+ *
+ * 「未知」这一支刻意给出可执行动作：直接调创建工具试一次——成功即证明通道可用，
+ * 失败再据结构化 code 判断。旧文案让模型在真正尝试之前就自我否决。
+ */
+export function shizukuLine(ready: boolean | undefined): string {
+  if (ready === true) return '就绪（shell 执行 / 原图截图 / 虚拟屏经 Shizuku UserService 承载）'
+  if (ready === false) {
+    return '未就绪（已实测：壳侧回执明确报告特权通道不可用；**虚拟屏建屏需要它**，'
+      + '请让用户在设置页「手机控制」里连接 Shizuku）'
+  }
+  return '状态未知（壳侧尚未回执，本次补探也没拿到；**这不等于不可用**——不要据此判定虚拟屏不可用）。'
+    + '直接调 android_vdisplay_create 试一次：成功即通道可用；失败再看它回的 code/guidance，'
+    + '或用 android_privilege_status、设置页「手机控制」看实测状态'
 }
 
 /** 把 Android 设备能力组做成渐进披露：常驻 facade + agent 作用域掩蔽 + skill 目录条目。 */
 export function installCapabilityGate(
   ctx: CapabilityGateCtx,
-  channels: () => ChannelFacts = () => ({ a11y: false, shizuku: false }),
+  channels: () => ChannelFacts | Promise<ChannelFacts> = () => ({ a11y: false }),
 ): void {
   const locks = new WeakMap<object, Map<string, ScopedFiber>>()
   const locksOf = (agent: unknown): Map<string, ScopedFiber> | undefined =>
@@ -249,7 +274,7 @@ export function installCapabilityGate(
  */
 export function capabilityTool(
   unlock: (group: string, agent: unknown) => { unlocked: string[]; locked: string[] },
-  channels: () => ChannelFacts,
+  channels: () => ChannelFacts | Promise<ChannelFacts>,
 ) {
   return defineTool({
     name: CAPABILITY_TOOL_NAME,
@@ -270,6 +295,7 @@ export function capabilityTool(
           locked: { type: 'array', required: true },
           groups: { type: 'array', required: true },
           channels: { type: 'object', required: true, additionalProperties: false, properties: { a11y: { type: 'boolean' }, shizuku: { type: 'boolean' } } },
+          // 注：`channels.shizuku` 缺席即「尚未探测到」（三态，见 ChannelFacts）——不是 false。
           text: { type: 'string', required: true },
         },
       },
@@ -278,11 +304,12 @@ export function capabilityTool(
     execute: async ({ group = 'all' }: { group?: string }, exec: unknown) => {
       const agent = (exec as { agent?: unknown } | undefined)?.agent
       const { unlocked, locked } = unlock(typeof group === 'string' ? group : 'all', agent)
-      let facts: ChannelFacts = { a11y: false, shizuku: false }
+      let facts: ChannelFacts = { a11y: false }
       try {
-        facts = channels()
+        // 通道事实可能来自一次**补探**（A1：caps 缺席时引擎主动发一次 vdInfo），故此处可 await。
+        facts = await channels()
       } catch {
-        facts = { a11y: false, shizuku: false }
+        facts = { a11y: false }
       }
       const groups = Object.entries(DEVICE_TOOL_GROUPS).map(([name, tools]) => ({
         group: name,
@@ -297,7 +324,7 @@ export function capabilityTool(
       const stateLines = groups.map((g) => `- ${g.group}：${g.state === 'locked' ? '未解锁' : '可用'}（${g.tools} 个工具）`)
       const channelLines = [
         `- 无障碍通道：${facts.a11y ? '已开启（语义树 / ref 动作 / 虚拟屏语义树可用）' : '未开启（只能走 Shizuku 或坐标面）'}`,
-        `- Shizuku 特权通道：${facts.shizuku ? '就绪' : '未就绪（**虚拟屏建屏需要它**；请让用户在设置页「手机控制」里连接 Shizuku）'}`,
+        `- Shizuku 特权通道：${shizukuLine(facts.shizuku)}`,
       ]
       return {
         ok: true,

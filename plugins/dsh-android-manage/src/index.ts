@@ -693,9 +693,12 @@ function tools(ctx: Context, priv: PrivilegeFace) {
   const uiTree = defineTool({
     name: 'android_ui_tree',
     description:
-      '【ADB 专属 / 兜底】导出原始 uiautomator XML（大而全，token 高）：仅当无障碍通道不可用、或明确需要原始 XML 字段时才用。' +
-      '日常定位请优先 android_ui_dump（无障碍语义树，字段更全且无需配对）。未授权失败关闭。',
-    parameters: { screenId: SCREEN_PARAM },
+      '【ADB 专属 / 兜底】导出**默认屏（真实屏）**的原始 uiautomator XML（大而全，token 高）：仅当无障碍通道不可用、或明确需要原始 XML 字段时才用。' +
+      '日常定位请优先 android_ui_dump（无障碍语义树，字段更全且无需配对），**虚拟屏只能用 android_ui_dump**。未授权失败关闭。' +
+      '本工具没有目标屏参数：命令里的 `--display` 会被 uiautomator 收下但不生效（2026-09-19 设备实测：虚拟屏上放着 Settings 时，' +
+      '`uiautomator dump --display <虚拟屏 id>` 的输出与无参 dump 逐字节相同、都是真实屏的树），因此 screenId=virtual-N 无法兑现，故不再声明该参数——' +
+      '范围设为 virtual-only 时本工具会被范围门直接拒绝（它只能读真实屏）。',
+    parameters: {},
     output: {
       schema: {
         type: 'object',
@@ -710,12 +713,16 @@ function tools(ctx: Context, priv: PrivilegeFace) {
         { type: 'text', text: pickText(v, 'text', 'treeXmlPath') || '(no output)' },
       ],
     },
-    execute: async (args: { screenId?: string } | undefined, exec) => {
-      const a = await guard('ui_tree', (args ?? {}) as Record<string, unknown>, exec as { agent?: { session?: unknown } })
+    execute: async (_args, exec) => {
+      // 无 screenId 参数 ⇒ requested 恒为 undefined ⇒ 判定落在 real：virtual-only 下由范围门
+      // 明确拒绝（文案来自 decideScreenAccess，指明当前范围与替代工具），不再靠 raw shell 的
+      // 家族级拒绝文案兜底——后者会让模型误判成「命令参数写错了」。
+      const a = await guard('ui_tree', {}, exec as { agent?: { session?: unknown } })
       if (!a.ok) return { treeXmlPath: '', denied: true, text: a.guidance }
       const cap = adbChannelOnly('ui_tree', exec as { agent?: { session?: unknown } })
       if (!cap.ok) return { treeXmlPath: '', denied: true, text: cap.text }
       // 0.14 真实通道：uiautomator dump（shell uid）→ pull 回引擎私有临时目录。
+      // 目标屏恒为默认屏（真实屏）：`--display` 对 uiautomator 无效，见工具描述里的设备实测。
       if (!priv.execAdbLine) return { treeXmlPath: '', denied: false, text: 'ADB 执行通道未接通（dsh-android-bridge 未提供 execAdbLine）' }
       try {
         const n = Date.now()
@@ -807,7 +814,9 @@ function tools(ctx: Context, priv: PrivilegeFace) {
     description:
       '输入事件（点按/滑动/按键/文本）：经真实 ADB 通道（adbd，shell uid）向设备注入输入——' +
       'F1.6 观察-动作-等待闭环的「动作」环节。需完整授权（门1/门2/门3）+ 会话档位 danger-full-access；' +
-      '每次调用审计。文本仅允许可见 ASCII（空格转 %s，shell 元字符拒绝）；keycode 为 Android KeyEvent 码。',
+      '每次调用审计。文本仅允许可见 ASCII（空格转 %s，shell 元字符拒绝）；keycode 为 Android KeyEvent 码。' +
+      '**指定 screenId=virtual-N 时改由壳侧注入到该虚拟屏**（`input -d <该屏 displayId>`，argv 原生构造，' +
+      '坐标基于该屏自身像素、真实屏不受影响）；该路径的 text 作为单个参数直传，**不受 ASCII 限制（中文可用）**。',
     parameters: {
       action: { type: 'string', required: true, enum: ['tap', 'swipe', 'keyevent', 'text'], description: '输入动作类型' },
       x: { type: 'number', description: 'tap/swipe 起点 X' },
@@ -839,6 +848,65 @@ function tools(ctx: Context, priv: PrivilegeFace) {
       if (!a.ok) return { ok: false, denied: true, text: a.guidance }
       const cap = adbChannelOnly('act_input', exec as { agent?: { session?: unknown } })
       if (!cap.ok) return { ok: false, denied: true, text: cap.text }
+      // ── 虚拟屏分流（B1，0.14.1 设备实测缺陷）────────────────────────────────────
+      //
+      // 缺陷形态：本工具声明了 `screenId`（并因此进 SCREEN_ACTIONS 被范围门裁决），执行面却是
+      // `input <verb> <args>`——`/system/bin/input` **没有屏幕维度**。范围门对这条命令在
+      // `bridge/index.ts` 里直接早退（命令里没有任何目标屏 token，无从核对注册表）恒判拒绝。
+      // 于是 `screenId=virtual-N` 永远无法兑现：**参数在，执行面不存在**，模型只会反复重试。
+      // 修法：目标为虚拟屏时改走壳侧 `vdInput`（`input -d <displayId>`，argv 由原生构造、
+      // displayId 取自注册表），与 android_ui_click 的 x/y 分支同一执行面（VdisplayController.input）。
+      const screenId = (args as { screenId?: unknown }).screenId
+      if (typeof screenId === 'string' && screenId !== '' && screenId !== 'real') {
+        const verb = args.action === 'swipe' ? 'swipe' : args.action
+        const payload: Record<string, unknown> = { verb, target: screenId }
+        if (verb === 'tap') {
+          if (!Number.isInteger(args.x) || !Number.isInteger(args.y) || args.x! < 0 || args.y! < 0 || args.x! > 99999 || args.y! > 99999) {
+            return { ok: false, denied: false, text: 'tap 需要合法整数坐标 (x, y)' }
+          }
+          payload.x = args.x
+          payload.y = args.y
+        } else if (verb === 'swipe') {
+          const nums = [args.x, args.y, args.x2, args.y2, args.duration ?? 300]
+          if (!nums.slice(0, 4).every((n) => Number.isInteger(n) && n! >= 0 && n! <= 99999) || !Number.isInteger(nums[4]) || nums[4]! < 0 || nums[4]! > 60000) {
+            return { ok: false, denied: false, text: 'swipe 需要合法整数 (x, y, x2, y2[, duration])' }
+          }
+          payload.x = args.x
+          payload.y = args.y
+          payload.x2 = args.x2
+          payload.y2 = args.y2
+          payload.duration = nums[4]
+        } else if (verb === 'keyevent') {
+          if (!Number.isInteger(args.keycode) || args.keycode! < 0 || args.keycode! > 255) {
+            return { ok: false, denied: false, text: 'keyevent 需要合法整数 keycode（0-255）' }
+          }
+          payload.keycode = args.keycode
+        } else if (verb === 'text') {
+          // 虚拟屏路径不经 shell：文本作为**单个 argv 元素**直传，故不受真实屏路径的 ASCII 白名单
+          // 限制（中文可用）。上限沿用壳侧 500 字符（VdisplayController.input 的 invalid-text 判据）。
+          const raw = args.text ?? ''
+          if (raw.length === 0 || raw.length > 500) {
+            return { ok: false, denied: false, text: 'text 长度需为 1-500 字符' }
+          }
+          payload.text = raw
+        } else {
+          return { ok: false, denied: false, text: `未知 action: ${String(args.action)}` }
+        }
+        const vd = await priv.controlExec?.('vdInput', payload, 15_000)
+        const data = ((vd?.ok === true ? vd.data : {}) ?? {}) as { ok?: boolean; guidance?: string; displayId?: number; screenId?: string }
+        if (vd?.ok !== true || data.ok === false) {
+          return {
+            ok: false, denied: false,
+            text: '虚拟屏输入失败：'
+              + (data.guidance ?? (vd?.ok === true ? '壳侧拒绝' : (vd?.error ?? '控制通道未接通')))
+              + '——请先用 android_vdisplay_status 确认虚拟屏存在（或 android_vdisplay_create 建屏）。',
+          }
+        }
+        return {
+          ok: true, denied: false,
+          text: data.guidance ?? (`已在 ${String(data.screenId ?? screenId)}（displayId=${String(data.displayId ?? '?')}）注入 ${String(verb)}；真实屏前台不受影响`),
+        }
+      }
       let line = ''
       switch (args.action) {
         case 'tap': {
@@ -2150,6 +2218,8 @@ function tools(ctx: Context, priv: PrivilegeFace) {
     name: 'android_app_launch',
     description:
       '按包名拉起应用并回报前台 Activity。默认落真实屏；要开到虚拟屏必须传 screenId="virtual-N"（见 android_screen_list）。'
+      + '**虚拟屏路径的落点是回读确认的**：返回 landedDisplayIds 与 displayId；若应用实际落在别的屏（例如它已在真实屏有任务），'
+      + '返回 ok=false + code=vd-launch-denied，**不要把它当成功**。'
       + '包名先用 android_device_info 或 pm list packages 查。',
     parameters: {
       pkg: { type: 'string', required: true, description: '应用包名（如 com.netease.cloudmusic）' },
@@ -2165,6 +2235,11 @@ function tools(ctx: Context, priv: PrivilegeFace) {
           denied: { type: 'boolean' },
           pkg: { type: 'string' },
           foreground: { type: 'string' },
+          // C1 自证字段（0.14.1）：模型必须能看出「请求的屏」与「实际落点」是不是同一块。
+          screenId: { type: 'string' },
+          displayId: { type: 'integer' },
+          landedDisplayIds: { type: 'array' },
+          code: { type: 'string' },
           text: { type: 'string' },
         },
       },
@@ -2179,17 +2254,29 @@ function tools(ctx: Context, priv: PrivilegeFace) {
       if (typeof screenId === 'string' && screenId !== '' && screenId !== 'real') {
         const vd = await (priv.controlExec?.('vdLaunchApp', { pkg, target: screenId }, 30_000)
           ?? Promise.resolve({ ok: false as const, error: 'vdisplay-control-unavailable' }))
-        const data = (vd.ok ? (vd.data ?? {}) : {}) as { ok?: boolean; code?: string; guidance?: string; displayId?: number; screenId?: string }
+        const data = (vd.ok ? (vd.data ?? {}) : {}) as {
+          ok?: boolean; code?: string; guidance?: string; displayId?: number; screenId?: string
+          landedDisplayIds?: number[]
+        }
         if (vd.ok !== true || data.ok === false) {
           return {
             ok: false, denied: false, pkg,
-            text: '跨屏拉起失败：' + (data.guidance ?? (vd.ok ? '壳侧拒绝' : vd.error))
+            ...screenOut(data),
+            ...(typeof data.displayId === 'number' ? { displayId: data.displayId } : {}),
+            ...(data.landedDisplayIds === undefined ? {} : { landedDisplayIds: data.landedDisplayIds }),
+            ...(typeof data.code === 'string' ? { code: data.code } : {}),
+            text: '跨屏拉起未确认落在目标屏：' + (data.guidance ?? (vd.ok ? '壳侧拒绝' : vd.error))
               + '——若虚拟屏尚未建立，先用 android_vdisplay_create；仅需真实屏拉起时不要传 screenId。',
           }
         }
+        // 成功分支同样回传屏身份与落点：模型不必相信文案（C4）。
         return {
           ok: true, denied: false, pkg,
           foreground: '',
+          ...screenOut(data),
+          ...(typeof data.displayId === 'number' ? { displayId: data.displayId } : {}),
+          ...(data.landedDisplayIds === undefined ? {} : { landedDisplayIds: data.landedDisplayIds }),
+          ...(typeof data.code === 'string' ? { code: data.code } : {}),
           text: data.guidance ?? ('已在 ' + screenId + ' 上拉起 ' + pkg),
         }
       }
