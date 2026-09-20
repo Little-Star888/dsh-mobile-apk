@@ -380,7 +380,7 @@ sequenceDiagram
 - [B03] | `verify-engine-log-copy.mjs` | 无 | 全部：`run-as stat/cat` 读 `engine.log` 与 `.1..5`、本地复算 sha256 与脱敏必要性 | 无（UI 剪贴板项明确留给人工） |
 - [B03] *缺口结论（当前哪些验收面只有 CDP、完全没有 adb 用户级操作）
 - [B03] 7 个套件一个都没有执行 `input tap/swipe/text/keyevent`、`exec-out screencap`、`uiautomator dump`、`logcat -d`。`grep -c` 实算：`screencap` = 0、`input tap` = 0、`uiautomator` = 0（七个文件逐个统计）。全仓 `scripts/` 下唯一带这些原语的脚本是 `scripts/e2e-provider-ui.ps1`（`Shot` `:31-36`、`Tap` `:38-43`、`TypeText` `:45-50`），而它不在本套件清单里。
-- [B03] 因此「用户看得见 / 摸得到」这一整面只有 CDP 断言，没有任何脚本化的设备证据，具体缺口（对应 `docs/AGENTS/emulator-test-protocol.md:10-20` 的必须双轨清单）：移动顶栏 / 抽屉 / 侧栏开关是否真能点到且不互相遮挡；虚拟屏 viewer 舞台在真实屏幕上的位置、缩放与遮挡（坑 50 的教训：几何缺陷只有截图能发现）；浏览器面板地址栏与隔离页的可见结果；错误页呈现（脚本只断言 `loadState=error` 与 `reason` 字段，没断言用户看到的页面）；浮窗 / 光环 / 通知与通知内应答；返回网关的逐级返回手势。
+- [B03] 因此「用户看得见 / 摸得到」这一整面只有 CDP 断言，没有任何脚本化的设备证据，具体缺口（对应 `docs/AGENTS/emulator-test-protocol.md:29-42` 的必须双轨清单）：移动顶栏 / 抽屉 / 侧栏开关是否真能点到且不互相遮挡；虚拟屏 viewer 舞台在真实屏幕上的位置、缩放与遮挡（坑 50 的教训：几何缺陷只有截图能发现）；浏览器面板地址栏与隔离页的可见结果；错误页呈现（脚本只断言 `loadState=error` 与 `reason` 字段，没断言用户看到的页面）；浮窗 / 光环 / 通知与通知内应答；返回网关的逐级返回手势。
 - [B03] 替代路径只有两条，都不在套件里：① `docs/AGENTS/emulator-test-protocol.md:61-90` 的「B 轨原语」是一段人工复制粘贴清单（截图 + `input` + `uiautomator dump` + logcat），落在 PR 描述的手工结论表里；② 会话内的 MCP 封装 `android_ui_describe` / `android_ui_resolve` / `android_ui_tap` / `android_screenshot`（协议文档 `:79-80` 注明底层就是上面几条命令，但证据仍要落盘成文件）。两者都不产出「每轮可复现、可归档」的脚本证据，PR 里的「功能完好」目前靠人自觉。
 - [B03] 判据原文（`docs/AGENTS/emulator-test-protocol.md:4`）：只跑 CDP 不算验收；`:121-122` 规定 pass 的充要条件是 A 轨全绿且 B 轨每步截图与预期一致，缺任一轨即「未验收」。
 
@@ -2375,7 +2375,7 @@ flowchart TD
 **缺口结论（当前哪些验收面只有 CDP、完全没有 adb 用户级操作）**
 
 - 7 个套件**一个都没有**执行 `input tap/swipe/text/keyevent`、`exec-out screencap`、`uiautomator dump`、`logcat -d`。`grep -c` 实算：`screencap` = 0、`input tap` = 0、`uiautomator` = 0（七个文件逐个统计）。全仓 `scripts/` 下唯一带这些原语的脚本是 `scripts/e2e-provider-ui.ps1`（`Shot` `:31-36`、`Tap` `:38-43`、`TypeText` `:45-50`），而它不在本套件清单里。
-- 因此**「用户看得见 / 摸得到」这一整面只有 CDP 断言，没有任何脚本化的设备证据**，具体缺口（对应 `docs/AGENTS/emulator-test-protocol.md:10-20` 的必须双轨清单）：移动顶栏 / 抽屉 / 侧栏开关是否真能点到且不互相遮挡；虚拟屏 viewer 舞台在真实屏幕上的位置、缩放与遮挡（坑 50 的教训：几何缺陷只有截图能发现）；浏览器面板地址栏与隔离页的可见结果；错误页呈现（脚本只断言 `loadState=error` 与 `reason` 字段，没断言用户看到的页面）；浮窗 / 光环 / 通知与通知内应答；返回网关的逐级返回手势。
+- 因此**「用户看得见 / 摸得到」这一整面只有 CDP 断言，没有任何脚本化的设备证据**，具体缺口（对应 `docs/AGENTS/emulator-test-protocol.md:29-42` 的必须双轨清单）：移动顶栏 / 抽屉 / 侧栏开关是否真能点到且不互相遮挡；虚拟屏 viewer 舞台在真实屏幕上的位置、缩放与遮挡（坑 50 的教训：几何缺陷只有截图能发现）；浏览器面板地址栏与隔离页的可见结果；错误页呈现（脚本只断言 `loadState=error` 与 `reason` 字段，没断言用户看到的页面）；浮窗 / 光环 / 通知与通知内应答；返回网关的逐级返回手势。
 - 替代路径只有两条，都不在套件里：① `docs/AGENTS/emulator-test-protocol.md:61-90` 的「B 轨原语」是一段**人工复制粘贴清单**（截图 + `input` + `uiautomator dump` + logcat），落在 PR 描述的手工结论表里；② 会话内的 MCP 封装 `android_ui_describe` / `android_ui_resolve` / `android_ui_tap` / `android_screenshot`（协议文档 `:79-80` 注明底层就是上面几条命令，但证据仍要落盘成文件）。两者都不产出「每轮可复现、可归档」的脚本证据，PR 里的「功能完好」目前靠人自觉。
 - 判据原文（`docs/AGENTS/emulator-test-protocol.md:4`）：**只跑 CDP 不算验收**；`:121-122` 规定 pass 的充要条件是 A 轨全绿**且** B 轨每步截图与预期一致，缺任一轨即「未验收」。
 
