@@ -1,6 +1,6 @@
 # ARCHITECTURE.md — 模块地图
 
-> 职责：安卓壳源码的权威模块登记（**65 个 .kt 文件**、assets 资产、manifest 组件）。行数为 2026-09-14 当场 wc 实测；「被引用」为名称级 grep（含少量注释提及），调用关系以源码为准。源码根：`app/src/main/java/com/dsharnessmobile/shell/`。
+> 职责：安卓壳源码的权威模块登记（assets 资产、manifest 组件）。**文件数与行数一律现数**（`find app/src/main -name '*.kt' | wc -l`、`wc -l <file>`）——本表曾写死 2026-09-14 的实测值，执行地图排查（docs/AGENTS/EXECUTION-MAP.md §8）已证明这类数字每次改动都会漂；「被引用」为名称级 grep（含少量注释提及），调用关系以源码为准。源码根：`app/src/main/java/com/dsharnessmobile/shell/`。
 
 ## 1. 宿主 Activity 及拆分协作类
 
@@ -57,7 +57,6 @@
 
 | 文件 | 行数 | 职责一句话 | 被引用 |
 |---|---|---|---|
-| AdbState.kt | 687 | ADB 授权单一事实源：三道门/真实 pair 握手/NSD 端口发现/adbShellExecute/审计（AdbAudit）；0.14 起定位为迁移/诊断面，正式特权通道转 Shizuku | AndroidBridge、EngineManager、MainActivity、ShizukuProbe（注释） |
 | AdbKeyboardService.kt | 168 | 内嵌 ADBKeyboard 协议 IME（android_ui_input 中文输入；仅活跃时提交） | AdbKeyboardReceiver（静态 handle 转发） |
 | AdbKeyboardReceiver.kt | 32 | ADB_INPUT_TEXT/ADB_CLEAR_TEXT 广播入口 | manifest 注册（无代码调用方） |
 | BootReceiver.kt | 48 | BOOT_COMPLETED 恢复用户同意状态 + BatteryWhitelist 引导 | manifest 注册（无代码调用方） |
@@ -80,6 +79,8 @@
 | ShellState.kt | 125 | ST 真源收敛：沉浸式/开发者日志两处「展示值 ≠ 事实」的统一读写面（仅偏好 ∧ 运行时合取） | MainActivity、WebUiChrome、AndroidBridge |
 | LiveProbe.kt | 54 | 轻量真源探测原语（TCP connect + TTL ≤ 页面轮询周期；时钟/探测体可注入单测） | AdbState |
 | ApkArtifactCheck.kt | 38 | 启动页 APK 自更新产物校验（缓存/新下载两路径共用同一严格度：存在/大小/sha256） | GuidePageRenderer、UpdateChecker |
+
+（`AdbState.kt` 已于 8141e5c「0.14.0 正式轮」删除：ADB 授权/审计职责拆进 `EngineAuth`/`ShizukuTransport`/`ControlAudit`/`LiveProbe`/`ProcIo`；旧行保留在 git 历史里，不再列于本表。）
 
 ## 5. 0.14 新增：Shizuku 特权 transport、虚拟屏与浏览器宿主
 

@@ -55,6 +55,16 @@ adb -s <serial> install -r -t out\v<版本>\dsh-mobile-apk-v<版本>-arm64.apk
 
 **热重载（仅 JS 插件，不含 Kotlin）**：`node scripts/hot-push.mjs --serial <s> --plugin <dir> [--pkg ...] [--restart]`。
 
+### 2.1 模拟器测试规范（强制；详档 `docs/AGENTS/emulator-test-protocol.md`）
+
+1. **双轨验收**：凡改动会让用户**看见或摸到**不同（页面/注入层、引导页、控制台、悬浮球与面板、通知、浏览器/虚拟屏、点击输入路径、桥的页面可见面），验收必须**两轨都跑**：
+   - **A 轨（断言级）**：跑对应 `verify-*.mjs` 套件；
+   - **B 轨（用户级）**：用 adb 真操作一次——`adb shell input tap/swipe/text/keyevent` + `adb exec-out screencap -p` 截图留证（坐标不确定先 `uiautomator dump` 算中心点；必要时 `logcat` 取关键日志）。
+2. **只跑 CDP 不算验收**：几何/层级/遮挡/焦点/键盘这类缺陷 DOM 断言看不见（坑 50/61 是实锤）；反过来只贴截图也不算——状态语义只有 A 轨能证。两轨互补，缺一不可。
+3. **证据落盘**：命令清单 + 每步截图（`.deploy-tmp/<round>/ui-NN-*.png`）+ 结论表；PR 描述贴结论行与截图路径。缺任一轨 = 未验收，不得写「功能完好」。
+4. **覆盖两个方向**：竖屏 16416 与横屏 16384 各至少一次 tap 级操作 + 截图；几何/布局类改动两个方向都必跑。发布前 arm64 真机补一次。
+5. **前置与假失败**：快照刷新期间禁跑设备验收；uid-mode appop 残留、prefs 僵尸 a11y 标记、应用被切后台都会制造假失败——清理方式与判据见详档 §3、§8。
+
 ---
 
 ## 3. 去哪查（按需 grep，别通读）
@@ -71,6 +81,8 @@ adb -s <serial> install -r -t out\v<版本>\dsh-mobile-apk-v<版本>-arm64.apk
 | gradle 依赖与升级 | `docs/AGENTS/DEPENDENCIES.md` |
 | GPL 合规三形态 | `docs/AGENTS/gpl-compliance.md` |
 | 已知缺口 / 待办 | `docs/AGENTS/known-gaps.md` |
+| 运行顺序 / 嵌套 / 耦合 / 流程图（排查入口） | `docs/AGENTS/EXECUTION-MAP.md` |
+| 模拟器验收规范（CDP + adb 双轨） | `docs/AGENTS/emulator-test-protocol.md` |
 | **版本历史（全量）** | `docs/AGENTS/changelog-archive.md` |
 
 ---
@@ -78,7 +90,7 @@ adb -s <serial> install -r -t out\v<版本>\dsh-mobile-apk-v<版本>-arm64.apk
 ## 4. 铁律（违反即返工）
 
 1. **需求不延期**：有明确需求且未获准延后，本轮必须完成。技术阻塞只能给替代实现 + 记真因，不得以「实验特性 / 下版本」降级。
-2. **模拟器优先**：本地构建 → **MuMu x86_64 实测** → 才谈 PR。禁止以「等真机」推迟模拟器实测，也禁止把模拟器实测挂在 PR 之后。真机是发布前补充门禁。
+2. **模拟器优先**：本地构建 → **MuMu x86_64 实测** → 才谈 PR。禁止以「等真机」推迟模拟器实测，也禁止把模拟器实测挂在 PR 之后。真机是发布前补充门禁。UI 可见改动必须**双轨验收**（CDP 断言 + adb 截图/点击，见 §2.1）。
 3. **批量改、统一验**：成组改动一次改完，再做一次构建 + 打包 + 装机 + 回归。中途只跑廉价检查（Kotlin 单测、静态门禁）。安全敏感项（快照事务 / 签名 / 门禁自身 / 桥协议面）例外，即时验。
 4. **一切改动走 PR**：建分支 → 提交（`<type>: <描述>`）→ 推分支 → 开 PR（1-3 标签）→ CI 绿 → 合并 → 删分支。**禁止直接 push `main`**。例外仅限不改仓库内容的外部动作（Release 资产、issue 评论与开关、标签）。
 5. **子仓镜像（幽灵缺陷防线）**：改 `dsh-client-ui-responsive` / `dsh-host-web-compat` / `dsh-shell-termux` / `plugins/dsh-android-*` 的源码或 bump 版本后，**必须 robocopy 镜像到本仓同名目录**（src + package.json + **`lib/` 产物**）。漏了 → 云端自包含构建注入旧副本，**编译通过但功能缺失**。
@@ -107,6 +119,8 @@ adb -s <serial> install -r -t out\v<版本>\dsh-mobile-apk-v<版本>-arm64.apk
 | 改 `scripts/patches/**` 或 `assets/patched` | 运行时补丁 | `docs/AGENTS/RUNTIME-PATCHES.md` §7.1 登记 + §2 字节数按实测更新 |
 | gradle 依赖增删/升级 | 依赖台账 | `docs/AGENTS/DEPENDENCIES.md` |
 | 发现未实现 / 有意留下的缺口 | 已知缺口 | `docs/AGENTS/known-gaps.md` |
+| **代码执行顺序 / 嵌套 / 耦合 / 流程图（排查入口）** | 执行地图对应查点 + 覆盖账本 | `docs/AGENTS/EXECUTION-MAP.md`（改完跑 `node scripts/check-code-map.mjs`） |
+| 改设备验收方式 / 新增套件或操作原语 | 模拟器验收规范 | `docs/AGENTS/emulator-test-protocol.md` |
 | **本文件 §1-§4 的描述失真** | 就地改**对应行** | 只改那一行，**不要新增章节、不要加历史** |
 
 ### 5.2 写作纪律
@@ -130,6 +144,7 @@ adb -s <serial> install -r -t out\v<版本>\dsh-mobile-apk-v<版本>-arm64.apk
 | `check-plugin-tests.mjs` | 每个插件的单测真实跑通（全 skip 判假绿） |
 | `check-tool-surface-budget.mjs` | 模型面 wire 预算（新增工具会撞；近义工具优先复用既有 + 参数） |
 | `check-patch-mirror.mjs` | 双仓镜像逐字节一致 |
+| `check-code-map.mjs` | 执行地图覆盖完整、锚点有效、编号一致（改代码后必跑；`--self-test` 自检） |
 
 ---
 
