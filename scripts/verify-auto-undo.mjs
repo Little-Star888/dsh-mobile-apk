@@ -35,6 +35,7 @@ const FILES = '/data/user/0/' + PKG + '/files'
 const WEB = FILES + '/home/.dsh/profiles/web'
 const NM = WEB + '/node_modules/@dsh-android'
 const BAD_ID = 'dsh-bad-probe'
+const GOOD_ID = 'dsh-good-probe'
 const BAD_DIR = NM + '/' + BAD_ID
 const PATCH = WEB + '/cordis.patch.yml'
 const STAMP = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
@@ -215,6 +216,149 @@ async function engineAlive() {
 
 const ENGINE_PS = "ps -A -o PID,ARGS 2>/dev/null | grep 'dsh/lib/bin.js' | grep -v grep | awk '{print $1}'"
 
+/** 看门狗/闸门探针的最后一行（终端监视用；不含正文，只用来判「引擎有没有在动」）。 */
+const lastGateLine = () => {
+  const lines = runAs(`tail -1 ${FILES}/undo-gate.log 2>/dev/null`).trim().split('\n')
+  return (lines[lines.length - 1] ?? '').replace(/^dsh-undo-gate at=[0-9]+\s*/, '')
+}
+
+/**
+ * 全程引擎监视（用户要求「用终端持续检测引擎反应」）：每 [everyS] 秒打一行
+ * `[+Ns] engine=pid/无 http=401/000 gate=<最后一条闸门记账>`，并把整段抄进证据目录。
+ * 判据不在这段里——它只负责留下「这几分钟引擎是怎么反应的」这条时间线。
+ */
+async function monitor(label, seconds, everyS = 2) {
+  const t0 = Date.now()
+  const lines = []
+  let lastPid = null
+  while ((Date.now() - t0) / 1000 < seconds) {
+    const pid = sh(ENGINE_PS).trim().split('\n')[0] || ''
+    const alive = await engineAlive()
+    const gate = lastGateLine()
+    // 只报 HTTP 会骗人：引擎可以在「插件树 failed to load」的半死态下照常回 401（本轮实测踩过），
+    // 故把引擎日志尾部签名一并打进监视行——「坏插件到底有没有把启动拖垮」看的是这一列。
+    const sig = engineLogSignature()
+    const line = `[+${String(Math.round((Date.now() - t0) / 1000)).padStart(3)}s] ${label} engine=${pid || '无'} http=${alive ? 'ok' : 'down'} tree=${sig} gate=${gate}`
+    if (pid !== lastPid || lines.length === 0) { console.log(line); lastPid = pid } else { console.log(line) }
+    lines.push(line)
+    await sleep(everyS * 1000)
+  }
+  return lines
+}
+
+/** 引擎日志尾部的失败签名（none / plugin-tree / uncaught）——HTPP 活着时判「插件树有没有挂」。 */
+function engineLogSignature() {
+  const tail = runAs(`sh -c 'tail -c 4096 ${FILES}/engine.log 2>/dev/null'`)
+  if (/plugin tree failed to load/.test(tail)) return 'PLUGIN-TREE-FAIL'
+  if (/UncaughtException/.test(tail)) return 'UNCAUGHT'
+  return 'none'
+}
+
+/** 造一个「无意义但好」的插件（第一遍要它被登记进软清单；加载失败说明样本不合格，判 INCONCLUSIVE）。 */
+async function makeGoodPlugin(names) {
+  const dir = `${NM}/${GOOD_ID}`
+  const pkg = JSON.stringify({
+    name: '@dsh-android/' + GOOD_ID,
+    version: '0.0.0',
+    type: 'module',
+    main: 'lib/index.js',
+    exports: { '.': './lib/index.js', './package.json': './package.json' },
+    private: true,
+  }, null, 2)
+  // 极简 cordis 插件：只声明 name/inject 与空 apply——「注册即好」，不参与任何功能。
+  const js = [
+    '// 验收用「好插件」：无副作用、无依赖，只验证加载链路与清单登记。',
+    `export const name = '${GOOD_ID}'`,
+    'export const inject = []',
+    'export function apply() { /* no-op */ }',
+    '',
+  ].join('\n')
+  runAs(`rm -rf ${dir} && mkdir -p ${dir}/lib`)
+  adb(['shell', `run-as ${PKG} sh -c 'cat > ${dir}/package.json'`], pkg + '\n')
+  adb(['shell', `run-as ${PKG} sh -c 'cat > ${dir}/lib/index.js'`], js)
+  const entry = `- insert:\n    - id: ${GOOD_ID}\n      name: '@dsh-android/${GOOD_ID}'\n`
+  const text = runAs(`cat ${PATCH}`)
+  adb(['shell', `run-as ${PKG} sh -c 'cat > ${PATCH}'`], spliceMidFile(text, entry))
+  return { dir, entry }
+}
+
+/**
+ * 用户口径的两遍验收（2026-09-21）：
+ *   第一遍：先注册一个**无意义的好插件** → 引擎必须照常起来，且该插件被**记进软清单**；
+ *   第二遍：再注入**会让启动失败的坏插件** → 必须**只拔坏的**，好插件一条不动（条目在、文件在、没被点过名）。
+ * 两遍都开引擎监视（终端持续检测反应）。
+ */
+async function goodThenBadPhase() {
+  const beforePatch = runAs(`cat ${PATCH}`)
+  const gateBefore = runAs(`cat ${FILES}/undo-gate.log 2>/dev/null`)
+  // 数「拔出某插件」的记账条数（按字面名字数即可，形如 @dsh-android/dsh-bad-probe）
+  const pulledCount = (log, name) => log.split('pulled plugin=' + name).length - 1
+  const bad0 = pulledCount(gateBefore, '@dsh-android/' + BAD_ID)
+  const good0 = pulledCount(gateBefore, '@dsh-android/' + GOOD_ID)
+  const goodBytes = () => runAs(`cd ${NM}/${GOOD_ID} && find . -type f | sort | xargs sha256sum`)
+
+  // ── 第一遍：好插件 ──
+  await makeGoodPlugin()
+  // 基线必须**建完样本之后**取：建之前那里根本没有目录（本轮实测就是这一步取早了，判出假红）
+  const goodSha0 = goodBytes()
+  console.log(`\n== 第一遍：注册好插件 ${GOOD_ID}（无副作用，只验加载与登记）==`)
+  const pidG = sh(ENGINE_PS).trim().split('\n')[0]
+  runAs(`kill -9 ${pidG}`)
+  const mon1 = await monitor('好插件启动', 90)
+  writeFileSync(join(EVID, 'monitor-good-plugin.log'), mon1.join('\n'))
+  const aliveGood = await engineAlive()
+  record('第一遍：装好插件后引擎仍健康', aliveGood ? 'PASS' : 'FAIL', aliveGood ? '@dsh-android/dsh-good-probe 加载成功，引擎 HTTP 可达' : '引擎未恢复（样本插件可能不是合法 cordis 插件）')
+  const softAfterGood = runAs(`cat ${FILES}/.plugin-soft-manifest.json 2>/dev/null`)
+  const recorded = softAfterGood.includes(GOOD_ID)
+  record('第一遍：好插件被记进软清单', recorded ? 'PASS' : 'FAIL',
+    recorded ? '软清单含 @dsh-android/dsh-good-probe（这就是「当前清单被证明可用」的记账）' : '软清单里没有它——登记没发生')
+  const hardHasGood = runAs(`cat ${FILES}/.plugin-hard-manifest.json 2>/dev/null`).includes(GOOD_ID)
+  record('第一遍：好插件不在硬清单（后加的 = 用户级，可被拔）', !hardHasGood ? 'PASS' : 'INCONCLUSIVE',
+    hardHasGood ? '它进了硬清单（本相位构造不出「可被拔」的场景）' : '硬清单只收随版本走的那批')
+  const patchAfterGood = runAs(`cat ${PATCH}`)
+  writeFileSync(join(EVID, 'patch-after-good-plugin.yml'), patchAfterGood)
+  if (!aliveGood || !recorded) return
+
+  // ── 第二遍：坏插件 ──
+  console.log(`\n== 第二遍：注入会拖垮启动的坏插件（好插件必须不受影响）==`)
+  const badDir = `${NM}/${BAD_ID}`
+  runAs(`mkdir -p ${badDir}/lib`)
+  adb(['shell', `run-as ${PKG} sh -c 'cat > ${badDir}/package.json'`], JSON.stringify({ name: '@dsh-android/' + BAD_ID, version: '0.0.0', type: 'module', main: 'lib/index.js' }) + '\n')
+  adb(['shell', `run-as ${PKG} sh -c 'cat > ${badDir}/lib/index.js'`], "throw new Error('INJECTED-BAD-PLUGIN: must never load')\n")
+  adb(['shell', `run-as ${PKG} sh -c 'cat > ${PATCH}'`],
+    spliceMidFile(patchAfterGood, `- insert:\n    - id: ${BAD_ID}\n      name: '@dsh-android/${BAD_ID}'\n`))
+  const pidB = sh(ENGINE_PS).trim().split('\n')[0]
+  runAs(`kill -9 ${pidB}`)
+  const mon2 = await monitor('坏插件上线', 150)
+  writeFileSync(join(EVID, 'monitor-bad-plugin.log'), mon2.join('\n'))
+  const patchFinal = runAs(`cat ${PATCH}`)
+  writeFileSync(join(EVID, 'patch-after-repair.yml'), patchFinal)
+  // **必须整份读**：拔出那一行会很快被后续的 known-good 记账挤出 tail 窗口——
+  // 本轮实测就是 tail -6 把刚发生的拔出挤掉了，判出假红（同一类窗口/基线问题第三次踩）。
+  const gate = runAs(`cat ${FILES}/undo-gate.log 2>/dev/null`)
+
+  // 基线隔离：只认**本相位新增**的拔出记录（否则会拿 P1-P4 的旧记录当本轮证据——同类假绿本轮修过一次）
+  const pulledBad = pulledCount(gate, '@dsh-android/' + BAD_ID) > bad0
+  const pulledGood = pulledCount(gate, '@dsh-android/' + GOOD_ID) > good0
+  record('第二遍：坏插件被单独拔掉', pulledBad ? 'PASS' : 'FAIL', pulledBad ? gate.trim().split('\n').slice(-2).join(' | ') : '闸门里没有拔出坏插件的记账')
+  record('第二遍：**好插件没被点名**', !pulledGood ? 'PASS' : 'FAIL', pulledGood ? '好插件被误伤（点名拔掉了它）' : '闸门里只有坏插件的拔出记录')
+  const goodStillMounted = patchMounts(patchFinal, '@dsh-android/' + GOOD_ID)
+  record('第二遍：好插件仍在装配里', goodStillMounted ? 'PASS' : 'FAIL', goodStillMounted ? '其挂载条目仍在 cordis.patch.yml' : '好插件的条目消失了')
+  const goodIntact = goodBytes() === goodSha0
+  record('第二遍：好插件文件未被改动', goodIntact ? 'PASS' : 'FAIL', goodIntact ? '逐文件 sha256 与注册时一致' : '文件内容被改动了')
+  const restored = patchFinal === patchAfterGood
+  record('第二遍：清单回到「只有好插件」的那一版（逐字节）', restored ? 'PASS' : 'FAIL',
+    restored ? '坏块被精确删除，其余条目与注释一字未动' : '清单与「好插件版」不一致')
+  const alive2 = await engineAlive()
+  record('第二遍：修完引擎恢复健康', alive2 ? 'PASS' : 'FAIL', alive2 ? 'HTTP 可达' : '仍不可达')
+
+  // 收尾：拆掉两个样本，回到相位前状态
+  runAs(`rm -rf ${NM}/${GOOD_ID} ${NM}/${BAD_ID}`)
+  adb(['shell', `run-as ${PKG} sh -c 'cat > ${PATCH}'`], beforePatch)
+  for (let i = 0; i < 40; i++) { if (await engineAlive()) break; await sleep(5000) }
+  record('收尾：拆样本后引擎健康', (await engineAlive()) ? 'PASS' : 'FAIL', '两份样本已清理，清单回到相位前')
+}
+
 /**
  * P5 跨版本护栏：把「已知良好记录」的安装指纹篡改成**另一次安装**的指纹，然后重现坏插件故障。
  *
@@ -376,6 +520,9 @@ async function main() {
   const residue = runAs(`test -d ${BAD_DIR} && echo yes`).includes('yes')
   record('P4 记录：坏插件目录残留', residue ? 'INCONCLUSIVE' : 'PASS',
     residue ? `${BAD_DIR} 仍在磁盘上（剔除的是装配，不是文件）——须由清理或下次快照刷新带走` : '目录已不在')
+
+  // ── P6 两遍验收（用户口径）：先好插件被登记，再坏插件只拔坏的、不误伤好的 ──
+  if (has('good-plugin')) await goodThenBadPhase()
 
   // ── P5 跨版本护栏（用户追问②）：「新版本改动不能因为救旧插件被回退掉」──
   if (has('cross-version')) await crossVersionPhase()
