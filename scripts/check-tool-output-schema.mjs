@@ -111,6 +111,16 @@ validatorCandidates.push(join(ROOT, 'plugins', 'dsh-android-manage', 'node_modul
 validatorCandidates.push(join(ROOT, 'node_modules', '@deepseek-ai', 'dsh-tools', 'lib', 'index.js'))
 const validatorFile = validatorCandidates.find((p) => existsSync(p))
 if (!validatorFile) {
+  // 净检出（CI 的 ubuntu runner）里没有 `@deepseek-ai/dsh-tools`：它是各插件的 peerDependency，
+  // 上一步的 `npm install` 不会把它带进来（0.14.1 实锤：PR 门禁因此恒红）。本机与发布链一定有它，
+  // 故按仓库既有 SKIP 纪律处理：**无 `--require` 的调用者（CI）如实记 SKIP(#1)**，不判红也不假装通过；
+  // 本地链与发布链一律带 `--require`（`build-apk-013.ps1` 已接），取不到即判红——SKIP 不构成掩盖。
+  if (!argv.includes('--require')) {
+    console.log('SKIP(#1) 引擎校验器缺席（净检出无 node_modules）：' + validatorCandidates.map(rel).join('、'))
+    console.log('  → 本地/发布链用 --require 强制真跑（取不到即判红）；SKIP 计数见末行')
+    console.log('SKIP=1')
+    process.exit(0)
+  }
   fail('找不到引擎校验器 @deepseek-ai/dsh-tools/lib/index.js（与引擎同一函数，不得自造）\n'
     + '  候选：' + validatorCandidates.map(rel).join('、'))
 }

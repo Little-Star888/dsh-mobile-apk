@@ -97,7 +97,7 @@ if ($LASTEXITCODE -ne 0) { Write-Host "协议 V2 门禁失败，拒绝打包"; e
 # 工具返回值 vs output.schema 运行时契约门禁（0.13.8-b 批 B2 T2 / E-10，issue #204 的假绿防线）：
 # 用引擎同一个 validateJsonSchemaValue 校验各工具分支返回值 + 递归无 undefined + 源码级注册差集 = 0。
 Write-Host "== 工具输出 schema 契约门禁 =="
-node (Join-Path $Root "scripts\check-tool-output-schema.mjs") 2>&1
+node (Join-Path $Root "scripts\check-tool-output-schema.mjs") --require 2>&1
 if ($LASTEXITCODE -ne 0) { Write-Host "工具返回值与 output.schema 不一致，拒绝打包"; exit 1 }
 
 # 控制 op 六处登记链一致性门禁（0.13.8-b 批 B2）：漏一处 = a11y 通道下该 op 静默 deny（坑 52）。
