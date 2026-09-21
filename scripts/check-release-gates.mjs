@@ -380,7 +380,8 @@ const declaredPath = join(ROOT, 'scripts', 'gate-skips-declared.json')
 const declared = existsSync(declaredPath) ? (JSON.parse(readFileSync(declaredPath, 'utf8')).gates ?? {}) : {}
 let overBudget = []
 for (const [gate, info] of Object.entries(perGateSkips)) {
-  const d = declared[gate]
+  // 标签可能带模式后缀（例：`check-boot-budget.mjs(real-or-skip)`）——声明表按脚本名归一化匹配。
+  const d = declared[gate] ?? declared[gate.replace(/\(.*\)$/, '')]
   if (d === undefined) { if (info > 0) overBudget.push(gate + '=' + info + '（未声明）'); continue }
   if (info > (d.max ?? 0)) overBudget.push(gate + '=' + info + ' > 声明 ' + (d.max ?? 0))
   else if (info > 0) console.log('DECLARED-SKIP  ' + gate + '：' + info + ' 处（已声明理由：' + String(d.why || '').slice(0, 80) + '…）')
