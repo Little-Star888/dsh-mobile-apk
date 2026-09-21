@@ -64,8 +64,7 @@ class WatchdogPluginTreeTest {
   @Test
   fun 插件树挂死必须走到undo决策而不是早退IDLE() {
     // 造 6 拍连续的插件树失败（阈值与 watch 一致）
-    WatchdogV2.setLogSignatureForTest(WatchdogV2.SIGNATURE_PLUGIN_TREE)
-    repeat(6) { WatchdogV2.recordProbe(WatchdogV2.ProbeState.DEGRADED_LOG) }
+    repeat(6) { WatchdogV2.recordProbe(WatchdogV2.ProbeState.DEGRADED_LOG, WatchdogV2.SIGNATURE_PLUGIN_TREE) }
     assertEquals("计数必须进入失败总数", 6, WatchdogV2.effectiveFailureCount())
 
     val plan = WatchdogV2.planTick(
@@ -77,6 +76,7 @@ class WatchdogPluginTreeTest {
       // 越过 90s 冷启动预算：托管子进程还在场，但早就不是「正在冷启动」
       bootAgeMs = 200_000L,
       restartDeadConfirmations = 2,
+      logSignature = WatchdogV2.SIGNATURE_PLUGIN_TREE,
       feedProbe = {},
       consumeMarkers = {},
       refreshWake = {},
@@ -88,8 +88,7 @@ class WatchdogPluginTreeTest {
 
   @Test
   fun 活引擎的未捕获异常不得被升级() {
-    WatchdogV2.setLogSignatureForTest(WatchdogV2.SIGNATURE_UNCAUGHT)
-    repeat(6) { WatchdogV2.recordProbe(WatchdogV2.ProbeState.DEGRADED_LOG) }
+    repeat(6) { WatchdogV2.recordProbe(WatchdogV2.ProbeState.DEGRADED_LOG, WatchdogV2.SIGNATURE_UNCAUGHT) }
     assertEquals("别的签名不计数", 0, WatchdogV2.effectiveFailureCount())
     val plan = WatchdogV2.planTick(
       state = WatchdogV2.ProbeState.DEGRADED_LOG,
@@ -99,6 +98,7 @@ class WatchdogPluginTreeTest {
       engineProcessAlive = true,
       bootAgeMs = 200_000L,
       restartDeadConfirmations = 2,
+      logSignature = WatchdogV2.SIGNATURE_UNCAUGHT,
       feedProbe = {},
       consumeMarkers = {},
       refreshWake = {},
@@ -109,8 +109,7 @@ class WatchdogPluginTreeTest {
 
   @Test
   fun 插件树挂死不得被熔断锁成永久HOLD() {
-    WatchdogV2.setLogSignatureForTest(WatchdogV2.SIGNATURE_PLUGIN_TREE)
-    repeat(WatchdogV2.MAX_CONSEC_FAILURES + 1) { WatchdogV2.recordProbe(WatchdogV2.ProbeState.DEGRADED_LOG) }
+    repeat(WatchdogV2.MAX_CONSEC_FAILURES + 1) { WatchdogV2.recordProbe(WatchdogV2.ProbeState.DEGRADED_LOG, WatchdogV2.SIGNATURE_PLUGIN_TREE) }
     assertTrue("计数已越过熔断阈值", WatchdogV2.tripped())
     val plan = WatchdogV2.planTick(
       state = WatchdogV2.ProbeState.DEGRADED_LOG,
@@ -120,6 +119,7 @@ class WatchdogPluginTreeTest {
       engineProcessAlive = true,
       bootAgeMs = 200_000L,
       restartDeadConfirmations = 2,
+      logSignature = WatchdogV2.SIGNATURE_PLUGIN_TREE,
       feedProbe = {},
       consumeMarkers = {},
       refreshWake = {},

@@ -83,10 +83,10 @@ object WatchdogV2 {
   fun nextDelayMs(): Long = delayForFailureCount(effectiveFailureCount())
 
   /** Only a confirmed dead process contributes to the restart/undo circuit breaker. */
-  fun recordProbe(state: ProbeState) {
+  fun recordProbe(state: ProbeState, signature: String? = lastLogSignature) {
     consecutiveFailures = if (state == ProbeState.DEAD) consecutiveFailures + 1 else 0
     consecutiveDegradedHttp = nextDegradedCount(state, consecutiveDegradedHttp)
-    consecutivePluginTreeFailures = nextPluginTreeCount(state, lastLogSignature, consecutivePluginTreeFailures)
+    consecutivePluginTreeFailures = nextPluginTreeCount(state, signature, consecutivePluginTreeFailures)
   }
 
   /** 纯函数（JVM 单测）：DEGRADED_HTTP 自增，其余状态清零。 */
@@ -100,12 +100,6 @@ object WatchdogV2 {
   /** 纯函数：是否「插件树挂死」（HTTP 活着但 loader entry 导入失败）。 */
   fun pluginTreeHung(state: ProbeState, signature: String?): Boolean =
     state == ProbeState.DEGRADED_LOG && signature == SIGNATURE_PLUGIN_TREE
-
-  /**
-   * 测试缝：让 [planTick] 的插件树分支能在 JVM 上被驱动（生产写入方只有 [assessProbe]）。
-   * 不用反射：本对象已是全局单例，测试用 `@Before reset` 的同一套路复位。
-   */
-  internal fun setLogSignatureForTest(signature: String?) { lastLogSignature = signature }
 
   /** 熔断与退避共用同一计数（#175：半死阶梯与 DEAD 共用退避，防重启风暴）。 */
   fun effectiveFailureCount(): Int = maxOf(consecutiveFailures, consecutiveDegradedHttp, consecutivePluginTreeFailures)
@@ -156,6 +150,8 @@ object WatchdogV2 {
     bootAgeMs: Long,
     restartDeadConfirmations: Int,
     startCooldownMs: Long = EngineManager.START_COOLDOWN_MS,
+    /** 本拍的引擎日志签名（[assessProbe] 写、这里读；测试显式传，避免为测试在生产面留钩子）。 */
+    logSignature: String? = lastLogSignature,
     feedProbe: (Boolean) -> Unit,
     consumeMarkers: () -> Unit,
     refreshWake: () -> Unit,
@@ -163,7 +159,7 @@ object WatchdogV2 {
   ): TickPlan {
     // ── 前置副作用（#210.3/#210.4）：与状态分类无关，先于一切早退 ──
     feedProbe(state == ProbeState.HEALTHY)
-    recordProbe(state)
+    recordProbe(state, logSignature)
     consumeMarkers()
     refreshWake()
 
@@ -177,13 +173,13 @@ object WatchdogV2 {
     // **例外：插件树装配失败**（[pluginTreeHung]）。那一刻引擎没起来，且不会自愈——设备实测
     // （2026-09-21，注入坏插件后重启）：本行早退 IDLE ⇒ 自动 undo 永不被求值（调用方还会在 IDLE
     // 拍 disarm），用户只剩手动重启。放行到 undo 决策后，配置回滚才有机会把坏插件剔出去。
-    if (alive && !degradedLadderTripped && !pluginTreeHung(state, lastLogSignature)) {
+    if (alive && !degradedLadderTripped && !pluginTreeHung(state, logSignature)) {
       return TickPlan(TickAction.IDLE)
     }
     if (!engineReady) return TickPlan(TickAction.HOLD)
     // 「confirmed-dead sample」这一档是给**进程死亡**留的观察期；插件树挂死形态下 consecutiveFailures
     // 恒为 0（那是 DEAD 专用计数），不放行的话这里会永远 HOLD，undo 决策同样到不了。
-    if (!degradedLadderTripped && !pluginTreeHung(state, lastLogSignature) &&
+    if (!degradedLadderTripped && !pluginTreeHung(state, logSignature) &&
       consecutiveFailures < restartDeadConfirmations) {
       return TickPlan(
         TickAction.HOLD,
@@ -210,7 +206,7 @@ object WatchdogV2 {
     // 熔断守的是「undo 不可用时不得盲目反复重启」。插件树挂死是例外：此时 undo 可能被 30 分钟重试窗
     // 闸掉，若再被熔断锁进 HOLD，就再也没有任何自动路径（引擎不会自愈、也永远等不到 HEALTHY 去解锁）
     // ——只剩手动重启。放行重启（仍受退避节流）比锁死好；坏配置下次启动照旧失败，但至少不是死局。
-    if (tripped() && !pluginTreeHung(state, lastLogSignature)) {
+    if (tripped() && !pluginTreeHung(state, logSignature)) {
       return TickPlan(TickAction.HOLD, logs + "watchdog circuit open after confirmed-dead failures; destructive recovery paused")
     }
     if (now < nextRestartAllowedAt) {
