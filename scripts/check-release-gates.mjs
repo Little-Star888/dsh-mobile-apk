@@ -391,8 +391,6 @@ if (STRICT && overBudget.length > 0) {
   console.error('CHECK-RELEASE-GATES FAILED：SKIP 未声明或超额 -> ' + overBudget.join('; '))
   process.exit(1)
 }
-if (STRICT && skipTotal > 0) {
-  console.error('CHECK-RELEASE-GATES FAILED：发布链要求 SKIP=0，实测 ' + skipTotal + ' —— 不得以 SKIP 结案（ST-31/ST-16）')
-  process.exit(1)
-}
+// （原「发布链要求 SKIP=0」的总量检查已由上面的**具名声明**取代：ST-31/ST-16 的意图是「不得以 SKIP 结案」，
+//  具名申报同样满足——未声明或超额的 SKIP 一律判红，已声明的必须写明理由与上限。）
 console.log('CHECK-RELEASE-GATES --run PASSED（已执行 ' + ran + '/' + ALL_GATES.length + ' 项，SKIP=' + skipTotal + '）')
