@@ -282,7 +282,7 @@ let ran = 0
 // SKIP 合计（ST-31 / ST-16）：逐门禁捕获输出并解析 SKIP=n；发布链（--require）要求合计 = 0。
 let skipTotal = 0
 const perGateSkips = {}
-const runGate = (argvFor, label) => {
+const runGate = (argvFor, gate) => {
   const r = spawnSync(process.execPath, argvFor, { cwd: ROOT, encoding: 'utf8', maxBuffer: 128 * 1024 * 1024 })
   if (r.stdout) process.stdout.write(r.stdout)
   if (r.stderr) process.stderr.write(r.stderr)
