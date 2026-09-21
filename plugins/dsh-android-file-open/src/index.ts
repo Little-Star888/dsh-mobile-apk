@@ -461,17 +461,33 @@ function tools() {
         type: 'object',
         additionalProperties: false,
         properties: {
+          // ok/error 是本工具的**错误出口**：队列目录不可读/不可建时（EACCES 等）必须返回
+          // 错误对象，不能抛异常——抛异常会冒到模型侧调用栈（门禁实测：CI 上
+          // `mkdir .../incoming/.sessions` 抛 EACCES，工具被判定为「必须返回错误对象而非抛异常」）。
+          ok: { type: 'boolean' },
           pending: { type: 'number', required: true },
           items: { type: 'array', items: { type: 'object', additionalProperties: true } },
+          error: { type: 'string' },
         },
       },
       render: (_args, v: Record<string, unknown>) => [
-        { type: 'text', text: `待处理外部附件草稿 ${String(v.pending)} 条` },
+        v.ok === false
+          ? { type: 'text', text: `待处理外部附件草稿读取失败：${String(v.error ?? '未知原因')}` }
+          : { type: 'text', text: `待处理外部附件草稿 ${String(v.pending)} 条` },
       ],
     },
     execute: async () => {
-      const items = readItems()
-      return { pending: items.filter(needsSession).length, items: items.map(publicItem) } as never
+      try {
+        const items = readItems()
+        return { ok: true, pending: items.filter(needsSession).length, items: items.map(publicItem) } as never
+      } catch (e) {
+        return {
+          ok: false,
+          pending: 0,
+          items: [],
+          error: String((e as Error)?.message ?? e),
+        } as never
+      }
     },
   })
   // 注意：注入面（前端消费端）claim 后删除条目；本插件无"并入既有会话"路径（安全边界）。
