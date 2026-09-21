@@ -167,10 +167,21 @@ object UndoGate {
    * 幂等且廉价：一次目录列举 + 一次字符串比较；值不变不落盘（5s 一拍，不刷文件）。
    */
   fun noteHealthy(context: Context, engine: EngineManager) {
+    val fp = installFingerprint(context)
+    val patch = PluginMounts.patchFile(engine)
+    // 清单式回滚的两份清单都在这里维护（与「已知良好」同一时刻：**壳侧确认健康的那一拍**）：
+    //  - 硬清单：安装指纹变化（新装/升级）即把本版本自带的插件并进去（只增不减，绝不被拔）
+    //  - 软清单：只在挂载清单**有变化**时写（没变化直接跳过），它回答「故障是不是清单变化引起的」
+    if (PluginMounts.ensureHard(context, patch, fp)) {
+      record(context, "hard-manifest updated names=" + PluginMounts.hardNames(context).size + " fp=" + (fp?.take(12) ?: "none"))
+    }
+    if (PluginMounts.noteHealthy(context, patch)) {
+      record(context, "soft-manifest updated names=" + (PluginMounts.softNames(context)?.size ?: 0))
+    }
     val id = newestSnapshotId(autoSnapshotIds(engine)) ?: return
     // 无安装指纹就不记：没有指纹就无法回答「这份快照属于哪次安装」，而跨版本的配置回滚正是要禁止的
     // （见 [knownGoodUsable]）——宁可退回「不自动回滚」，也不做一次归属不明的写回。
-    val fp = installFingerprint(context) ?: return
+    if (fp == null) return
     if (id == knownGoodId(context) && fp == knownGoodFp(context)) return
     try {
       knownGoodFile(context).writeText(id + "\n" + fp + "\n")
@@ -260,6 +271,26 @@ object UndoGate {
         Log.i(TAG, "auto-undo skipped: no snapshots found")
         record(context, "skipped no-snapshots listLines=" + list.size)
         return UndoResult(false, "无快照可回滚", null)
+      }
+      // ── 清单式外科修复（2026-09-21 用户拍板）：**先拔坏插件，不做整份回滚** ──────────────
+      // 整份回滚会把「最后一次健康启动之后用户装的插件」全部从装配里抹掉（用户明确否决）。
+      // 故顺序是：能点名 → 只拔它；点不出名但清单没变 → 才允许走 known-good 整份回滚；
+      // 清单变了又点不出名 → 什么都不做（宁可不动，也不吞用户插件）。
+      val patch = PluginMounts.patchFile(engine)
+      val failed = PluginMounts.failedEntryOf(PluginMounts.readEngineLogTail(context))
+      val hard = PluginMounts.hardNames(context)
+      if (failed != null && failed.name != null && failed.name !in hard) {
+        if (PluginMounts.pull(context, patch, failed)) {
+          record(context, "pulled plugin=" + failed.name + " id=" + (failed.id ?: "?"))
+          return UndoResult(true, "已从装配里拔出失败插件（其余插件未改动）：" + failed.name, failed.name)
+        }
+        record(context, "pull failed (block not located) plugin=" + failed.name)
+      } else if (failed != null) {
+        record(context, "pull skipped: failed entry is in the hard manifest (our own plugin) name=" + (failed.name ?: "?"))
+      }
+      if (!PluginMounts.mountUnchangedSinceHealthy(context, patch)) {
+        record(context, "aborted mount-changed-and-unattributed plugin=" + (failed?.name ?: "?"))
+        return UndoResult(false, "插件清单已变化但点名不出失败插件：不做整份回滚（避免连用户其它插件一起回退）", null)
       }
       // 2026-09-21 主修：回滚目标 = **壳侧确认健康那一刻的最新快照**（而不是 CLI 自报的 lastGood），
       // 且**只允许回滚本次安装建立的快照**（跨版本一律不回滚，见 [knownGoodUsable]）。

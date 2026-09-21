@@ -104,7 +104,7 @@ sequenceDiagram
 |---|---|---|---|---|---|---|---|---|
 | K01 | 启动与引导面 | 点开 App 到引擎页面可见的进程入口、引导页与 WebView 宿主 | LAUNCHER 图标、VIEW/SEND 来件、ACTION_UPDATE | 引导与启动 | 引擎进程与快照面、鉴权探活、诊断落盘 | 系统启动器与分享面板、BootReceiver、悬浮球跳转 | MainActivity.kt,EngineStartFlow.kt,GuidePageRenderer.kt | 高 |
 | K02 | 引擎生命周期与保活 | 起 node 引擎、5s 探活、看门狗重启熔断与日志落盘 | EngineStartFlow.start、EngineService 5s tick | 引导与启动 | K01,K03 | MainActivity、BootReceiver、EngineStartFlow | EngineManager.kt,EngineService.kt,WatchdogV2.kt,LogCollector.kt | 高 |
-| K03 | 快照事务与更新链 | 内嵌快照暂存交换事务与回滚，兼在线更新与清单合并 | 启动流判指纹不新鲜 / 引导页检查更新 / WebView 下载 | 快照与更新 | 引导启动流、引擎探活、构建快照资产 | EngineStartFlow.runFlow、EngineService 看门狗、引导页按钮、MainActivity 的 WebView 回调 | SnapshotTransaction.kt,SnapshotFs.kt,UpdateManager.kt | 高 |
+| K03 | 快照事务与更新链 | 内嵌快照暂存交换事务与回滚（插件故障走**清单式外科拔除**，不整份回滚），兼在线更新与清单合并 | 启动流判指纹不新鲜 / 引导页检查更新 / WebView 下载 | 快照与更新 | 引导启动流、引擎探活、构建快照资产 | EngineStartFlow.runFlow、EngineService 看门狗、引导页按钮、MainActivity 的 WebView 回调 | SnapshotTransaction.kt,SnapshotFs.kt,UpdateManager.kt,PluginMounts.kt | 高 |
 | K04 | 桥与控制协议面 | 页面 JS 桥面、引擎鉴权与控制队列承载 | 页面调 androidBridge；EngineService 起控制承载 | 稳态控制 | 引导与启动（EngineService/MainActivity）、无障碍与虚拟屏宿主、快照与更新（UndoGate） | MainActivity 装桥；EngineService.onCreate 起 ControlCarrier；看门狗 tick 调 UndoGate | app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt,app/src/main/java/com/dsharnessmobile/shell/ControlPoller.kt,app/src/main/java/com/dsharnessmobile/shell/EngineAuth.kt,app/src/main/java/com/dsharnessmobile/shell/ControlProtocolV2.kt | 高 |
 | K05 | 无障碍控制面 | 按需取语义树并对设备执行点击输入滚动截屏 | 控制队列取活 + 无障碍服务回调 | 稳态控制 | K04 控制协议、K06 特权执行 | ControlCarrier 控制队列取活、onServiceConnected、ADB 键盘广播 | DeviceControlService.kt,GlobalActionCatalog.kt,AdbKeyboardService.kt,AdbKeyboardReceiver.kt | 高 |
 | K06 | 特权执行、屏幕范围与本地文件面 | Shizuku 特权 shell 通道、屏幕范围门与本地文件出入口 | 引擎 sh* op / 设置页范围写面 / 外部分享与打开 intent | 稳态控制 | 控制队列承载、引擎 bridge 插件、虚拟屏注册表、无障碍控制面 | 引擎 androidPrivilege 服务面与页面桥 | ShellOps.kt,ScreenScope.kt,ShizukuTransport.kt,ShizukuUserService.kt,ShizukuProbe.kt,ShizukuSupport.kt,ProcIo.kt,FileIncoming.kt,PathOpen.kt,ConfigTransfer.kt | 高 |
@@ -144,6 +144,7 @@ sequenceDiagram
 | 高 | K05 | 壳侧范围门比引擎侧宽 3 个 op（`state`/`webSnapshot`/`webAction`） | `app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:678` | 默认 `virtual-only` 范围下相关 op 必然误拒 | 未修 |
 | 高 | K02 | `LogCollector.writeBootDiag/writeBootFail` 出口不过 `EngineAuth.redact` | `app/src/main/java/com/dsharnessmobile/shell/LogCollector.kt:458-480` | 启动诊断与失败日志可能带 token 落盘 | 未修（评审 I-5/H-12 点名） |
 | 高 | K03 | 自动回滚目标取自**崩溃那次启动自己建的**快照（快照在建/挂载阶段就写，早于健康判定），于是「回滚成功」而状态没变好；跨版本还会把上一次安装的配置写回 | `app/src/main/java/com/dsharnessmobile/shell/UndoGate.kt:240`、`:194`、`vendor/dsh-undo-savepoint/lib/index.js:2198`（快照创建点） | 坏插件仍被挂载、引擎仍起不来而 `undo-gate.log` 报 `executed ok`；升级后若新版本从未健康启动，回滚会把新版本的补丁/挂载项静默删掉（新 APK + 旧配置） | 已修（2026-09-21：known-good 由壳侧探活健康定义 + 安装指纹护栏；设备验收 PASS=9） |
+| 高 | K03 | 整份配置回滚会**静默吞掉用户在最后一次健康启动之后装的插件**（挂载清单是一整份文件） | `app/src/main/java/com/dsharnessmobile/shell/PluginMounts.kt:41`、`UndoGate.kt:279` | 用一个坏插件换掉用户全部插件的装配状态 | **已改（2026-09-21 用户拍板）**：清单式——硬清单随版本并集（强制保留）+ 软清单记「当前清单被证明可用」；能点名则**只拔那一块**（其余条目与注释逐字节不动），点不出名且清单变过则拒绝回滚 |
 | 高 | K03 | 刷新失败路径不判 `rollback` 返回值即清 marker；残留 `previous` 会被下次失败路径当回滚源 | `app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt:196-198` | 回滚结果被掩盖，坏树可能被「回滚」成更坏状态 | 未修（D-3 实效性缺口） |
 | 高 | K03 | 在线更新的 `usr` 换位是非事务两步 `renameTo`，不写指纹也不写 marker | `app/src/main/java/com/dsharnessmobile/shell/UpdateManager.kt:69-80` | 中途中断即半新半旧且无恢复源；指纹口径不同还会让下次启动重解压 | 未修 |
 | 高 | P01 | `sh -c "屏幕命令" 尾随词` 形态绕过屏幕范围门（引擎侧与壳侧同源） | `plugins/dsh-android-bridge/src/screen-scope.ts:200` | 范围门在带尾随词的 `sh -c` 形态下漏判 | 未修（S-1/S-2 家族） |
@@ -715,6 +716,8 @@ sequenceDiagram
   3. `pickToken` 是**进程级随机 UUID**（EngineManager.kt:1552-1559，`ensurePickToken` 只在 companion 内存缓存），但 MainActivity.kt:78-79 的注释称它「MainActivity 重建/看护重启不更换，与引擎 env 的 DSH_PICK_TOKEN 始终一致」；引擎侧在**插件加载时**取一次 `process.env.DSH_PICK_TOKEN`（dsh-host-web-compat/lib/index.js:794-802）并 fail-closed 校验 `x-dsh-pick-token`。而 EngineStartFlow.kt:424-437 明确支持「引擎先跑、app 后启动」的早退路径 ⇒ app 进程被杀重建后新 token 与仍活着的引擎 env 不一致，页面 `getPickToken()` 递的是新值 ⇒ `/api/android/dir-pick/*` 与 `/api/android/open-path` 403（后果未在本机复现，标未证实；代码可证的是两处取值来源不同生命周期）。
   4. `WebUiChrome` 只剩沉浸式一条活链路：`applyImmersive`/`immersivePrefs`（MainActivity.kt:191）有调用点，而 `copyTextNative`(:37)、`keepScreenOn`(:54)、`releaseWakeLock`(:72)、`pushSystemDark`(:94)、`cancelThemePush`(:120)、`setImmersivePersisted`(:27) 全仓**零调用点**（grep 确认），实际生效的是 MainActivity.kt:850/874/967 的私有同形副本与 onDestroy 的 `screenWakeLock` 释放。影响：本类注释与 ARCHITECTURE.md:15 都把它当作这四类 chrome 的执行面（漂移）；且两个 `screenWakeLock` 字段并存——将来把 `onKeepScreen`/`onSetImmersive` 接回本类，`MainActivity.onDestroy` 的释放不会覆盖新字段，回归老 Review 修过的「成对 acquire/release」泄漏形态。
   5. WebView 信任边界在本块的两处锚点（评审已点名，均只做登记不改）：进程级 `CookieManager` 注入引擎鉴权 cookie（MainActivity.kt:812-819，评审 S1/S3——同一 jar 对隔离 BrowserHost 可见，「隔离只是没有桥，不是存储隔离」）；非引擎 URL 一律 `downloadSaver.openInExternalBrowser`，无 scheme 白名单（MainActivity.kt:544-549，评审 5.13/H-11——`intent://`/`market://`/`tel:` 等任意 scheme 可经页面触发）。
+
+- [K03] 清单式回滚的**已知边界**（2026-09-21 设计，用户拍板）：① 只按 `name:` 行抽取条目，不做 YAML 语义解析（三层形状固定；引解析器等于多一份与引擎不同版本的实现）；② 块删除以「列 0 的 `- `」为边界，块**前**的说明注释保留（属于下一块）；③ **点不出名 / 块定位不到时一律不动配置**（宁可不动，也不写回一次会吞掉用户插件的改动）；④ 硬清单只增不减（升级时把当前清单并入），方向选「少拔不错拔」。判据 `PluginMountsTest` 7 例 + `UndoGateKnownGoodTest.先外科拔除_整份回滚只在清单没变时才允许`。
 
 漂移：`dsh-mobile-apk/docs/AGENTS/ARCHITECTURE.md:12` 说 EngineStartFlow.kt 为 539 行（同表 :9 MainActivity 918、:10 GuidePageRenderer 404），源码实测为 773 / 1175 / 419 行（`wc -l`，见该表自称「2026-09-14 当场实测」）。
 漂移：`dsh-mobile-apk/docs/AGENTS/ARCHITECTURE.md:15` 说 WebUiChrome.kt 的职责是「沉浸式/剪贴板/常亮/主题推送（真源统一走 ShellState）」，源码里剪贴板/常亮/主题推送三组只有定义、无调用点（WebUiChrome.kt:37/54/94），生效面是 MainActivity.kt:850/967/874 的私有副本。
@@ -2448,6 +2451,7 @@ app/src/main/java/com/dsharnessmobile/shell/DownloadSaver.kt
 app/src/main/java/com/dsharnessmobile/shell/FactoryProfilePatch.kt
 app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt
 app/src/main/java/com/dsharnessmobile/shell/EngineAuth.kt
+app/src/main/java/com/dsharnessmobile/shell/PluginMounts.kt
 app/src/main/java/com/dsharnessmobile/shell/UndoGate.kt
 app/src/main/java/com/dsharnessmobile/shell/BackGate.kt
 app/src/main/java/com/dsharnessmobile/shell/ControlPoller.kt

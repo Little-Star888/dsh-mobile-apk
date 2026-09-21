@@ -53,6 +53,7 @@ export function parseUndoLog(text) {
       at: Number(m[1]),
       kind: m[2],
       snapshot: /snapshot=(\S+)/.exec(rest)?.[1] ?? null,
+      plugin: /plugin=(\S+)/.exec(rest)?.[1] ?? null,
       failures: Number(/failures=(\d+)/.exec(rest)?.[1] ?? -1),
       raw: line.trim(),
     })
@@ -64,11 +65,22 @@ export function parseUndoLog(text) {
  * 本轮是否**真的回滚成功**：基线之后必须出现 `executed ok`（带 snapshot）。
  * 否定判据：`armed`/`trigger` 只是过程；`executed failed` 是失败——三者都不得算通过。
  */
-export function rollbackVerdict(logText, baselineCount) {
+export function rollbackVerdict(logText, baselineOks, baselinePulled = 0) {
   const all = parseUndoLog(logText)
   const oks = all.filter((e) => e.kind === 'executed' && e.snapshot !== null)
   const failed = all.filter((e) => e.kind === 'executed' && e.snapshot === null)
-  return { total: all.length, oks: oks.length, failed: failed.length, newOk: oks.length > baselineCount, last: oks[oks.length - 1] ?? null, failedEntries: failed }
+  const pulled = all.filter((e) => e.kind === 'pulled' && e.plugin !== null)
+  return {
+    total: all.length,
+    oks: oks.length,
+    failed: failed.length,
+    pulled: pulled.length,
+    newOk: oks.length > baselineOks,
+    newPulled: pulled.length > baselinePulled,
+    last: oks[oks.length - 1] ?? null,
+    lastPulled: pulled[pulled.length - 1] ?? null,
+    failedEntries: failed,
+  }
 }
 
 /** 逐文件 sha256 清单文本（设备侧 `sha256sum` 输出）→ Map<相对路径, 哈希>。 */
@@ -90,6 +102,22 @@ export function manifestDiff(before, after) {
     else if (after.get(k) !== v) changed.push(k)
   }
   return { added, removed, changed, same: added.length === 0 && removed.length === 0 && changed.length === 0 }
+}
+
+/**
+ * 纯逻辑：把注入块插到**第二个顶层条目之前**（没有第二个就追加到末尾）。
+ * 顶层条目 = 列 0 起始的 `- ...`；这样注入块两侧都是真实的块边界（含上一块的上级注释）。
+ */
+export function spliceMidFile(text, block) {
+  const lines = text.split('\n')
+  let seen = 0
+  for (let i = 0; i < lines.length; i++) {
+    if (/^-/.test(lines[i])) {
+      seen++
+      if (seen === 2) return [...lines.slice(0, i), ...block.split('\n').slice(0, -1), ...lines.slice(i)].join('\n')
+    }
+  }
+  return text.replace(/\n?$/, '\n') + block
 }
 
 /** patch 文件是否挂载了某个插件名（剔除装配的判据）。 */
@@ -115,6 +143,14 @@ function selfTest() {
   expect('解析：failed 行无 snapshot', p[3].snapshot === null && p[3].kind === 'executed')
   expect('解析：failures 取值', p[0].failures === 6 && p[1].failures === 9)
 
+  const pulledLog = 'dsh-undo-gate at=7000 pulled plugin=@dsh-android/dsh-bad-probe id=dsh-bad-probe'
+  expect('判据：外科拔除 = 本轮修好了', rollbackVerdict(pulledLog, 0, 0).newPulled === true)
+  expect('否定：历史拔除（baseline 已含）不算本轮', rollbackVerdict(pulledLog, 0, 1).newPulled === false)
+  expect('否定：armed/trigger 既不算回滚也不算拔除',
+    (() => {
+      const r = rollbackVerdict(['dsh-undo-gate at=1 armed failures=6', 'dsh-undo-gate at=2 trigger failures=9'].join('\n'), 0, 0)
+      return !r.newOk && !r.newPulled
+    })())
   const v = rollbackVerdict(log, 0)
   expect('判据：本轮新增 executed ok = 通过', v.newOk === true && v.oks === 1)
   expect('否定：只有 armed/trigger 不得算回滚', rollbackVerdict('dsh-undo-gate at=1 armed failures=6\ndsh-undo-gate at=2 trigger failures=9', 0).newOk === false)
@@ -130,6 +166,11 @@ function selfTest() {
   expect('差异：删除被抓到', manifestDiff(m1, manifestMap('aa'.repeat(32) + '  ./lib/index.js\n')).removed.length === 1)
 
   expect('装配：命中坏插件名', patchMounts("- insert:\n    - id: x\n      name: '@dsh-android/dsh-bad-probe'\n", '@dsh-android/dsh-bad-probe') === true)
+  const spliceSrc = ['# c', '- insert:', '    - id: a', "      name: '@x/a'", '- insert:', '    - id: b', "      name: '@x/b'", ''].join('\n')
+  const spliced = spliceMidFile(spliceSrc, ["- insert:", '    - id: bad', "      name: '@x/bad'", ''].join('\n'))
+  expect('中段插入：块落在两个既有块之间',
+    spliced.indexOf('@x/bad') > spliced.indexOf('@x/a') && spliced.indexOf('@x/bad') < spliced.indexOf("'@x/b'"))
+  expect('中段插入：既有条目一字不动', spliced.split('\n').filter((l) => /name:/.test(l)).length === 3)
   expect('装配：其他插件名不得误判', patchMounts("- insert:\n    - id: x\n      name: '@dsh-android/dsh-android-bridge'\n", '@dsh-android/dsh-bad-probe') === false)
 
   if (bad > 0) { console.log(`SELFTEST FAILED（${bad}/${total}）`); process.exit(1) }
@@ -245,9 +286,9 @@ async function main() {
   const patchSha0 = runAs(`sha256sum ${PATCH}`).trim().split(/\s+/)[0]
   const man0 = manifestMap(runAs(`cd ${NM} && find . -type f | sort | xargs sha256sum`))
   const log0 = runAs(`cat ${FILES}/undo-gate.log 2>/dev/null`)
-  const roll0 = rollbackVerdict(log0, 0)
+  const roll0 = rollbackVerdict(log0, 0, 0)
   const pid0 = sh(ENGINE_PS).trim().split('\n')[0]
-  writeFileSync(join(EVID, 'baseline.json'), JSON.stringify({ patchSha0, pluginFiles: man0.size, rollbackOks: roll0.oks, enginePid: pid0 }, null, 2))
+  writeFileSync(join(EVID, 'baseline.json'), JSON.stringify({ patchSha0, pluginFiles: man0.size, rollbackOks: roll0.oks, pulled: roll0.pulled, enginePid: pid0 }, null, 2))
   console.log(`基线：patch=${String(patchSha0).slice(0, 12)} 插件文件=${man0.size} 历史回滚成功=${roll0.oks} 引擎 pid=${pid0}`)
 
   // ── P1 注入坏插件（代码 + 装配两处，模拟「用户装了个坏插件」）──
@@ -262,7 +303,9 @@ async function main() {
   // 测试工具自己弄坏的配置（取证彻底失去意义）。
   patchBaseline = runAs(`cat ${PATCH}`)
   writeFileSync(join(EVID, 'patch-baseline.yml'), patchBaseline)
-  adb(['shell', `run-as ${PKG} sh -c 'cat > ${PATCH}'`], patchBaseline.replace(/\n?$/, '\n') + entry)
+  // **插在第二个顶层条目之前**（中段）而不是追加到文件尾：块删除逻辑必须面对真实邻居
+  // （上一块的上级注释、缩进 config 块、空 insert 残留），追加到尾部测不出边界错误。
+  adb(['shell', `run-as ${PKG} sh -c 'cat > ${PATCH}'`], spliceMidFile(patchBaseline, entry))
   const patchText1 = runAs(`cat ${PATCH}`)
   const injected = patchMounts(patchText1, '@dsh-android/' + BAD_ID) && runAs(`test -f ${BAD_DIR}/lib/index.js && echo yes`).includes('yes')
   record('P1 坏插件已注入（代码 + 装配）', injected ? 'PASS' : 'INCONCLUSIVE', injected ? `${BAD_DIR} + cordis.patch.yml 追加挂载项` : '注入失败')
@@ -278,21 +321,25 @@ async function main() {
 
   // ── P3 等自动回滚 ──
   const t0 = Date.now()
-  let roll = rollbackVerdict(runAs(`cat ${FILES}/undo-gate.log 2>/dev/null`), roll0.oks)
+  let roll = rollbackVerdict(runAs(`cat ${FILES}/undo-gate.log 2>/dev/null`), roll0.oks, roll0.pulled)
   let alive = false
   while (Date.now() - t0 < TIMEOUT_S * 1000) {
     await sleep(5000)
-    roll = rollbackVerdict(runAs(`cat ${FILES}/undo-gate.log 2>/dev/null`), roll0.oks)
-    if (roll.newOk) { alive = await engineAlive(); if (alive) break }
+    roll = rollbackVerdict(runAs(`cat ${FILES}/undo-gate.log 2>/dev/null`), roll0.oks, roll0.pulled)
+    // 两条合法修补路径：清单式外科拔除（`pulled plugin=`）与整份回滚（`executed ok`）
+    if (roll.newOk || roll.newPulled) { alive = await engineAlive(); if (alive) break }
   }
   const logText = runAs(`cat ${FILES}/undo-gate.log 2>/dev/null`)
   writeFileSync(join(EVID, 'undo-gate.log'), logText)
   const elapsed = Math.round((Date.now() - t0) / 1000)
-  if (roll.newOk) {
-    record('P3 自动回滚已执行', 'PASS', `${elapsed}s 内新增 executed ok snapshot=${roll.last?.snapshot ?? '?'}`)
+  if (roll.newPulled) {
+    record('P3 自动修补已执行（清单式外科拔除）', 'PASS',
+      `${elapsed}s 内新增 pulled plugin=${roll.lastPulled?.plugin ?? '?'}（只拔坏的那个，其余条目未动）`)
+  } else if (roll.newOk) {
+    record('P3 自动修补已执行（整份回滚）', 'PASS', `${elapsed}s 内新增 executed ok snapshot=${roll.last?.snapshot ?? '?'}`)
   } else {
-    record('P3 自动回滚已执行', 'FAIL',
-      `${elapsed}s 内没有新增 executed ok（本轮 failed=${roll.failed - roll0.failed}）——回滚没被触发或执行失败`)
+    record('P3 自动修补已执行', 'FAIL',
+      `${elapsed}s 内既没有 pulled 也没有 executed ok（本轮 failed=${roll.failed - roll0.failed}）——恢复路径没被触发或执行失败`)
   }
   if (!alive) alive = await engineAlive()
   record('P3 引擎恢复健康', alive ? 'PASS' : 'FAIL', alive ? 'host→tcp:3080 有响应' : '回滚后引擎仍不可达')
@@ -302,8 +349,16 @@ async function main() {
   writeFileSync(join(EVID, 'patch-after-rollback.yml'), patchText2)
   const patchSha2 = runAs(`sha256sum ${PATCH}`).trim().split(/\s+/)[0]
   const mountsBad = patchMounts(patchText2, '@dsh-android/' + BAD_ID)
-  record('P4 坏插件已剔除出装配', !mountsBad ? 'PASS' : 'FAIL',
-    !mountsBad ? `cordis.patch.yml 不再挂载 ${BAD_ID}（sha ${String(patchSha0).slice(0, 12)} -> ${String(patchSha2).slice(0, 12)}）` : '坏插件仍被 cordis.patch.yml 挂载')
+  const byteIdentical = String(patchSha2) === String(patchSha0)
+  record('P4 坏插件已剔除出装配', !mountsBad && byteIdentical ? 'PASS' : 'FAIL',
+    !mountsBad && byteIdentical
+      ? `cordis.patch.yml 与基线**逐字节相同**（sha ${String(patchSha2).slice(0, 12)}）⇒ 其余条目与注释一字未动`
+      : (mountsBad ? '坏插件仍被 cordis.patch.yml 挂载' : `已拔除但清单与基线不一致：${String(patchSha2).slice(0, 12)} vs ${String(patchSha0).slice(0, 12)}`))
+  // 清单式回滚的两份清单必须真的落地（否则「硬清单保护」只是纸面）
+  const hard = runAs(`cat ${FILES}/.plugin-hard-manifest.json 2>/dev/null`)
+  const soft = runAs(`cat ${FILES}/.plugin-soft-manifest.json 2>/dev/null`)
+  record('P4 两份清单在场（硬/软）', hard.includes('names') && soft.includes('names') ? 'PASS' : 'FAIL',
+    `硬清单片段=${hard.slice(0, 120).replace(/\n/g, ' ')}`)
 
   const man1 = manifestMap(runAs(`cd ${NM} && find . -type f | sort | xargs sha256sum`))
   const diff = manifestDiff(man0, man1)

@@ -67,6 +67,24 @@ class UndoGateKnownGoodTest {
   }
 
   @Test
+  fun 先外科拔除_整份回滚只在清单没变时才允许() {
+    // 用户 2026-09-21 拍板的清单式：坏插件**只拔它一个**；整份回滚会把「最后一次健康启动之后
+    // 用户装的插件」全抹掉，故只有在「挂载清单没变过」（故障与插件无关）时才允许。
+    val code = shellSource("UndoGate.kt")
+    val pullAt = code.indexOf("PluginMounts.pull(context, patch, failed)")
+    val restoreAt = code.indexOf("listOf(\"restore\", known)")
+    assertTrue("必须存在外科拔除调用", pullAt > 0)
+    assertTrue("整份回滚必须排在外科拔除之后", pullAt < restoreAt)
+    assertTrue("硬清单内的插件不得被拔（我们自己插的强制保留）", code.contains("failed.name !in hard"))
+    assertTrue("清单变了又点不出名时不得回滚", code.contains("aborted mount-changed-and-unattributed") &&
+      code.contains("PluginMounts.mountUnchangedSinceHealthy(context, patch)"))
+    assertTrue("拔不动的名单要落探针（不许静默）", code.contains("pull failed (block not located) plugin="))
+    // 两份清单必须在「壳侧确认健康」那一拍维护
+    assertTrue("硬清单按安装指纹并入", code.contains("PluginMounts.ensureHard(context, patch, fp)"))
+    assertTrue("软清单只在清单变化时写", code.contains("PluginMounts.noteHealthy(context, patch)"))
+  }
+
+  @Test
   fun 回滚接线必须以已知良好为唯一目标() {
     val code = shellSource("UndoGate.kt")
     // ① 目标是 known-good（restore <id>），且选目标前核对它还在（快照会被 prune）
