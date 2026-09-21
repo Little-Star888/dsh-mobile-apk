@@ -605,9 +605,12 @@ class DeviceControlService : AccessibilityService() {
 
   /** 执行一个队列请求；返回 null 表示成功（数据由调用方组装）。 */
   fun handle(op: String, args: JSONObject): JSONObject {
-    // 0.14：无障碍服务当前只承载真实物理屏。 Every content read and action is
-    // scope-checked before it can build a tree, consume a ref, or issue an input gesture. The
-    // virtual alias is never mapped to display 0 while VirtualDisplay remains unavailable.
+    // 0.14.1 块G F4（注释更正）：本服务**已承载虚拟屏**——`realScreenScopeError` 会经
+    // `VdisplayController.displayIdForAlias` 解析 `virtual-N` 的动态 displayId 并把
+    // `activeScreenId/activeDisplayId` 固定到该屏（见下方 realScreenScopeError 与
+    // VdisplayController 的注册表）。一切内容读取与动作仍**先过范围门**（范围不含时结构化拒绝，
+    // 绝不静默回退 display 0），但「虚拟屏不可用 / 永不路由到 caller 给的 display id」的旧述已失真：
+    // caller 给的 displayId 对真实屏被拒（screen-display-mismatch），虚拟屏则一律由壳侧注册表裁决。
     if (op in REAL_SCREEN_OPS) {
       val scopeError = realScreenScopeError(args)
       if (scopeError != null) return scopeError
@@ -672,8 +675,21 @@ class DeviceControlService : AccessibilityService() {
     return result
   }
 
+  /**
+   * 真实屏内容 op = **会读设备屏幕**的那 8 条，与引擎 `screen-scope.ts` 的
+   * `REAL_SCREEN_CONTROL_OPS` 逐条相同（由 `scripts/check-op-registry-parity.mjs` 守相等）。
+   *
+   * 2026-09-19 设备实测更正：本集合此前是 **11 条**，多出的 `state`/`webSnapshot`/`webAction`
+   * 是 `control-policy.ts` 的 `A11Y_OPS`（**后端能力**清单）的陈旧拷贝，与「是否读设备屏」无关：
+   *   - `state`（[handleState]）：只回内存快照代次与失效标记，签名不收 args，不读无障碍根/截屏/displayId；
+   *   - `webSnapshot`/`webAction`（[handleWebSnapshot]/[handleWebAction]）：目标是**壳自有 WebView** 的 DOM。
+   * 三条都不带 `screenId` ⇒ 默认 `real` ⇒ 被本范围门拦死；而 `virtual-only` 是缺省范围（fail-closed），
+   * 于是 `android_web_dump`、`android_ui_click`/`android_ui_input` 的 WebView ref 路径、以及点击生效
+   * 校验（`verifyClick` 读 `state`）在缺省范围下一律报 `screen-out-of-scope`——用户实测到的
+   * 「virtual-only 下工具和不存在一样」有一半出自这里。收敛到 8 条即修好。
+   */
   private val REAL_SCREEN_OPS = setOf(
-    "snapshot", "click", "longClick", "setText", "scroll", "global", "screenshot", "state", "nodeText", "webSnapshot", "webAction",
+    "snapshot", "click", "longClick", "setText", "scroll", "global", "screenshot", "nodeText",
   )
 
   /** A scope transition is a screen barrier: old real-screen refs cannot regain validity later. */
@@ -687,9 +703,13 @@ class DeviceControlService : AccessibilityService() {
   /**
    * Enforce the user-owned scope before any existing real-screen handler runs.
    *
-   * There is currently no VirtualDisplay implementation in this service. A virtual request is
-   * therefore either out of the user's range or explicitly `screen-not-ready`; it is never routed
-   * through rootInActiveWindow or a caller-provided display id.
+   * 0.14.1 块G F4（注释更正）：原文称「There is currently no VirtualDisplay implementation…
+   * it is never routed through rootInActiveWindow or a caller-provided display id」——该述已失真。
+   * 现状：虚拟屏**已实现**（`VdisplayController`），本函数对 `virtual-N` 经注册表解析动态
+   * displayId 并固定为本次执行的目标屏（下方 activeScreenId/activeDisplayId 赋值）；
+   * caller 提供的 `displayId` 仅在**真实屏**路径被拒（screen-display-mismatch），
+   * 虚拟屏的 displayId 一律由壳侧注册表裁决，不接受调用方指定。
+   * 不变量保持不变：范围不含该屏 → 结构化拒绝（screen-out-of-scope），绝不静默回退 display 0。
    */
   private fun realScreenScopeError(args: JSONObject): JSONObject? {
     val requested = args.optString("screenId", ScreenTargets.REAL)
@@ -742,7 +762,8 @@ class DeviceControlService : AccessibilityService() {
     // 一次性迁移（issue #127）：≤0.13.5 把截图落在 files/control-shots（引擎读不到），
     // 升级后清掉旧目录，避免历史残留长期占位。
     if (legacyShotDirCleaned.compareAndSet(false, true)) {
-      try { java.io.File(filesDir, "control-shots").deleteRecursively() } catch (_: Throwable) { /* 忽略 */ }
+      // 审查 I-9：同类形态一律 NOFOLLOW（截图目录里可能有链）。
+      try { SnapshotFs.deletePath(java.io.File(filesDir, "control-shots")) } catch (_: Throwable) { /* 忽略 */ }
     }
     // displayId 由 realScreenScopeError 解析并固定（真实屏 0 / 虚拟屏动态 id），不接受 caller 直接指定。
     val displayId = activeDisplayId

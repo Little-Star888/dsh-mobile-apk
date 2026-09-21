@@ -94,3 +94,47 @@ test('缺失 skills 服务或作用域注入时降级不抛（fail-open 到今�
   installCapabilityGate({ tools: { register: (tool) => { registered.push(tool) } } })
   assert.equal(registered.length, 1)
 })
+
+// ── A1（0.14.1 设备实测缺陷）：Shizuku 通道三态 ──────────────────────────────
+//
+// 设备实录：工具面报「Shizuku 特权通道：未就绪（**虚拟屏建屏需要它**）」，状态区同一时刻显示
+// 「已授权」且虚拟屏确实建成了；模型据此判定「建不了虚拟屏」而放弃了一个可用能力。
+// 真因：caps 只随控制 op 的回执抵达，而 android_capabilities 自己不入队 ⇒ 首次询问必然缺席，
+// 旧实现把这个「缺席」渲染成「未就绪」。以下用例钉住三态语义。
+
+test('A1：未探测（键缺席）不得渲染成「未就绪」，且必须给出可执行动作', async () => {
+  const h = harness()
+  installCapabilityGate(h.ctx, () => ({ a11y: true }))
+  const one = await h.registered[0].execute({ group: 'all' }, { agent: h.state.agent })
+  assert.deepEqual(one.channels, { a11y: true })
+  assert.equal('shizuku' in one.channels, false, '未探测必须是键缺席，不能是 false')
+  const line = one.text.split('\n').find((l) => l.startsWith('- Shizuku'))
+  assert.doesNotMatch(line, /未就绪/, '「未知」不得渲染成「未就绪」：' + line)
+  assert.match(line, /状态未知/)
+  assert.match(line, /android_vdisplay_create/, '未知必须指向「直接试一次」这个可执行动作')
+})
+
+test('A1：三态必须是三条互不相同的文案（就绪 / 实测未就绪 / 未知）', async () => {
+  const seen = []
+  for (const facts of [{ a11y: true, shizuku: true }, { a11y: true, shizuku: false }, { a11y: true }]) {
+    const h = harness()
+    installCapabilityGate(h.ctx, () => facts)
+    const one = await h.registered[0].execute({ group: 'all' }, { agent: h.state.agent })
+    seen.push(one.text.split('\n').find((l) => l.startsWith('- Shizuku')))
+  }
+  assert.match(seen[0], /就绪（shell 执行/)
+  assert.match(seen[1], /未就绪（已实测/)
+  assert.match(seen[2], /状态未知/)
+  assert.equal(new Set(seen).size, 3, '三态折叠成同一句话就是这个缺陷本身：' + JSON.stringify(seen))
+})
+
+test('A1：channels 允许异步（引擎补探），门禁必须 await 得到事实而非 Promise', async () => {
+  const h = harness()
+  installCapabilityGate(h.ctx, async () => {
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    return { a11y: true, shizuku: true }
+  })
+  const one = await h.registered[0].execute({ group: 'all' }, { agent: h.state.agent })
+  assert.deepEqual(one.channels, { a11y: true, shizuku: true })
+  assert.match(one.text, /Shizuku 特权通道：就绪/)
+})

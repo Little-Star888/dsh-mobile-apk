@@ -1,6 +1,6 @@
 # ARCHITECTURE.md — 模块地图
 
-> 职责：安卓壳源码的权威模块登记（**65 个 .kt 文件**、assets 资产、manifest 组件）。行数为 2026-09-14 当场 wc 实测；「被引用」为名称级 grep（含少量注释提及），调用关系以源码为准。源码根：`app/src/main/java/com/dsharnessmobile/shell/`。
+> 职责：安卓壳源码的权威模块登记（assets 资产、manifest 组件）。**文件数与行数一律现数**（`find app/src/main -name '*.kt' | wc -l`、`wc -l <file>`）——本表曾写死 2026-09-14 的实测值，执行地图排查（docs/AGENTS/EXECUTION-MAP.md §8）已证明这类数字每次改动都会漂；「被引用」为名称级 grep（含少量注释提及），调用关系以源码为准。源码根：`app/src/main/java/com/dsharnessmobile/shell/`。
 
 ## 1. 宿主 Activity 及拆分协作类
 
@@ -15,7 +15,7 @@
 | WebUiChrome.kt | 123 | 窗口 UI chrome：沉浸式/剪贴板/常亮/主题推送（真源统一走 ShellState） | MainActivity |
 | FileIncoming.kt | 484 | 外部来件（VIEW/SEND）校验净化→临时工作区→通知引擎；queued source 保留到浏览器草稿 claim 或 TTL | MainActivity、EngineService |
 | AndroidBridge.kt | 383 | `window.androidBridge` 全部 @JavascriptInterface（计数由 check-bridge-symmetry 守；含设置/chooser/ScreenScope/BrowserHost/虚拟屏/BackGate 接线） | MainActivity（唯一 addJavascriptInterface 点） |
-| BrowserHost.kt / BrowserHostNavigationPolicy.kt | 341 / 35 | 0.14 新增：惰性隔离第二 WebView（无 bridge）；仅 http(s)/about:blank，拒 file/content/data/javascript/loopback；stage bounds + viewport letterbox | MainActivity |
+| BrowserHost.kt / BrowserHostNavigationPolicy.kt / BrowserOverlayPolicy.kt | 1813 / 210 / 82（`wc -l` 现数；**不要写死**，行数每次改都会漂） | 惰性隔离第二 WebView（无 bridge）；准入 = http(s)/about:blank 且**主机规范化后**拒回环等价写法（数值/八进制/十六进制/结尾点/IPv4-mapped）；请求级过滤另拒回环/链路本地/元数据段；stage bounds + viewport letterbox；覆盖层可见性判据（fail-closed + 发布者保鲜 TTL） | MainActivity |
 | ScreenScope.kt | 55 | 0.14 新增：ScreenScope/ScreenTargets/ScreenScopePrefs——用户屏幕范围的 native 真源（损坏/未知回落 virtual-only） | AndroidBridge、DeviceControlService |
 
 注入方向：MainActivity 字段初始化阶段 `by lazy`/直接构造各协作类并传 `this`（如 `engineFlow = EngineStartFlow(this)`）；ActivityResult 注册必须在 STARTED 前，故 dirPickerController/mediaPickerController 为字段直接构造。协作类只回调 MainActivity 的 internal 方法，不持有彼此。
@@ -24,13 +24,14 @@
 
 | 文件 | 行数 | 职责一句话 | 被引用 |
 |---|---|---|---|
-| OverlayService.kt | 723 | 三窗口（球/光环/面板）生命周期、拖动吸附、探活与发送编排（session.prompt/cancel/create） | OverlayController、MainActivity、EngineService、协作类 |
-| OverlayHalo.kt | 91 | 光环 drawable/四态切换/syncHalo 同心 + deriveHalo 派生唯一权威；Halo 枚举 | OverlayService |
-| OverlayPanel.kt | 1110 | 展开面板视图构建/状态模板/待答卡渲染 + MuxClient 消费 + POST /api/respond 应答 | OverlayService、OverlayLiveFeed |
-| OverlayLiveFeed.kt | 181 | FileObserver 监听 .live.ndjson 逐行 drain（turn_start/tool_call/tool_result/turn_end）+ android_* 自动化避让 + debug 合成注入 | OverlayService |
+| OverlayService.kt | 772 | 三窗口（球/光环/面板）生命周期、拖动与四向钳制（0.14.1 块I 起**无贴边吸附**）、块H 完成位与报告栏窗口收口、探活与发送编排（session.prompt/cancel/create） | OverlayController、MainActivity、EngineService、协作类 |
+| OverlayHalo.kt | 164 | 光环 drawable（**glow+ring 两层 LayerDrawable**，0.14.1 块I）/四态切换/syncHalo 同心 + deriveHalo 派生唯一权威；Halo 枚举（纯 Kotlin ARGB 字面量） | OverlayService |
+| OverlayPanel.kt | 1217 | 展开面板视图构建/状态模板/待答卡渲染 + MuxClient 消费 + POST /api/respond 应答 + 状态行手势（块H：长按报告栏/三击跳转） | OverlayService、OverlayLiveFeed |
+| OverlayLiveFeed.kt | 196 | FileObserver 监听 .live.ndjson 逐行 drain（turn_start/tool_call/tool_result/turn_end **+ 块H 的 kind 语义标签**）+ android_* 自动化避让 + debug 合成注入 | OverlayService |
 | OverlayTheme.kt | 38 | 系统明暗判定 + 展开态色板（ThemeColors） | OverlayService、OverlayPanel |
 | MuxClient.kt | 232 | 手写 WebSocket 客户端（/api/remote.mux 下行，协议见 BRIDGE-API.md；可选 streamId 供通知应答流复用） | OverlayPanel、NotifyBridge |
 | ShimmerTextView.kt | 92 | Deep diving 扫光动效 TextView（LinearGradient shader） | OverlayService、OverlayPanel |
+| OverlayReport.kt | 325 | 0.14.1 块H 新增：报告栏独立顶层窗口（buildReportBar/showReport/hideReport/isShowing）+ 完成位状态机 CompletionNotice + 纯逻辑 reportLines/turnEndLabel/手势裁决函数 | OverlayService |
 | OverlayController.kt | 92 | 悬浮球开关持久化 + 服务起停 + SYSTEM_ALERT_WINDOW 权限引导（偏好 ∧ 权限 ∧ 服务在场） | AndroidBridge lambda、MainActivity、OverlayService（注释） |
 
 注入方向：`OverlayService` 构造 `OverlayHalo(this)/OverlayPanel(this)/OverlayLiveFeed(this)`，OverlayPanel 内部再构造 `OverlayTheme(svc)`——统一为「构造注入服务引用、同包顶层类、无静态单例」。协作类只经 `svc.internal` 字段/方法读写共享状态，调用方向单向：Service → 协作类，协作类 → Service 公开面。
@@ -45,7 +46,7 @@
 | UndoGate.kt | 198 | 连败 6 次急救回退：调 assets/undo-emergency.mjs restore-last-good（幂等/防循环） | EngineService、EngineStartFlow、EngineManager（注释）、AdbState（注释） |
 | SnapshotExtractor.kt | 160 | xz tar 流式解压（commons-compress）+ security.android.exec xattr 补章 + zip-slip 防护 | EngineManager、UpdateManager |
 | SnapshotTransaction.kt | 492 | 运行时替换事务：暂存解压→原子交换→指纹提交；中断恢复（前滚/回滚/丢弃） | EngineManager |
-| SnapshotFs.kt / SnapshotFileMode.kt / SnapshotUserData.kt | 51 / 23 / 128 | NOFOLLOW 文件原语 / 权限位 / ≤0.13.2 遗留 `.dsh-backup` 一次性补写 | SnapshotTransaction、EngineManager |
+| SnapshotFs.kt / SnapshotFileMode.kt / SnapshotUserData.kt | 88 / 23 / 135 | NOFOLLOW 文件原语（目录枚举走 `newDirectoryStream`，避 `Stream.toList()` 的 API 34 依赖）/ 权限位 / ≤0.13.2 遗留 `.dsh-backup` 一次性补写 | SnapshotTransaction、EngineManager |
 | FactoryProfilePatch.kt | 241 | 0.14（#214）：profile `cordis.patch.yml` 工厂语义定点纠正（按 id 以工厂为准，退役 disabled 残行清理，用户独有条目不动） | EngineManager、SnapshotTransaction |
 | UpdateManager.kt | 145 | 快照在线更新（manifest/sha256/换 usr，usr-old 回退） | EngineManager、EngineStartFlow、UndoGate（注释） |
 | EngineProbe.kt | 93 | 引擎探活（Proxy.NO_PROXY 直连 #118；401/303 视作 alive） | 壳侧全部探活唯一入口 |
@@ -56,7 +57,6 @@
 
 | 文件 | 行数 | 职责一句话 | 被引用 |
 |---|---|---|---|
-| AdbState.kt | 687 | ADB 授权单一事实源：三道门/真实 pair 握手/NSD 端口发现/adbShellExecute/审计（AdbAudit）；0.14 起定位为迁移/诊断面，正式特权通道转 Shizuku | AndroidBridge、EngineManager、MainActivity、ShizukuProbe（注释） |
 | AdbKeyboardService.kt | 168 | 内嵌 ADBKeyboard 协议 IME（android_ui_input 中文输入；仅活跃时提交） | AdbKeyboardReceiver（静态 handle 转发） |
 | AdbKeyboardReceiver.kt | 32 | ADB_INPUT_TEXT/ADB_CLEAR_TEXT 广播入口 | manifest 注册（无代码调用方） |
 | BootReceiver.kt | 48 | BOOT_COMPLETED 恢复用户同意状态 + BatteryWhitelist 引导 | manifest 注册（无代码调用方） |
@@ -79,6 +79,8 @@
 | ShellState.kt | 125 | ST 真源收敛：沉浸式/开发者日志两处「展示值 ≠ 事实」的统一读写面（仅偏好 ∧ 运行时合取） | MainActivity、WebUiChrome、AndroidBridge |
 | LiveProbe.kt | 54 | 轻量真源探测原语（TCP connect + TTL ≤ 页面轮询周期；时钟/探测体可注入单测） | AdbState |
 | ApkArtifactCheck.kt | 38 | 启动页 APK 自更新产物校验（缓存/新下载两路径共用同一严格度：存在/大小/sha256） | GuidePageRenderer、UpdateChecker |
+
+（`AdbState.kt` 已于 8141e5c「0.14.0 正式轮」删除：ADB 授权/审计职责拆进 `EngineAuth`/`ShizukuTransport`/`ControlAudit`/`LiveProbe`/`ProcIo`；旧行保留在 git 历史里，不再列于本表。）
 
 ## 5. 0.14 新增：Shizuku 特权 transport、虚拟屏与浏览器宿主
 

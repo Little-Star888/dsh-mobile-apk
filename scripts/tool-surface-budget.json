@@ -1,5 +1,5 @@
 {
-  "baseline": 16772,
+  "baseline": 18490,
   "perPlugin": {
     "dsh-android-bridge": {
       "count": 4,
@@ -7,15 +7,15 @@
     },
     "dsh-android-manage": {
       "count": 14,
-      "bytes": 7207
+      "bytes": 7864
     },
     "dsh-android-browser": {
       "count": 19,
-      "bytes": 4852
+      "bytes": 4973
     },
     "dsh-android-vdisplay": {
-      "count": 3,
-      "bytes": 635
+      "count": 4,
+      "bytes": 1575
     },
     "dsh-android-file-open": {
       "count": 1,

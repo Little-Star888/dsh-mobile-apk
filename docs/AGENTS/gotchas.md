@@ -202,3 +202,424 @@
     这条缺陷的本质不是「截图坏了」，而是「两条路的 screenId 支持度不一致」——
     加通道时只测了主路，回落路径的参数就跟主路脱钩了。
     回归：`a11y-routing.test.mjs` 两条（带 screenId 必须 `-d <id>` + 锚点是虚拟屏像素；不带则不得注入 `-d`）。
+
+144. **「探针值恒为 -1」不一定是解析 bug：先证明产出面在场（0.14.1 块F P0 实锤）**：
+    现象：`files/boot-segments.log` 的 `t_compose_total` 在设备上 42/42 样本恒为 `-1`，
+    而 `scripts/check-perf-instrumentation.mjs`（P-AC-04）一直判绿——因为它只查「三字段在场」。
+
+    真因（两条，缺一不可）：
+    ① **产出面根本不在**：`[perf] TOTAL calls=… totalMs=…` 只有测量用 preload
+       `scripts/perf/count-compose.mjs` 会打印（`--import` 注入引擎命令行 + `process.on('exit')` 汇总）。
+       该脚本**没有任何发行路径**：不在快照 stage、不在 `engine-overlay.json`、不被 `inject-all.py` 注入，
+       出厂 argv 与 env 也都不含它。⇒ 正则/解析器没错，**上游从未产出那一行**。
+    ② **解析链挂在默认关闭的开关上**：`maybeEmitComposeTotal` 只被 `tick()` 调用，而 `tick()`
+       由调试日志采集器驱动、**采集器默认关闭**。即便探针在场，默认设备上也永远落不出真值。
+
+    修法：口径解析改为**与采集器解耦的有界 tail**（`startProbeTail`，独立读偏移、90s 上限、daemon），
+    且**探针缺席时显式落 `note=probe-absent`** + 判据行带 `t_compose_source`，
+    使「探针没装」与「采样为 0」从此可区分（`none` vs 真实值）。
+
+    通用教训：**指标恒为缺省值时必须先证产出面**——「解析器存在」不等于「数据源存在」。
+    同理：**不得用近似量冒充**（A3 缓存行只有 entries/hits、A5 只有 singles，都不含耗时，
+    拿它们填 `t_compose_total` 就是新的假绿）。回归：`EngineBootInstrumentationTest`
+    的 `composeSourceDistinguishesAbsentProbeFromZeroSample`（含「A3/A5 在场也不得产出 totalMs」反向断言）。
+
+145. **门禁断言「安全姿态」时，改姿态必须同批改断言，且新断言要守住**真正要守的东西**（0.14.1 块K 实锤）**：
+    现象：issue #232 的用户裁定是「撑开 NSC 支持明文 http」（准入面一直放行 http，而平台 NSC
+    只白名单回环 ⇒「准入说行、平台必炸」）。撑开后 `check-manifest-hardening.mjs` 立即必红——
+    它把 `base-config cleartextTrafficPermitted="false"` 锁死了。
+
+    修法要点（不是把 false 改成 true 了事）：
+    - 断言改为**显式声明**：`cleartextTrafficPermitted` 漏写即平台默认 false（=静默收紧）→ 判红；
+    - **回环保留面逐字比对**（127.0.0.1 / localhost / 10.0.2.2，多一个少一个都判红）——
+      防止「放开全域时顺手把可信回环定义放宽」；
+    - 拒绝 `<domain-config cleartextTrafficPermitted="true">` 不带 `<domain>`（=全域明文口子）；
+    - **跨层同向**下沉为 JVM 测试 `BrowserHostCleartextConsistencyTest`（真实调用准入面函数 +
+      解析 NSC 本体），门禁只断言「该测试仍被接线」——单层门禁发现不了「准入面另开口子」。
+
+    #183「壳侧明文收敛」影响（**必须书面记录**）：原目标「默认禁明文、仅放行回环」对隔离浏览器
+    **不再成立**——隔离 WebView 可访问任意明文站点，明文流量回到不受平台默认保护的状态。
+    这是用户明确拍板接受的取舍；影响面仅限 BrowserHost（无桥、无 addJavascriptInterface），
+    引擎子进程（不受 NSC 约束）、APK 自更新（HTTPS）、主 WebView（回环）三条均零变化。
+
+    通用教训：**门禁锁的应是「要守的性质」，不是「当时的取值」**；姿态变更时若只翻转字面量，
+    门禁就变成一句永远为真的废话。
+
+146. **「抑制」类开关默认值翻转必须配存量升级策略，且不得静默改写用户显式选择（0.14.1 块J 实锤）**：
+    现象：`NotifyCenter.suppressForeground()` 缺键返回 `true`，导致**前台工作时整条工作汇报被永久丢弃**
+    （命中即 `return Result.SUPPRESSED_FOREGROUND`，无入队、无补投；而消费侧已推进字节偏移）
+    ⇒ 用户体感「必须划到后台才推送」。用户裁定默认值改为 `false`（前台也真发）。
+
+    存量升级的关键事实：**旧抑制是默认值造出来的，不是 prefs 写出来的**——
+    全仓 `setSuppressForeground` 零调用、0.14.0-preview 起从未接线，**没有任何发行版写过该键**。
+    ⇒ 改默认值即修好存量用户，**无需改他们任何一个 prefs 字节**。
+
+    因此迁移形态是「**不动 prefs**」：缺键 → 走新默认值（被修好）；**显式存在的值原样保留**
+    （那只能是用户/自动化写入的真实意志，静默改写它属于「代理信号当真实状态」的反面错误），
+    只备份到 `suppressForegroundLegacy` + 探针留痕；`suppressForegroundSchema` 代次保证只跑一次。
+
+    同批补的另一半：抑制从「丢弃」改为「**延后**」（待投队列 + TTL + 覆盖式去重 + 有界），
+    且 `listener` 从「全仓零赋值的空操作」补上真实实现（复用既有 `flashStatus`）——
+    否则用户既无系统通知、也无应用内提示，是「一切正常与彻底失败不可区分」的静默失败形态。
+
+    通用教训：**改语义默认值前先查「旧行为是默认值造的，还是被显式写出来的」**——两者迁移策略相反。
+    回归：`NotifySuppressQueueTest`（TTL/覆盖/有界/最新优先）+ `NotificationContractTest` 六条。
+
+155. **悬浮窗完成位必须挂在服务级字段：自动收起是默认路径，「完成后用户还没看到面板」才是常态**：
+    现象（需求侧）：用户要求「对话完成且首次打开悬浮窗时」显示「已完成，长按查看汇报」。
+    若把完成位放进 `unitView` 的视图状态或某次 `setText`，自动收起（`autoCollapseOnDone` 默认 true，
+    完成后 900ms 收面板）会 `removeView(unitView)`，完成位随之丢失 → 用户点球重开时**永远看不到**该文案。
+
+    真因：`hidePanel()` 会 `unitView.visibility = GONE` 并 `removeView`，视图状态不是跨展开期的载体。
+
+    修法：完成位放 `OverlayService` 服务级字段（`internal val completion = CompletionNotice()`，
+    与 `sessionBusy`/`toolCount` 同族），置位与消费分离——`applyAgentStatus` 的 `running=false` 分支置位，
+    `showPanel()` 消费。**且必须覆盖「置位时面板已展开」路径**（autoCollapseOnDone 关闭时）：
+    该路径不走 `showPanel`，若不显式消费则展开态永远不显示。
+
+    通用教训：**任何「跨收起/再打开」的用户可见状态，都不能存在会被 remove 的视图里。**
+
+    回归：`OverlayCompletionNoticeTest`（无 pending 的普通完成必须显示、收起再打开回常态、两轮不残留）。
+
+148. **`flashStatus("已完成")` 的真实触发条件不是「工作完成」，而是「有 pending 被丢弃」**：
+    现象：既有实现里「已完成」只在 `dropPendingFor` 返回 true 时闪现，故**普通完成（无待答/待审批）
+    根本不显示**；且它是 2.5s 瞬时闪现、只在展开态可见。
+
+    真因：两处 `flashStatus("已完成")` 调用都在 `if (dropped)` 之内，`dropped` 来自
+    `panel.dropPendingFor(agentId)`。这正是旧认知与本需求的分歧点——先读源码再改，
+    不要沿用「完成就会显示已完成」的错误前提。
+
+    另注：自动收起分支里的那次 `flashStatus` 是**死调用**（同点先 `hidePanel()` 同步置
+    `expanded=false`，而 `flashStatus` 内有 `if (expanded)` 守卫 → 必不显示）。
+
+    修法：新完成态是**独立常驻状态位**（`CompletionNotice`），触发取自权威信号
+    `api-session/status running=false`，与 `dropped` 无关——这样无 pending 的普通完成也能显示。
+
+149. **`as? GradientDrawable ?: return@post` 式取层是静默失败源：drawable 改形态后门禁全绿但功能不动**：
+    现象（本轮实锤形态）：`setHalo` 原为
+    `val g = hv.background as? GradientDrawable ?: return@post`。把 `newHaloDrawable` 改成
+    `LayerDrawable`（glow+ring 两层）后，该 `as?` **恒为 null**，于是每一次状态改色请求都被
+    无声吞掉——不抛错、不日志、编译过、门禁绿，表现只是「球不变色」。
+
+    真因：`?: return@post` 把「类型不匹配」这种**结构性错误**降级成了正常控制流。
+
+    修法：显式取层 + 失败留痕（`LogCollector.log`），并让「背景必须是 LayerDrawable」成为
+    源码契约断言的一部分（`CallSiteContractTest`：不得再出现 `background as? GradientDrawable`）。
+
+    通用判据（同坑 61）：**任何 `as?` + `?: return` 组合，若其失败分支等价于「功能静默失效」，
+    就必须改为显式诊断**——否则它是一道永远发现不了缺陷的防线。
+
+150. **`Color.argb(...)` 在 `unitTests.isReturnDefaultValues = true` 下恒返回 0：颜色类单测会假绿**：
+    现象：`Halo` 枚举若用 `android.graphics.Color.argb(...)` 在枚举初始化时求值，JVM 单测里
+    `Color.argb` 被打桩返回 **0** → `Halo.values()` 全部取值为 0 → 任何
+    `assertEquals(ringColor, Halo.PENDING.color)` 一类的断言**恒真**。
+    这类测试看起来在防漂移，实际是「永远不会失败的防线」。
+
+    真因：`app/build.gradle.kts` 的 `unitTests.isReturnDefaultValues = true` 把 android 图形类
+    统一打桩成默认值（0/null），纯 JVM 测试拿不到真实图形 API。
+
+    修法：状态色改用**纯 Kotlin ARGB 十六进制字面量**（`0xCDEBBE3C.toInt()` 等，换算口径
+    `(a shl 24) or (r shl 16) or (g shl 8) or b`，逐字节等价），枚举即可在 JVM 上求真实值；
+    并补一条「四态取值互不相同」的反证——把实现改回 `Color.argb` 时它会立刻变红。
+
+    **连带坑（本轮实际踩到，比坑本身更值得记）**：人工转写十六进制极易**把 g/b 两个字节写反**
+    ——`argb(205,235,190,60)` 的正确拆解是 `a=CD r=EB g=BE b=3C → 0xCDEBBE3C`，本轮误写成
+    `0xCDEBBC3C`（`BE3C` 错位成 `BC3C`）。更要命的是**设计详档 §4.3 的换算表里写的就是错值**，
+    照做即错（已就地更正 `docs/0.14.1-preview-HALO-FREE-MOVE-AND-RING.md:277-278` 与本条）。
+    教训：**转写类改动的唯一可靠验收是「逐字节等价断言」，不是肉眼比对**——本轮正是
+    `argbLiteralsEqualThePreviousColorArgbValues` 把它抓出来的。
+    另注意：契约测试若拿**具体字面量**当「在场」判据（如原文的 `code.contains("0xCDEBBC3C")`），
+    会把错值一起钉死 → 修源码后测试反而判红。正确写法 = 断言 8 个**正确**字面量在场
+    **且**显式禁止已知错值形态（见 `CallSiteContractTest.haloEnumUsesPlainKotlinArgbLiterals`）。
+
+    回归：`OverlayHaloInvariantTest`（四态互不相同 + 字面量逐字节等价 + 通道语义方向）。
+
+151. **构建器「跑到一半就正常退出」= 打包链静默复用陈旧快照（0.14.0 实锤，本轮修复）**：
+    现象（本轮取证）：`scripts/build-snapshot-013.mjs` 跑完打印「瘦身完成」后 **exit 0**，但
+    `.deploy-tmp/snapshot-013/<abi>/snapshot.tar.xz` 的 mtime 停在 9/15，而同级 `stage/` 已更新到 9/19
+    —— **「stage 是新的、产物是旧的」**。整条打包链零报错：`build-apk-013.ps1` 只判「该 tar 是否存在」，
+    存在就继续注入/打包，于是**发布产物里嵌的是上一次的快照**。
+
+    真因：提交 `0849579`（0.14.0 正式轮）对 `build-snapshot-013.mjs` 做了**纯尾部删除**（父提交
+    866 行 → 823 行），删掉的正是 `── 8. 归档` 整段：`tar -c --mtime=@… | xz -T0 -6` 产出 tar、写
+    `snapshot.sha256`、归档内 LICENSES 自检、A1 出厂声明值对账。该提交的 message **完全没提**这件事。
+
+    **第一手信号（最快判据）**：`scripts/snapshot-config/slim.json` 出现**死键**——
+    `reflinkGlobs` / `orphanGlobalNodePackages` 在构建器里已无任何消费者（被删的还有依赖它们的
+    两步瘦身）。**判据：配置文件的每个键都必须在消费它的构建器里被引用；死键 = 某步被删/被绕过的
+    确定性证据**（比「事后去读 diff」快，且不依赖有人记得查历史）。
+
+    修法：从 `0849579~1` 恢复尾块（**+99 行 / 0 删除**的纯新增；尾块与删除前逐行一致、`node --check`
+    通过），重跑构建器实测产出 162.7 MB tar 并打通归档后自检；并新增常驻门禁
+    `scripts/check-snapshot-builder-output.mjs`：① 产出面构造在场（tar 打包 / sha256 落盘 / 归档后
+    LICENSES 自检 / A1 对账 / 两步瘦身，且**纯注释行不计入**，防「只剩注释提到」的假绿）；②
+    slim.json 键消费者闭合（死键即红）；③ 与打包链**路径同源**（构建器写 A、打包链读 B 亦属同类
+    静默假绿）；④ 两树同版。该门禁自带 `--self-test`（含「尾部删掉归档段必须判红」「纯注释不计入」
+    等反向对照），并已用**真实回归版本**实测判红 9 项。
+
+    通用判据：**任何「产物生成器」与「产物消费者」分居两处时，必须有一条断言锁住「产出面还在」**
+    —— 只判「产物文件存在」是假防线：文件可能是上一次的。
+
+147. **`screencap -d <Android displayId>` 对虚拟屏必然失败：必须用 SurfaceFlinger 的长整型 display token（0.14.1 块G F6 设备实测）**：
+    现象（MuMu x86_64 模拟器，Android 15 / API 35）：已建虚拟屏 `virtual-1`
+    （Android `displayId=2`、1200x675、`mHasContent=true`、屏上有前台应用）时：
+      `screencap -d 2 -p out.png`  → `Failed to take screenshot. Status: -2`（无文件）
+      `screencap -d 0 -p out.png`  → 同样 Status -2
+      `screencap -d 4619827820427265280 -p out.png`（真实屏的 SF token）→ 成功 256479 B
+      `screencap -d 11529215049621561620 -p out.png`（**虚拟屏的 SF token**）→ 成功 93785 B
+        （PNG 1200x675 RGBA，解出 984 种不同 RGB、非全黑；uid=2000 shell 亦成功）
+    真因：`screencap -d` 吃的是 **SurfaceFlinger 的 display token**（`dumpsys SurfaceFlinger` 里的
+    `Display <长整型>`，虚拟屏那份形如 `11529215049621561620` = `0xa0000000d3c7e114`），
+    **不是** `DisplayManager` 的 `displayId`（后者是 `dumpsys display` 的 `mDisplayId=2`）。
+    两者在所有现有文档与代码注释里都被当作同一个数——这就是「-d 传对了也不出图」的真因。
+    另注：`Status: -2` 与「display id 合法但 SF 认不出」同形，故错误码本身不区分这两种输入。
+
+    影响面（**已交叉核对，非仅 F6**）：`plugins/dsh-android-manage/src/index.ts:549-552` 的截图回落
+    路径就是 `adb shell screencap -p -d <screenAccessResolved().displayId>`，即传的是
+    DisplayManager 的 `displayId` ⇒ **该回落路径对虚拟屏截图在当前实现下必然失败**
+    （0.13.8 修的是「忽略 screenId」，本轮暴露的是「传了 screenId 但 id 空间错」）。
+    而 `VdisplayController` 的 `ImageReader` 通道注释明写 "not a pixel transport"（只排空帧）。
+
+    已确证的落地形态（F6 收口，见 152）：壳侧按 SF 的 `name="DSH <alias>"` 反查 token，
+    再 `screencap -d <token>`。反查命令用**收窄**形式（输出只 ~25 B）：
+      `dumpsys SurfaceFlinger | grep -E '^(Virtual Display |    name=)'`
+    实测输出（逐字）：
+      `    name="mumuscreen000"` / `Virtual Display 11529215047793762666` / `    name="DSH virtual-1"`
+    注意**不要用全量 `dumpsys SurfaceFlinger`**：本机全量 31,590 B，而虚拟屏段落在第 ~9,500 字节之后，
+    超出壳侧 capture 路径的 8 KiB inline 回传窗口 ⇒ 全量取回必然拿不到目标行、反查恒空。
+    另注意 token **每世代都变**（同一会话内实测出现过 `...46816944610`、`...49621561620`、
+    `...47793762666`），**不得缓存**，必须每次现查。
+    （本节此前写「token 数值未在公开 API 暴露、反查未跑通」——已被 F6 的设备实测推翻，就地更正。）
+
+    通用教训：**两个同名不同值域的 id 不可互换**——`-d` 的参数空间必须在代码与文档里写清是
+    「SF token」还是「DisplayManager displayId」；本仓此前三处（manage 截图、F2 正则、F5 副本）
+    都默认它是 displayId。F2/F5 的放行判据本身不受影响（它们只比对「是否是已注册虚拟屏的
+    displayId」，用于范围判定而非透传），但**透传面**必须转成 token。
+
+152. **无障碍通道对虚拟屏**取树/截屏**曾被范围门误拒**（screen-blind；F1 已修，见条末更正）：`android_screenshot {screenId:"virtual-1"}`
+     必须走 ADB 回落，SF token 反查因此是**承重路径**而非兜底（0.14.1 块G F6 设备实测）：
+     现象（MuMu x86_64 模拟器 / Android 15 / API 35，装机版 0.14.0，a11y 服务已确认 bound）：
+       `android_screenshot {screenId:"virtual-1"}` → 返回**真实屏命令词拒绝文案**
+       `android_ui_dump {screenId:"virtual-1"}`     → `无障碍取树失败：screen-out-of-scope:
+         用户当前开放屏幕范围为 virtual-only，不允许读取或操作真实屏幕`
+     真因：a11y 通道在**虚拟屏目标**上被范围门按 `real` 判定而拒（与 F1/F2 同族的 screen-blind 判定：
+     门只认「调用点是否把 screenId 传进门」，a11y 分支不解析别名 → 落到 real → virtual-only 下必拒）。
+     这同时解释了「模型反复改用 `android_shell_exec` 试 screencap」的行为：它拿到的是一条与真实
+     判据不符的拒绝（T3 修过的「文案撒谎」同族），于是整轮在错误前提下排查。
+     结论：**ADB 回落是承重路径**，故 F6 的 SF token 修法是必需的，不是锦上添花。
+     关于 a11y 侧的 screen-blind 判定——**该结论已过期，就地更正（2026-09-19 收口轮）**：
+     当时记「本轮未修，属独立遗留缺陷」已被 F1 修正取代。`bridge/index.ts:832-838` 现在**读
+     `args.screenId` 并经 `screenAccessResolved` 按目标屏判定**（不再按 op 名一刀切），
+     故 virtual-only 下指虚拟屏的 a11y op **不再被门拒**；上引「无障碍取树失败：screen-out-of-scope」
+     是 F1 修好**之前**的现场报文。
+     能力面另有新证据（同日实测，MuMu x86_64 / API 35）：虚拟屏 active 时
+     `dumpsys window windows` 出现 `WindowsForAccessibilityObserver{mDisplayId=10, mInitialized=true}`，
+     且 `uiautomator dump --display 10` 能出 1916 B 真实节点表 → **a11y 通道对虚拟屏可达**，
+     原先「对虚拟屏不可用」的推断不成立（真因是范围门，不是能力缺失）。
+     **仍未确证**：`takeScreenshot(displayId≠0)` 对**应用自建 private display** 是否成功
+     （详档 §6 U5），需引擎工具面端到端调用方可定性；`android_screenshot` 的 ADB 回落
+     仍然是已验证可用的那条路。
+
+     复验方式（本轮实际用的，可复用）：页面内 RPC 驱动一次真实模型工具调用——
+     `adb forward tcp:29225 localabstract:<webview_devtools sock>` → CDP
+     `Runtime.evaluate` 发 `fetch('/api/commands/execute', {agentId,line:'/permission danger-full-access',
+     submittedAttachments:[]})` 先提档（否则工具面被 `workspace-write` 门拒绝，会误判成 a11y 失败），
+     再 `fetch('/api/session/prompt', {request:{requestId,sessionId,mode:'queue',content:[{type:'text',text}]}})`，
+     最后拉 `files/home/.dsh/sessions/<dir>/session.v3.jsonl.zstd` 解出工具结果。
+     **两个必踩的坑**：① RPC `payload.args` 的字段名逐方法不同（`session/list` 是 `_request`、
+     `session/prompt` 是 `request`、`commands/execute` 是 `agentId/line/submittedAttachments`），
+     字段错会得 `gateway/arguments-invalid` 而不是静默失败；② 会话日志是**多帧 zstd 拼接**
+     （本机 31 帧），Node 的 `zstdDecompressSync` 只解第一帧（得 243 B），必须按 `28 b5 2f fd`
+     魔术字切帧后逐帧解；③ **WebView 在后台会挂起 fetch**（表现是 evaluate 永不返回）——
+     必须先把 App 拉到前台（`monkey -p com.dsharnessmobile.shell -c android.intent.category.LAUNCHER 1`）。
+
+153. **看门狗熔断的「永久锁存」与启动预算互斥：半死引擎下自动 undo 与自动重启双双永久失效**
+     （存量缺陷，0.14.1 修复；用户口径「引擎崩溃时自动 undo 并重启是不是失效了」的直接真因）：
+
+     现象（审计结论，非设备复现）：`WatchdogV2.planTick` 中 `tripped()` 一旦为真即返回**永久**
+     `HOLD`，只有 HEALTHY 探活或 `EngineStartFlow` 里**唯一一处** `WatchdogV2.reset()` 能解。
+     而熔断在 `effectiveFailureCount >= MAX_CONSEC_FAILURES`(12) 时打开，看门狗 5s/拍 ⇒ **60s**；
+     托管子进程的启动预算 `START_COOLDOWN_MS` 却是 **90s**。
+
+     真因：`tripped()` 的判定原本排在 boot-window 与 `undoReady()` **之前**。于是当引擎
+     **进程存活但 HTTP 永远不健康**（半死 / 插件树挂住 / 端口可连但 serve 不响应）时：
+     ① 计数器先撞满 12 拍打开熔断（60s）；② 熔断早退使 `undoReady()` **此后永不被求值**；
+     ③ undo 的两阶段闸门（`OnProbeFailure` 需先 arm、再过 `WATCH_MS`=15s 才放行）连第一步都
+     走不到。结果 = **自动 undo 与自动重启同时永久失效**，且没有任何日志（见下条观测盲区）。
+     对照：真·反复死亡（进程不存活）路径正常——第 9 拍(45s) 就在熔断(60s) 之前触发 undo，
+     故该缺陷**只在「半死」形态下显现**，这也解释了为什么它长期未被发现。
+
+     修法（两处，正交）：
+     ① `planTick` 把 `undoReady()` 提到 `tripped()` **之前** —— 配置回滚与「禁止盲目重启」是
+        两种正交恢复手段，不应互斥。熔断继续守它该守的「undo 不可用时不得盲目反复重启」；
+     ② undo 成功路径（`EngineService` 的 UNDO 分支 + `EngineStartFlow.maybeAutoUndo`）补
+        `WatchdogV2.reset()` —— undo 成功正是「引擎应当重新可用」的时点，不复位会让恢复后的
+        世代被上一次的失败计数白白锁住。
+     附带同族修复：`EngineStartFlow.kt:256` 原先传 `WatchdogV2.consecutiveFailures`（该计数在
+     DEGRADED_HTTP 下恒被清零）→ 改为 `effectiveFailureCount()`，与看门狗侧同口径；
+     DEAD 下两者相等，故真死亡路径时序不变。
+
+     不可回退的两条不变量（已写成断言）：① `DEAD` 路径第 9 拍触发 undo 的时序不得回退；
+     ② 熔断对「undo 不可用 + 真·反复死亡」的保护不得被削掉——反向对照
+     `circuitBreakerStillBlocksBlindRestartWhenUndoIsUnavailable` 与
+     `bootWindowStillGuardsALiveChildFromUndo` 锁住这两条。
+
+     防线（本缺陷能存活至今的根因是「恢复判据无防线」）：`WatchdogLadderTest` 原先**全部**
+     `undoReady = { false }`、且**没有任何用例断言 `TickAction.UNDO`**；`UndoGate` 本身零测试。
+     本轮补：`WatchdogLadderTest` 四个新用例（正向 undo、真实半死场景、熔断保护反向对照、boot
+     预算保护）+ 新增 `UndoGateDecisionTest`（把闸门四态判定抽成纯函数 `UndoGate.decide` 后直测，
+     含 WATCH/RETRY 两个窗口的边界值）。判红证据：修复前正向用例得到 `HOLD(circuit-open)`、
+     半死用例 `undoReady` 求值 **0** 次。
+
+     教训：**「防抖/熔断」类锁存与其要保护的「恢复动作」若共享同一拍决策链，必须显式排定顺序
+     并各写一条断言**——否则「保护」会静默吞掉「恢复」，而且吞掉时既不报错也不留日志。
+
+154. **默认配置下「自动 undo 是否跑过」零观测面：`LogCollector.log` 受 DevLogPrefs 闸门**：
+     `LogCollector.log` 在 `appContext == null` 时**直接 return**，而 `appContext` 仅在
+     `LogCollector.start` 内设置，后者受 `DevLogPrefs.isEnabled` 闸门且**默认 false**
+     （`MainActivity.kt` 的 `dev_log_enabled` 缺键即 false；`EngineService.onCreate` 亦按此判）。
+     后果：默认设备上 `auto-undo trigger` / `auto-undo not executed` / `restart requested` 这类
+     **看门狗叙述行全部落空**，用户无法判断自动回撤到底跑没跑——这正是「感觉自动 undo 失效了」
+     的直接来源（机制其实正常，缺的是证据面）。
+
+     修法：`UndoGate` 自带独立判据落盘 `files/undo-gate.log`（前缀 `dsh-undo-gate`，
+     **不经 DevLogPrefs 闸门**，64 KiB 轮转一代），在 arm / trigger / suppress / execute 成功
+     / execute 失败 / 各 abort 分支（CLI 缺席、list 超时、无快照）逐点留痕；同时仍双写
+     `LogCollector.log`（采集器打开时两处都有）。
+     单条取证：`adb shell run-as <pkg> cat files/undo-gate.log`。
+
+     通用判据：**「关键恢复动作是否执行」不得只依赖可开关的调试日志面**——必须有默认在产的
+     判据文件或 marker（`.undo-auto-done` 即此范式）；否则用户与排障者都只能靠「感觉」。
+156. **`java.util.stream.Stream.toList()` 是 API 34 才有的方法：minSdk 26 下真机必崩且 catch(Exception) 抓不住**：
+    现象（真机实锤，华为 NOH-AN00 / **Android 31** / 出厂 0.14.0 vc39，反馈目录
+    `报错反馈/0.14.0/20260919-125714-engine-died-during-boot/`）：`engine-died-during-boot` exit=1，
+    logcat 里 12:55/12:56/12:57 三时点、主线程与工作线程**反复**同一条硬崩溃：
+    `java.lang.NoSuchMethodError: No interface method toList()Ljava/util/List; in class Ljava/util/stream/Stream;`
+    → `at com.dsharnessmobile.shell.SnapshotFs.deletePath(SnapshotFs.kt:50)`
+    → `SnapshotTransaction.finish` → `EngineManager.applyRecovery` → `recoverInterruptedRefresh` → `EngineService.ensureEngine`。
+
+    真因：`Files.list(dir).use { it.toList() }` 里的 `toList()` 是 **Java `Stream.toList()`**
+    （Java 16 引入，`api-versions.xml` 实测 **since=34**），不是 Kotlin 的 stdlib 扩展。项目 `minSdk = 26`
+    → API < 34 设备上该接口方法不存在，抛 `NoSuchMethodError`。
+
+    **为什么比普通崩溃更严重（后果链）**：① `NoSuchMethodError` 是 **`Error` 而非 `Exception`**，
+    `deletePath` 的 `catch (e: Exception)` **根本抓不住** → 直接打穿整条恢复链；
+    ② 恢复流程**永远无法完成**，marker 保留（`recovery marker retained`）→ **快照刷新/恢复在
+    Android < 34 上永久卡死**，用户装了新 APK 也可能拿不到新基线（正是「更新后无需操作即得最新基线」
+    这一用户诉求被打破的根因之一）。
+
+    修法：改用 `Files.newDirectoryStream(dir).use { it.toList() }` —— `DirectoryStream<Path>` 是
+    `Iterable` + `Closeable`，Kotlin 的 `toList()` 是 **stdlib 扩展**（无 API 级别依赖），
+    `use` 保证关闭；语义等价（只列直接子项、不跟随符号链接、项读取失败记 onFailure 并跳过）。
+
+    **为什么既有测试拦不住（关键教训）**：JVM 单测跑在 **JDK 17** 上，`Stream.toList()` 在那儿存在
+    → 单测恒绿、设备必崩。这是「宿主机 JDK 面 ⊃ 设备 API 面」的**系统性盲区**，只能靠静态 API 守卫补。
+    新增 `ApiLevelGuardTest`（禁用清单 + 词法扫描器，已带反证：回退该行即判红）。
+
+    **同类自查（本轮全仓扫描 115 个 .kt 的结论）**：命中 1 处（即本坑），已修；其余疑点均判安全——
+    `SnapshotUserData.kt:106` 用的是 `Stream.forEach`（since=24，安全）；`SnapshotTransaction.kt:240` 的
+    `File.listFiles()` 是老 API（安全，未混入 Stream）；全仓 23 处 `.toList()` 里其余 22 处接收者均为
+    Kotlin 集合/Sequence/FileTreeWalk（stdlib 扩展，安全）。**注意区分两类 `.toList()`**——
+    用 grep 全仓搜 `.toList()` 会命中大量安全用法，不可据此改动。
+
+    **扫描器自身的坑（本轮自伤一次，值得记）**：写静态守卫时，若用「本行是否含块注释起始符」判注释，
+    会被 `ConfigTransfer.kt` 的 MIME 字面量（图片通配、任意类型通配）**误入块注释态**，静默丢掉
+    3273 行代码（占全仓 18%，EngineManager/BrowserHost/NotifyCenter 成片漏扫）→ 防线大面积假绿。
+    正确做法是**真正的词法扫描**：先剥字符串、再剥注释（顺序不可颠倒），并断言扫描面覆盖量防止回归。
+
+157. **公开仓泄漏面：设备序列号以「测试注释/夹具」形态随**新文件**混入（0.14.1 P0-c 实锤）**：
+    现象：`app/src/test/.../ShellOpsScopeTargetTest.kt` 的注释里写了「设备实测夹具（`emulator-<4 位端口号>` /
+    Android 15 / API 35）」，而该文件是**本轮新增的 untracked 文件**（`git show HEAD:<path>` 不存在），
+    会随 PR 进公开仓 `kelai141/dsh-mobile-apk`。用户硬要求：设备拓扑（serial / boot_id / 本机路径）
+    **只能进协调仓 `docs/`，绝不进公开仓**（`docs/DEVICE-TOPOLOGY-PRIVATE.md` 首段为权威口径）。
+
+    真因：序列号写在「设备实测夹具」这类**注释**里，形态上像技术细节、评审时极易放过；而它在
+    **HEAD 中零出现**——「HEAD 零命中」不是安全证据，因为**新增即引入**：
+    泄漏判据必须是「会不会进提交面」，不是「历史里有没有」。
+
+    修法：统一写**仓内既有惯例的抽象表述**「MuMu x86_64 模拟器 / Android 15 / API 35」；
+    端口 `127.0.0.1:16384` / `:16416` 是既存公开约定（`shell-ops.test.mjs` 等已在用），可保留；
+    `emulator-55xx` 形态的 serial、boot_id、本机绝对路径一律不写。
+    **本文自己就是反例**（本条初稿把 serial 逐字写进了公开仓，自查时才发现）——记述这类缺陷时
+    必须用占位式（`emulator-<端口号>`）而不是逐字复述，否则「讲泄漏」的文档本身成为泄漏源。
+
+    复验（只扫**会进提交的面**，别扫本地产物）：
+      `git ls-files`（已跟踪）∪ untracked 且**未被 gitignore**（`git check-ignore` 不命中），
+      再 grep 该 serial 形态。**不要**对全树 `Get-ChildItem -Recurse`：`.kotlin/errors/`、
+      `.deploy-tmp/`、`build/` 这类本地产物会淹出数十处噪声（本轮实测 87 处），把真泄漏埋掉。
+
+    配套铁律 5：**逐字节镜像（robocopy）前先确认源侧已脱敏**——镜像会把源侧的序列号原样搬进公开仓。
+    本轮 `plugins/dsh-android-manage/**` 的镜像就曾把 coord 侧的 serial 带进 apk 工作树
+    （3 文件，其中 `test/a11y-routing.test.mjs` 是 TRACKED），故正确顺序是「先脱敏源侧 → 再镜像 →
+    再校验双仓逐字节一致且公开仓 serial 命中为 0」。
+    gitignore 的 `plugins/*/lib/` 会覆盖 `lib/*.revbak` 等未跟踪产物，那类不入库、无需处理。
+
+158. **补偿动作（catch 里的回滚/清理）会掩盖真因：`deletePath` 逐项容错 → move 到非空目录 → 次生异常取代原始异常（0.14.1 升级路径 P0 实测）**：
+    现象（16384 覆盖安装 0.14.0 → 0.14.1）：`.snapshot-transaction` 永久停在 `phase=SWAPPING`（27 分钟不收敛，
+    AGENTS 窗口 8–12 分钟），残留 `.snapshot-previous` 922MB + `.snapshot-stage` 160MB，**live 插件树只剩 1/10**
+    （`@dsh-android/` 仅 `dsh-android-browser`）→ `dsh-host-web-compat` 缺席 → polyfill 未注入 →
+    页面 `Failed to load plugins: … Iterator is not defined`。引擎活着、页面能开，**但插件面整体不可用**——
+    比「全旧」或「全新」都糟，因为没有任何用户可见的「升级失败」提示。
+    真因（栈已定位到行）：`SnapshotTransaction.mergeProfiles` 的 catch 块旧实现是裸三行
+    `deletePath(liveProfiles); move(previousProfiles, liveProfiles); throw t`。而 **`SnapshotFs.deletePath`
+    是逐项容错的**（删不掉的子项记 `onFailure` 后继续遍历）→ 它可能**正常返回而目录仍非空** →
+    紧接着 `move` 到非空目标抛 `FileSystemException: … Directory not empty`。该次生异常**取代了 `throw t`**，
+    于是**原始异常（真因 + 栈）被彻底掩盖**：logcat / 日志里只剩 `Directory not empty`，排障者拿不到真正的失败原因。
+    连带：`EngineManager.refreshSnapshot` 的 rollback 走同一路径也失败 → 走
+    「rollback failed; recovery marker retained」→ marker 永久留存、**每次启动重试、每次同样失败**（实测重启 3 次仍 SWAPPING）。
+    修法：① **补偿一律不得取代真因**——补偿用 `try/catch` 包住，次生错误 `addSuppressed` 到原异常上、
+    始终返回/抛出原异常；② **删除失败必须有兜底**——目标仍非空时不再 move 到非空目录，改为把目标
+    **改名挪开**（改名只动父目录项、不递归子项，是文件系统层面最后可用的手段）。
+    复验：行为级单测 `mergeCompensationNeverMasksTheOriginalFailureAndRecoversTheBackup`（构造 previous 缺席
+    使补偿必然失败 → 断言交回的是**原始异常**且次生错误进 suppressed）；反证把 `addSuppressed` 换成
+    `throw compensation` → 判红并打印
+    `expected same:<IllegalStateException> was not:<NoSuchFileException …>`。
+    **为何极易漏测**：全新安装（`uninstall` → `install`）**不触发**该路径，只有**覆盖安装**才走 `swap + mergeProfiles`——
+    必须专门跑升级路径。
+    配套教训（诊断面）：`refreshSnapshot` 只回布尔值，调用方只能写「返回 false」，导致 `boot-fail.log` 出现
+    `error=none(boolean-failure-path)` 这种**不可排障**的形态（用户反馈一「日志与事实不符」的同形复发）。
+    故「布尔返回值」的失败 API 必须另设**真因出口**（本例 `EngineManager.lastRefreshFailure`），否则等于没日志。
+159. **「修了但没修」：两处写同一个裸字符 = 恒等替换，而单测类路径上的另一份 org.json 让断言假绿（0.14.1 执行地图排查实锤）**：`jsString` 号称把 U+2028/U+2029 转成 `\uXXXX` 文本，实际 `AndroidBridge.kt:420-422` 的 `.replace(<裸 U+2028 字符>, "\u2028")` 在 Kotlin 里两侧编译成同一个裸字符 → 返回原串；而 JVM 单测类路径上有 `org.json:json`（其 `quote()` 自己会转义行分隔符），断言「结果里没有裸字符」依然通过 → **生产没修、单测绿**。真因：① 源码里 `\\u2028` 与 `\u2028` 只差一个反斜杠，写文件时反斜杠被折叠过多次（本仓有前科）；② 断言测的是「结果形态」而不是「替换发生了」，两种实现都能满足。修法：方向定型为「裸字符 → 转义文本」，抽纯函数 `escapeLineSeparators(quoted)`；单测直接判形态（`assertNotEquals(raw, escaped)` + 期望 `a\u2028b` 的转义文本形态）再叠加端到端断言。复验：`./gradlew :app:testDebugUnitTest --tests "com.dsharnessmobile.shell.BrowserHostNavigationPolicyTest"` 9 例 0 失败。**教训：被测函数依赖第三方实现时，只有纯函数面的形态断言才是真判据。** grep `escapeLineSeparators`。
+160. **JS 字符串字面量里的 `\w`/`\d` 有被吞风险：正则静默失效，门禁「在跑」其实什么都没查（0.14.1 建执行地图门禁时实锤）**：`new RegExp('([\w.@-]+\.(?:kt)):(\d+)')` 落盘后反斜杠消失，正则变成要求字面 `w` → 锚点一个都匹配不到，而 `--self-test` 反而更容易全绿（「没有命中」被当成「没有违规」）。修法：**字符串里完全不写反斜杠**——`\w` 用 `A-Za-z0-9_`、`\d` 用 `[0-9]`、`\.` 用 `[.]`；自检必须带「正例必须命中、反例必须不命中」的判别样例。复验：`node scripts/check-code-map.mjs --self-test`（8 例全绿）。grep `PATH_GROUP`。
+161. **把「尚未探测」渲染成「未就绪」= 让模型放弃一个可用能力（0.14.1 设备实测，缺陷 A1）**：用户会话里状态区显示「Shizuku 特权通道：已授权」且虚拟屏已建成，而同一时刻工具面 `android_capabilities` 报「Shizuku 特权通道：未就绪（**虚拟屏建屏需要它**）」。模型的下一步推理逐字是「Shizuku isn't ready, which means I can't create a virtual display」——**它据此绕开了当时完全可用的路径**。
+    真因：工具面读 `svc.shizukuReady()` → `controlQueue.stats().caps.shizuku`，而 `caps` 只随**执行过的控制 op 的回执信封**抵达（`ControlQueue.noteShell` 的唯一调用点在 `POST /api/android/ui/result`）；`android_capabilities` 自己不入队 ⇒ 会话首次询问它时 caps 必然缺席，旧实现把这个「缺席」折成 `false` 并渲染成「未就绪」。壳侧真值一直是活的（`VdisplayController.status → ShizukuTransport.status` 每次重探）。
+    修法：**三态**（`true` 就绪 / `false` 已实测未就绪 / `undefined` 尚未探测到）+ caps 缺席时引擎补探一次（`AndroidPrivilegeService.shizukuChannelProbed()`：TTL 内只打一发、探测失败保持 undefined、绝不降级成 false；补探用 `vdInfo`——它**不在** `TIER_REQUIRED_OPS` 内，注释明写「读面/管理面不纳入」，故无需会话档位）。三分文案里「未知」必须给出**可执行动作**（直接试建屏），不得劝阻。
+    复验：`node --test plugins/dsh-android-bridge/test/{capability-gate,shizuku-caps-probe}.test.mjs`；反证是「探测失败必须仍为 undefined」与「三态必须是三条不同文案」。grep `shizukuChannelProbed`。
+162. **两份「会读设备屏的 op」清单漂移 → 缺省范围下大面积工具不可用，而两侧都自认正常（0.14.1，缺陷 B4/B6）**：引擎 `screen-scope.ts` 的 `REAL_SCREEN_CONTROL_OPS`（8 条）与壳侧 `DeviceControlService.REAL_SCREEN_OPS`（**11** 条）不一致，多出的 `state`/`webSnapshot`/`webAction` 是 `control-policy.ts` 的 `A11Y_OPS`（**后端能力**清单）的陈旧拷贝，与「是否读设备屏」无关：`state`（`handleState`）只回内存快照代次/失效标记且**签名不收 args**，`web*` 的目标是壳自有 WebView。
+    后果链：这三条都不带 `screenId` ⇒ 壳侧范围门取默认 `real` ⇒ `virtual-only`（**缺省即此**，fail-closed）下恒拒。于是 `android_web_dump`、`android_ui_click`/`android_ui_input` 的 WebView ref 路径、以及点击**生效校验**（`verifyClick` 读 `state`）在缺省范围下一律报 `screen-out-of-scope`——用户看到的「点击成功但校验被阻止」「virtual-only 和不存在一样」有一半出自这里。
+    修法：**壳侧收敛到 8 条**（不是把引擎扩到 11——那只会把过度拦截搬进引擎层），并新增 `scripts/check-op-registry-parity.mjs` 把两份清单锁成逐条相同（跨语言契约，不是实现细节）。复验：`node scripts/check-op-registry-parity.mjs`（自证含「壳侧多 3 条」这个原形反例）。grep `REAL_SCREEN_OPS`。
+163. **工具声明了它执行不了的参数：`android_act_input` 的 `screenId` 永远无法兑现（0.14.1，缺陷 B1）**：该工具在参数表里声明 `screenId`（并因此进 `SCREEN_ACTIONS` 被范围门裁决），执行面却是 `input <verb> <args>`——`/system/bin/input` **没有屏幕维度**；范围门对这条命令在 `bridge/index.ts` 直接早退（命令里没有任何目标屏 token，无从核对注册表）恒判拒绝。模型于是反复重试一个不可能成功的参数。
+    同族第二种形态：`android_ui_tree` 收 `screenId` 但只有 `uiautomator dump` 一条路，而 `uiautomator` 家族的目标屏参数被判为「无」⇒ 恒拒（本仓设备读数曾把 `uiautomator dump --display 10` 当成功证据，见坑 165）。
+    修法：act_input 目标为虚拟屏时改走既有 `vdInput`（`input -d <displayId>`，argv 原生构造，text 作单个 argv 元素直传故不受 ASCII 白名单限制）；`ui_tree` **删掉** `screenId` 参数（它本就只能读默认屏），范围门据 `requested=undefined` 判 real，virtual-only 下给出「当前范围不含真实屏 + 改用 android_ui_dump」的可执行文案。
+    复验：`node --test plugins/dsh-android-manage/test/a11y-routing.test.mjs`（含「虚拟屏路径不得再拼真实屏 input 命令」「不带 screenId 的原路径不得被改坏」「壳侧拒绝不得谎报成功」）。**判据：工具声明的每个参数都必须有一条能兑现它的执行路径。**
+164. **`am` 退出码 0 ≠ 落在目标屏；且 16 KiB stdout 上限会把虚拟屏那一段吃掉（0.14.1，缺陷 C1）**：跨屏拉起修复前只判 `result.optBoolean("ok")`（=走 Shizuku UserService 的 `Process.exitValue()==0`）就报「已拉起到 virtual-N；真实屏前台不变」。设备实测（MuMu x86_64/API 35）：目标包已在真实屏有 task 时，`am start --display 2 -n <comp>` **仍回 0**，只多打印一行 `Warning: Activity not started, intent has been delivered to currently running top-most instance.`——这句话在成功分支被丢弃（只读 `ok`，不读 `stdout`）⇒ **假成功**。
+    第二个坑在取证手段本身：回读要用 `dumpsys activity activities`（42 KB），而 `ShizukuUserService.exec` 的 `OUTPUT_LIMIT = 16 * 1024` 且**读到上限就 break**；display 段按号**递增**排列 ⇒ 截断掉的恰好是虚拟屏那一段，回读会得出**反向错误结论**。修法：服务端先过滤（固定字面量 `dumpsys activity activities | grep -E '^ *Display #|ActivityRecord'`，实测 1,969 B），再按 `Display #<n>` 分组 + `ActivityRecord{` 行 + `包名/` 精确前缀解析（**不得**用 Task 行的 `A=…:pkg` affinity 判落点）。
+    三态如实回报：包在目标屏 → `vd-launched`；只在别的屏 → **`ok=false` + `vd-launch-denied`**（带 `landedDisplayIds`）；读不到 → `vd-launched-unverified`（明写「不构成落点证明」）。复验：`./gradlew :app:testDebugUnitTest --tests "com.dsharnessmobile.shell.VdisplayLaunchLandingTest"`（6 例，样本取自真实设备输出）。grep `displaysRunning`。
+165. **`uiautomator dump --display <n>` 会被收下但不生效：本仓曾把真实屏的树当虚拟屏证据（0.14.1 判定性实测）**：`known-gaps.md` 曾记「`uiautomator dump --display 10` → 1916 B 真实节点表」并据此讨论 a11y 可达性。2026-09-19 判定性实测（虚拟屏 `virtual-1` displayId=2、其上已放 Settings 且 `dumpsys` 确认 task 在 display 2）：无参 dump / `--display 2` / `--display 0` 三者输出**逐字节相同**（7799 B、19 节点、全是真实屏上的应用），即 `--display` 对 uiautomator **无效**——它恒 dump 默认屏。
+    结论：`screen-scope.ts` 把 `uiautomator` 家族的目标屏参数判为「无」**实质正确**，不得放开；要修的是上层工具面（见坑 163）。**教训：把「命令没报错」当成「参数生效」是同一类误读——判定性实测必须让两个取值产生可区分的输出**（彼时虚拟屏是空的，空 vs 满本可区分，却没有做这一比）。
+166. **从 Git Bash 跑构建链会触发「假红」：子进程 `tar` 变成 MSYS 版，把 `D:\…` 当远端主机（2026-09-19 两次打包实锤）**：在 Git Bash 里 `pwsh -File scripts/build-apk-013.ps1 -Fast`，PATH 里 `/usr/bin` 在前的 `tar` 被注入完整性门禁继承，于是 `tar -tf D:\coding\...\snap-final2.tar.xz` 被 GNU tar 解析成「主机 `D`」，报 `tar: Cannot connect to D: resolve failed` → 门禁判「注入产物成员不完整」并拒绝打包。**这不是缺陷，是环境**：同一棵树在 PowerShell 里跑全链是绿的。
+    修法（二选一）：① 把构建链放在 **PowerShell** 里跑（推荐）；② 必须在 Git Bash 里跑时，显式把 Windows 目录提前：`PATH="/c/Windows/System32:/c/Windows:$PATH" pwsh -File scripts/build-apk-013.ps1 -Fast`（这样 `tar` 解析到 Windows bsdtar）。
+    同族陷阱（同一轮踩过，一起记）：`robocopy` 的参数 `/MIR /XD` 会被 MSYS 路径转换吃掉（报 `ERROR 2 ... plugins$p\`，rc=16 一文件未拷）→ 加 `MSYS_NO_PATHCONV=1` 且**用正斜杠**写源/目标（`robocopy "plugins/$p" "dsh-mobile-apk/plugins/$p" /MIR /XD node_modules`）。**判据：打包失败先看报错是不是「路径/工具被解释错」，再怀疑代码——本轮两次都不是代码问题。**
+167. **渐进披露的解锁前置对模型不可见：模型如实报「工具不存在」，用户看到的是「工具全不可用」（2026-09-19 设备实测，用户第三问的另一半真因）**：`capability gate` 在 `agent/created` 时把 `DEVICE_TOOLS` 全部掩蔽，只有模型**主动调用 `android_capabilities { group }`** 才逐组解锁；而组锁存在内存里 ⇒ **引擎每次重启（重装/崩溃重启/换版本）都重置**。实测现场（MuMu x86_64 / MiMo 2.5 / 新装包）：用户（与套件）说「把应用拉到虚拟屏上」，模型的回答逐字是
+      - 「DONE — `android_app_launch` **不在当前可用工具列表中**，无法执行。」
+      - 「DONE — but the required tool (`android_shell_exec` or `android_ui_click`) **is not available in my current environment**, so the click could not actually be executed.」
+      **它没说谎**：那一刻工具列表里确实没有 `android_*`。用户看到的现象因此是「各种工具在 virtual-only 状态和不存在一样完全不可用」——与范围门、通道状态都无关，纯粹是**解锁前置没有被工具面暴露出来**。弱模型（本项目专用测试模型 MiMo 2.5）不会自己去读 skill 目录猜出这一步；强模型可能靠 `android_capabilities` 的存在硬撑过去——这正说明「拿强模型验收」会掩盖该缺陷。
+      当前处置（不改设计、先让验收可跑）：设备套件在任务文案里显式写明「先调 android_capabilities 解锁 phone 与 virtual-display 组」这个**环境前置**（`verify-screen-scope-matrix.mjs` 的 `UNLOCK_PRECONDITION`）。
+      **未修的真缺口**：解锁应有**可发现性**——候选修法：① facade 工具的描述里直写「设备工具默认掩蔽，先调我」；② 首次 `agent/created` 时不掩蔽、改为按首次调用自动解锁；③ 在工具列表里保留一个不可调用的占位说明。三条都要另做取舍（涉及 wire 预算与「模型第一眼看不到设备工具」的原设计意图），故本轮只登记，不擅自改。
+168. **「只有 ADB / 纯 Shizuku」下控件树曾经只有一条烂路：`android_ui_tree` 只回 XML 文件路径（2026-09-19 用户实报 + 本轮实修）**：用户口径「猜像素就是折磨」，要求 `android_ui_tree` 做到**与无障碍同等体验**。修前实测该工具的成功返回只有 `treeXmlPath`（一个本地文件路径）+ 一句「控件树已导出」，**既不产出 ref、也不写 `uiCache`**，因此模型拿到它之后**无法用 `android_ui_click/scroll/input` 按 ref 操作**，只能自己读 XML 或猜像素——而它的描述又写着「【ADB 专属 / 兜底】……日常优先 android_ui_dump」，在纯 Shizuku（无障碍关）下 `android_ui_dump` 恒不可用，等于把模型支去撞墙。
+    真因是**接线缺失，不是能力缺失**：uiautomator XML 的解析器与剪枝/落明细/写缓存管线**早就存在**（`plugins/dsh-android-manage/src/ui-tree.ts` 的 `parseUiTreeXml`/`checkUiTreeParse`/`pruneNodes`），只是 `android_ui_dump` 的 ADB 回退在用、`ui_tree` 没用。
+    修法（单一来源，禁止两份实现）：把那条管线抽成 `uiautomatorTree()`，**两个工具共用**；schema 抽成 `TREE_SCHEMA`、行渲染抽成 `nodeListLines()`，`treeOutput()` 两处共用——「同等体验」因此是**构造上成立**的，不靠两份代码保持同步。描述改为「ADB / 纯 Shizuku **主路**」，明写「无障碍未开启时这就是控件树的唯一来源」与「只读默认屏（虚拟屏走别的路）」。
+    判据（可判红，`plugins/dsh-android-manage/test/ui-tree-parity.test.mjs`）：① **同形**——两工具的 `output.schema` 逐字段深度相等（漂移即回归）；② **可用**——无障碍关时 `ui_tree` 返回节点数组、`count===nodes.length`、带 `detailHandle` 与每节点中心坐标；③ **可操作**——清单里的 ref 经 `android_ui_click` 必须恰好注入一次 `input tap <cx> <cy>`（模型只报 ref，**像素由引擎算**）。
+    实现坑（同轮踩过）：共享 output 一旦把 schema 根放宽为 `json`，`render` 的参数就会被上下文推断取代——**独立 const 的 render 拿不到上下文类型会退化成隐式 any**，参数显式写成 `unknown` 才逆变兼容；另外 `schema` 抽取时别把外层的 `schema:` 包装一起套进去（运行时会报 `UNSUPPORTED_SCHEMA`，而 TS 因为 `as unknown as` 完全不报）。
+169. **通知消费只靠一次文件事件：事件一丢就永久停摆，而「另一个消费者还活着」把现场伪装成正常（0.14.1 真机实报 + 本轮实修）**：真机（V2425A / arm64 / SDK 36）上用户报「消息有但不弹横幅；必须划到后台才收到」「悬浮球长按查看汇报没有内容」。取证三份文件给出**同一个**形状：`files/home/.dsh/.notify.ndjson` 从 8810 长到 9402 B（引擎确实写出了 `kind=report` 行），`shared_prefs/dsh-notify.xml` 的 `notify.offset` **冻在 8810**，`files/notify-responder.log` 里没有任何 `kind=report` 的投递记录。即「文件在长、指针不动、一条也不投」——而同一时刻 `WatchdogV2` 的 `notify-debug.log` 还在按时更新，于是「通知面整体是活的」这个假象成立。
+    **真因（结构性）**：`NotifyStore.drain` 的触发点只有两个——`FileObserver` 的事件回调与进程启动时那一次；`NotifyStore` 内**没有任何 Timer/Handler/协程**。一次事件丢失（watcher 构造失败被吞、落盘方式换成「临时文件 + rename」而位集只有 `MODIFY|CREATE`、目录 inode 被换掉导致 inotify 监视静默失效——快照重解包就会重建 `files/home/.dsh`）即**永久停摆**；而 poll 驱动的 `WatchdogV2.consumeTaskDoneMarkers` 照常工作，正好解释「旧信道还活着、新信道死了」的不对称。
+    **可控复现（无需等真机复发，MuMu x86_64 实测）**：给同一个 inode 建第二个目录项，从那个名字追加——事件名不是 `.notify.ndjson`，白名单直接忽略，而文件长度确实在长：
+    ```bash
+    S=127.0.0.1:16416
+    adb -s $S shell "run-as com.dsharnessmobile.shell ln files/home/.dsh/.notify.ndjson files/home/.dsh/.notify-inject"
+    printf '%s\n' '<一条真实的 report 行>' | adb -s $S shell "run-as com.dsharnessmobile.shell sh -c 'cat >> files/home/.dsh/.notify-inject'"
+    # 20 s 后：文件 8733 -> 9064 B，而 notify.offset 仍是 8733，探针零 dispatch  ← 复现成功
+    ```
+    修法（三条互补，缺一条都不够）：① **兜底驱动**——`NotifyStore.drainTick` 挂到**既有看门狗 tick**（`EngineService` 每 5 s 一拍、持唤醒锁，且是现场唯一被证实还活着的消费者），不自起 Handler（多一处生命周期 = 多一处和事件一起死的东西）；② **监听位扩到 `MODIFY|CREATE|CLOSE_WRITE|MOVED_TO|DELETE|MOVED_FROM`** + 白名单命中 `FILE_NAME`/`ROTATED_NAME`/`path==null`；③ **`drain` 加锁 + 先投递再推进偏移**（三个驱动者并发跑同一份 offset 会重复投递——现场实测同 id 80 ms 内被投 5 次；先推进再投递则会静默丢）。
+    取证面同时补齐：每行消费记 `notify drain trigger=<start|tick|watch:名字> … offset a->b len=n`，tick 每 5 分钟记一行 `notify tick alive ticks= lag= watchEvents= watchEventAgeMs=`——**「文件在长但 watchEventAgeMs 一直很大」就是 watcher 失聪**，这一对读数把下次复发的定位从「三份文件对表」压到一行。
+    判据（可判红，`NotifyConsumptionStallTest.kt` 五例 + `NotificationContractTest.消费必须有事件之外的兜底驱动`）：①监听位必须含 `MOVED_TO`/`CLOSE_WRITE`（旧位集必红）②`drainStep`/`advanceOffset` 的 Skip/Rotated/Read 与单调性③同 id 同内容窗口内判重复、内容变/窗口外/换 id 不判④尾部倒读只取最后一条 report 行且丢弃被截断的首行；**外加源码级断言「兜底入口写了必须真被 tick 调用」**——防「兜底写了没人调」这类新型假绿。
