@@ -44,8 +44,8 @@ const GATES = [
   // #222：所有 mobile-owned /api exact/prefix 路由必须在登记表中，并有本地 auth guard 或窄公开白名单。
   { script: 'check-api-route-auth.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
   { script: 'check-snapshot-fingerprint.mjs', ciApk: true, ciCoord: false, needsSnapshot: true },
-  { script: 'check-tool-output-schema.mjs', ciApk: true, ciCoord: true, needsSnapshot: false },
-  { script: 'check-protocol-v2.mjs', ciApk: true, ciCoord: true, needsSnapshot: false },
+  { script: 'check-tool-output-schema.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
+  { script: 'check-protocol-v2.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
   { script: 'check-control-ops.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
   // 「会读设备屏的 op」两份清单的跨语言对等（0.14.1）：引擎 `REAL_SCREEN_CONTROL_OPS` 与壳侧
   // `REAL_SCREEN_OPS` 必须逐条相同。设备实测缺陷 B4 的根因就是它们不一致——壳侧那份是
@@ -81,7 +81,7 @@ const GATES = [
   // 模型面工具 wire 预算（0.14.0 §4.1 渐进披露）：注册集（解锁后上限）+ 初始可见集（模型第一眼）
   // 双口径。掩蔽组名单从 capability-gate 实现导出，门禁不另写一份（防清单漂移假绿）。
   // 离线可跑（真跑各插件 apply()，只需 plugins/*/lib 构建产物）-> CI 与两条链都跑。
-  { script: 'check-tool-surface-budget.mjs', ciApk: true, ciCoord: true, needsSnapshot: false },
+  { script: 'check-tool-surface-budget.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
   // 工具名「承诺 vs 实现」（0.14.1）：指引里提到的 `android_*` 工具名必须真有声明位。
   // 设备实测缺陷 B2 的原形是 `android_vdisplay_input` 被三处模型可见文案与 Skill 文档承诺，却从未
   // `defineTool`——模型照指引调用只拿到 `unknown tool`，且会把这当成自己参数写错而反复重试。
@@ -91,7 +91,7 @@ const GATES = [
   // 路径调用**（不在 GATES、不在接线断言、两条链与两仓 CI 均无引用）——7 个插件的 34 个测试文件
   // 全部没人跑，「已新增该门禁」的声明与事实不符。此处接入声明集合即同时被两条构建链与两仓 CI
   // 覆盖（check-gate-skips.mjs 会断言声明集合被两条链逐项调用）。离线可跑，只需 plugins/*/lib。
-  { script: 'check-plugin-tests.mjs', ciApk: true, ciCoord: true, needsSnapshot: false },
+  { script: 'check-plugin-tests.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
   // 冷启动预算 C1~C6（0.14.1 块F P0-2）：把口径从「LISTEN 达标」换成「首个 HTTP 响应 + 无 >2s
   // 同步块」——只判 LISTEN 会系统性假绿（设备实测 LISTEN 2981ms 达标而 compose 2795ms 挡住首个响应）。
   // 判据全部为数值算术断言 + 自带反向对照（--self-test）。
@@ -113,7 +113,7 @@ const GATES = [
   // 浏览器语法下限（0.14.1 块C G-1）：老设备（WebView <94）白屏的产物级真因——入口 chunk 带
   // ES2022 类静态块 `static{}`，解析期语法错误 → 整模块不执行 → 纯白无字。判据为**真实解析器 AST**
   // + esbuild 双 arm 逐字节差分（禁 grep 文本在场），自带四向自证。真检需快照/构建树，CI 跑 --self-test。
-  { script: 'check-browser-syntax-floor.mjs', ciApk: true, ciCoord: true, needsSnapshot: true },
+  { script: 'check-browser-syntax-floor.mjs', ciApk: true, ciCoord: false, needsSnapshot: true },
   // 构建并发上限（0.14.1 用户拍板的系统级约束）：构建期压缩/解压不得吃满全部逻辑核（原为 `xz -T0`
   // = 16 线程），否则开发机被撑满 → MuMu 模拟器卡顿/系统不稳（「模拟器优先」是铁律 2，两者常并行）。
   // 判据 = 上限来自单一常量且默认 8 + 构建链真的消费它 + 设备侧同受限 + 注释不自伤。离线可跑。
@@ -162,14 +162,25 @@ const POSITIONS = [
   // 归属口径：ci-coord 只见于协调仓布局（apk 自包含树里该文件就是本仓自己的 workflow，
   // 拿它去满足 ciCoord 集合等于自我循环，故布局缺席时**显式 SKIP 并计数**）。
   { id: 'ci-coord', file: '.github/workflows/pr-gate.yml', gates: CI_COORD_GATES, kind: 'gate-names', onlyWithCoordLayout: true },
-  { id: 'ci-apk', file: 'dsh-mobile-apk/.github/workflows/pr-gate.yml', gates: CI_APK_GATES, kind: 'gate-names' },
+  // apk 侧两态：协调仓布局看 `dsh-mobile-apk/.github/workflows/pr-gate.yml`；apk 自包含布局看本仓同名文件
+  // （resolveRel 已处理）。协调仓布局下 apk 树可能不在场（净检出/自包含 CI）——那时**显式 SKIP 并计数**，
+  // 绝不回落到本仓自己的 workflow 去满足 ciApk 集合（那是自我循环，会让断言失去判别力）。
+  { id: 'ci-apk', file: 'dsh-mobile-apk/.github/workflows/pr-gate.yml', gates: CI_APK_GATES, kind: 'gate-names', needsApkTree: true },
   { id: 'release-coord', file: 'scripts/build-release.ps1', gates: ALL_GATES, kind: 'aggregator' },
   { id: 'release-apk', file: 'dsh-mobile-apk/scripts/build-release.ps1', gates: ALL_GATES, kind: 'aggregator' },
 ]
 const coordLayout = existsSync(join(ROOT, 'dsh-mobile-apk'))
+/** apk 自包含布局判定：只有 apk 仓有 app/src/main/AndroidManifest.xml（协调仓没有）。 */
+const apkSelfContained = existsSync(join(ROOT, 'app', 'src', 'main', 'AndroidManifest.xml'))
 for (const pos of POSITIONS) {
   if (pos.onlyWithCoordLayout && !coordLayout) {
     console.log('SKIP(#1) ' + pos.id + ' 门禁集：本布局无协调仓侧 workflow（apk 自包含树）；跨仓面由链上守')
+    continue
+  }
+  if (pos.needsApkTree && !apkSelfContained && !existsSync(join(ROOT, 'dsh-mobile-apk', '.github', 'workflows', 'pr-gate.yml'))) {
+    // 协调仓布局且 apk 树不在场：`.github/workflows/pr-gate.yml` 会解析到**本仓自己的** workflow，
+    // 拿它去满足 ciApk 集合是自我循环 ⇒ 显式 SKIP 并计数（apk 侧由 apk 仓 CI 自检，链上另有全量）。
+    console.log('SKIP(#1) ' + pos.id + ' 门禁集：协调仓布局下 apk 树不在场（自包含 CI）')
     continue
   }
   const text = readOrFail(pos.file)
