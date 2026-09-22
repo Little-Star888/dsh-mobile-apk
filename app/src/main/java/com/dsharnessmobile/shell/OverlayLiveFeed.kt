@@ -180,23 +180,40 @@ class OverlayLiveFeed(private val svc: OverlayService) {
   }
 
   /** 工具参数 JSON → 一行概览（bash=命令 / search=查询 / read·edit=路径；兜底取首个字符串值）。 */
-  private fun toolSummary(argsJson: String): String {
-    if (argsJson.isBlank()) return ""
-    return try {
-      val o = JSONObject(argsJson)
-      val key = listOf("command", "query", "pattern", "file_path", "path", "file", "url", "cmd")
-        .firstOrNull { o.has(it) && !o.optString(it).isBlank() }
-      val raw = when {
-        key != null -> o.optString(key)
-        else -> {
-          var first = ""
-          for (k in o.keys()) { val v = o.opt(k); if (v is String) { first = v; break } }
-          if (first.isBlank()) o.toString().take(40) else first
-        }
+  private fun toolSummary(argsJson: String): String = toolSummaryOf(argsJson)
+}
+
+/**
+ * 工具参数 JSON → 一行概览（**顶层纯函数**，JVM 可直接测）。
+ *
+ * 为什么抽出来（0.14.1 批 3 / P3-4）：旧实现里这一行是 `take(24)` 硬截断，于是
+ * `rm -rf /data/loca` 这样被截断的命令**看起来是一条完整命令**——用户据此判断
+ * 「AI 正在跑什么」会得出错误结论（审查档 §4.4）。截断现在必须自己说出来（附 `…`），
+ * 而「必须附省略号」这条判据只有在纯函数上才可断言（形态类缺陷靠设备实报太贵）。
+ *
+ * 顺序即取值优先级：先按已知参数名（命令/查询/模式/路径…）取，再兜底取首个字符串值，
+ * 都没有就退化成整个 JSON 的截断形态。
+ *
+ * @param argsJson - 工具调用的参数 JSON 串。
+ * @param max - 概览最大字符数（含省略号）。
+ * @returns 单行概览；参数为空串时返回空串（调用方据此不渲染概览行）。
+ */
+internal fun toolSummaryOf(argsJson: String, max: Int = 24): String {
+  if (argsJson.isBlank()) return ""
+  return try {
+    val o = JSONObject(argsJson)
+    val key = listOf("command", "query", "pattern", "file_path", "path", "file", "url", "cmd")
+      .firstOrNull { o.has(it) && !o.optString(it).isBlank() }
+    val raw = when {
+      key != null -> o.optString(key)
+      else -> {
+        var first = ""
+        for (k in o.keys()) { val v = o.opt(k); if (v is String) { first = v; break } }
+        if (first.isBlank()) o.toString() else first
       }
-      raw.replace(Regex("\\s+"), " ").trim().take(24)
-    } catch (_: Exception) {
-      argsJson.replace(Regex("\\s+"), " ").trim().take(24)
     }
+    UserCopy.truncateWithEllipsis(raw.replace(Regex("\\s+"), " ").trim(), max)
+  } catch (_: Exception) {
+    UserCopy.truncateWithEllipsis(argsJson.replace(Regex("\\s+"), " ").trim(), max)
   }
 }

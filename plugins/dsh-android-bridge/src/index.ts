@@ -799,7 +799,7 @@ export class AndroidPrivilegeService {
    *
    * 0.13.5 W4 重构（PRD-0.13.2 §3.3 B3）：授权面从「ADB 三道人门」改为
    * **两条等价通道，无障碍优先**——
-   *   - 无障碍通道：系统设置里开启「DSH 设备控制」一次即成立（设备控制面 dump/click/input/scroll）；
+   *   - 无障碍通道：系统设置里开启「DeepCode 设备控制」一次即成立（设备控制面 dump/click/input/scroll）；
    *   - ADB 通道：完全访问 + 允许访问开关 + 无线调试配对（降级为高级/脚本通道：shell 执行、
    *     原图截图、系统面 pm/dumpsys）。
    * 两者都要求会话档位 danger-full-access（隐私敏感面不因通道简化而放宽）。
@@ -839,7 +839,7 @@ export class AndroidPrivilegeService {
       ok: false,
       gates,
       guidance: '设备控制未授权。任选其一即可：'
-        + '①（推荐，一次开关）到 系统设置 → 无障碍 → 已下载的服务 开启「DSH 设备控制」；'
+        + '①（推荐，一次开关）到 系统设置 → 无障碍 → 已下载的服务 开启「DeepCode 设备控制」；'
         + '②到设置页「手机控制」安装、启动并授权 Shizuku（shell / 截屏 / uiautomator / 虚拟屏走它执行）。'
         + '两者都会即时生效，无需重启。',
     }
@@ -854,7 +854,7 @@ export class AndroidPrivilegeService {
         ok: false,
         guidance: shizuku
           ? (st.message ?? '未授权')
-          : '未授权：到设置页「手机控制」开启「DSH 设备控制」无障碍服务，或安装、启动并授权 Shizuku（特权 shell / 截屏 / 虚拟屏）。',
+          : '未授权：到设置页「手机控制」开启「DeepCode 设备控制」无障碍服务，或安装、启动并授权 Shizuku（特权 shell / 截屏 / 虚拟屏）。',
       }
     }
     // 0.13.8 #172：tier（部署默认档位视图）不再作为拒绝条件——会话档位由各 execute 实时门禁。
@@ -1025,7 +1025,7 @@ export class AndroidPrivilegeService {
         screenId,
         guidance: '改用坐标操作：① 真实屏 → android_screenshot 拿分辨率锚点，再 android_ui_click 传 nx/ny（0-1 归一化）；' +
           '② 虚拟屏 → android_vdisplay_input（tap/swipe/keyevent/text，坐标基于该屏自身像素，经 input -d 注入，真实屏不受影响）。' +
-          '若确实需要语义树/ref 动作，请由用户在系统设置里开启「DSH 设备控制」无障碍服务。',
+          '若确实需要语义树/ref 动作，请由用户在系统设置里开启「DeepCode 设备控制」无障碍服务。',
       }
     }
     // review C11 范围复查下沉到执行点：manage 工具层之外（其它插件/直连调用）不得绕过。
@@ -1256,7 +1256,7 @@ export function buildPrivilegeStatusToolPayload(
       reason: d.reason,
       alternative: d.backend === 'a11y'
         ? { backend: 'shizuku', available: altPrivileged, missing: altPrivileged ? null : '设置页「手机控制」：安装 / 启动 / 授权 Shizuku' }
-        : { backend: 'a11y', available: altA11y, missing: altA11y ? null : '系统设置 → 无障碍 → 开启「DSH 设备控制」' },
+        : { backend: 'a11y', available: altA11y, missing: altA11y ? null : '系统设置 → 无障碍 → 开启「DeepCode 设备控制」' },
     }
   }
   const queue = svc.controlStats()
@@ -1277,7 +1277,7 @@ function tools(svc: AndroidPrivilegeService, shellFace?: { resolve?(spec: Record
   const statusTool = defineTool({
     name: 'android_privilege_status',
     description:
-      '查询设备控制授权状态。无障碍通道为主（系统设置开启「DSH 设备控制」一次即成立，'
+      '查询设备控制授权状态。无障碍通道为主（系统设置开启「DeepCode 设备控制」一次即成立，'
       + '提供 dump/click/input/scroll 语义操作）；特权 shell 通道由 Shizuku 承载（设置页「手机控制」安装、启动并授权后：'
       + 'shell 执行、原图截图、pm/dumpsys、虚拟屏）。两条通道独立可用，任一就绪即可完成同类动作；'
       + '返回结构化 gates 与 control 字段；都不可用时给出两条开启路径的引导。手机管理工具全部以此为前置检查，失败关闭。',
@@ -1319,7 +1319,7 @@ function tools(svc: AndroidPrivilegeService, shellFace?: { resolve?(spec: Record
             gates?.a11yEnabled ? '结论：设备控制可用（走无障碍通道）——下一步用 android_ui_dump 拿语义清单'
               : gates?.shizukuReady === true ? '结论：设备控制可用（走 Shizuku 特权通道）——**无障碍未开启，控件树用 android_ui_tree**（与 android_ui_dump 同形、可 ref 操作）'
                 : gates?.adbReady ? '结论：设备控制可用（走 ADB 通道）——**无障碍未开启，控件树用 android_ui_tree**'
-                : '结论：不可用——开启任一通道即可（推荐无障碍：系统设置 → 无障碍 → DSH 设备控制，一步即用）',
+                : '结论：不可用——开启任一通道即可（推荐无障碍：系统设置 → 无障碍 → DeepCode 设备控制，一步即用）',
             v.message ? `通道说明：${String(v.message)}` : '',
             (() => {
               const shell = v.shell as { protocol?: { shell?: number; engine?: number; ok?: boolean; reason?: string }; caps?: { ops?: unknown[] } | null } | undefined

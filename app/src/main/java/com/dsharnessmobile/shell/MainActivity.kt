@@ -368,6 +368,14 @@ class MainActivity : ComponentActivity() {
     // ST-11：开发者日志回前台补启——EngineService 退出时采集器可能已停而偏好仍为开，
     // 「开关事实 = 偏好 && 在跑」由 DevLogControl 保证（幂等；偏好关时 no-op）。
     DevLogControl.ensureStarted(this)
+    // 0.14.1 批 3（P3-2）：渠道**展示名**随用词更新同步（幂等；未变则零写入）。
+    // 为什么挂在 onResume 而不是只在创建渠道时：`channelFor` 在 channelsInitialized 之后只读
+    // prefs 映射、不再走创建分支，改名代码写在创建路径里对老装机等于没写（设备实测撞到）。
+    try {
+      NotifyCenter.syncChannelNames(this)
+    } catch (_: Throwable) {
+      // 名称同步失败不得影响启动（渠道本身仍可用，只是可能显示旧词）。
+    }
     // 前台引擎监控：引擎被杀/崩溃时自动回退测试界面，恢复后回 WebUI。
     if (!userClosedEngine) {
       engineFlow.startMonitor()

@@ -139,8 +139,17 @@ export interface CleanupItemResult {
   status: 'removed' | 'failed' | 'skipped'
   /** 实际释放字节（`removed` 时 = 扫描值，其余为 0）。 */
   bytes: number
-  /** 失败/跳过原因（`removed` 时缺席）。 */
+  /**
+   * 失败/跳过原因——**稳定码**（`not-allowlisted` / `vanished` / `remove-failed` …），
+   * 不是人话也不是 OS 错误串：页面侧按码翻译（P3-1），码本身不上屏。
+   * `removed` 时缺席。
+   */
   reason?: string
+  /**
+   * 失败明细（**诊断用**，如 `EBUSY: ...`）。只进审计与页面的 `data-detail`，不进正文——
+   * OS 错误串对用户不是可执行信息（P3-6），但它必须留下来供排查。
+   */
+  detail?: string
 }
 
 /** 执行结果总览。 */
@@ -396,7 +405,10 @@ export function executeCleanup(
         path: target.path,
         status: 'failed',
         bytes: 0,
-        reason: String((error as Error | undefined)?.message ?? error),
+        // P3-1：`reason` 一律是稳定码；OS 错误串进 `detail`（审计与 data-detail 可读），
+        // 不上屏——旧实现把 `EBUSY: ...` 原样塞进 reason，页面只好照抄给用户。
+        reason: 'remove-failed',
+        detail: String((error as Error | undefined)?.message ?? error),
       }
     }
     items.push(result)

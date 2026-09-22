@@ -408,7 +408,7 @@ internal fun reportLines(entry: NotifyEntry?): List<String> {
   val summary = entry.summary.ifBlank { entry.text }
   val out = ArrayList<String>(3)
   out.add(if (summary.isBlank()) head else head + " · " + summary)
-  out.add("用时 " + entry.durationLabel() + " · 工具 ×" + entry.toolCount)
+  out.add(UserCopy.reportMetaLine(entry.durationLabel(), entry.toolCount))
   if (entry.presentedFiles.isNotEmpty()) {
     out.add("产出：" + entry.presentedFiles.joinToString("、"))
   }

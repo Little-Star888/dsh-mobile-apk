@@ -58,7 +58,10 @@ class ConsoleSession(private val context: Context) {
     val engineManager = EngineManager(context, EngineManager.ensurePickToken())
     val bash = File(engineManager.usrDir, "bin/bash")
     if (!bash.exists()) {
-      listener.onStatus(State.MISSING, "快照缺失（usr/bin/bash 不存在），无法打开控制台")
+      // P3-6：快照内的相对路径不上屏（用户看不懂 `usr/bin/bash`，也做不了什么）——
+      // 正文说清「缺什么组件、能不能重试」，路径进日志。
+      Log.w(TAG, "console unavailable: bash missing at " + bash.absolutePath)
+      listener.onStatus(State.MISSING, "运行时缺少命令行组件（快照不完整），无法打开控制台——请重新安装应用或重装运行时快照")
       return false
     }
     // Exec-bit fallback: some devices/filesystems lose the exec bit after extraction (execve → EACCES,

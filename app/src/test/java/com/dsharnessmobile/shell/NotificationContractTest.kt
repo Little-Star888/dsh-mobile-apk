@@ -197,9 +197,19 @@ class NotificationContractTest {
     assertTrue("页面必须调用写出口", ui.contains("setNotifySetting?.("))
     assertTrue("写后必须读回判定（applied 不为 true 不得置位）", ui.contains("applied !== true"))
 
-    // 页面必须真的挂在开发者选项分区里（否则组件存在但没人渲染 = 另一种不可达）。
+    // 页面必须真的挂在**可达分区**里（否则组件存在但没人渲染 = 另一种不可达）。
+    // 0.14.1 批 3（P3-5）后挂载点从「开发者选项」**提级**为设置页一级分区「通知」——
+    // 断言随之改指新挂载点（旧断言把旧结构当契约，正是本轮要收的形态之一）：
+    //   ① index.ts 注册一级分区 android-notify，并指向本文件的区块组件；
+    //   ② 该区块组件渲染了 NotifySettingsRow（能力与入口同处一文件，结构上不可能只留其一）；
+    //   ③ 开发者选项**不再**内嵌同一组开关（同功能双实现是审查档 §5 的结构性根因）。
+    val index = uiSource("src/client/index.ts")
+    assertTrue("通知设置必须注册为设置页一级分区", index.contains("id: 'android-notify'"))
+    assertTrue("一级分区必须指向本文件的区块组件", index.contains("NotifySettingsSection"))
+    assertTrue("区块组件必须渲染通知设置行", ui.contains("<NotifySettingsRow />"))
     val section = uiSource("src/client/dev-section/DevSection.tsx")
-    assertTrue("通知设置行必须挂进开发者选项分区", section.contains("<NotifySettingsRow />"))
+    assertFalse("开发者选项不得再内嵌同一组开关（只留一行指路）", section.contains("<NotifySettingsRow"))
+    assertTrue("开发者选项必须留一行指路文案", section.contains("设置 → 通知"))
   }
 
   @Test

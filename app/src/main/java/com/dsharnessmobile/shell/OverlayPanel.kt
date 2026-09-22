@@ -1161,8 +1161,8 @@ class OverlayPanel(private val svc: OverlayService) {
     val elapsed = System.currentTimeMillis() - svc.turnStartedAt
     if (elapsed < 15_000) { ct.visibility = View.GONE; return }
     ct.visibility = View.VISIBLE
-    val sec = elapsed / 1000
-    ct.text = if (sec >= 60) "${sec / 60}分%02d秒".format(sec % 60) else "${sec}s"
+    // P3-3：时钟与回报条/通知共用同一时长口径（旧实现是「45s」/「2分05秒」两套写法）。
+    ct.text = UserCopy.durationText(elapsed)
   }
 
   /** session/list -> target picker data (G2: official visibility filter + label fallback chain). */
@@ -1389,7 +1389,8 @@ class OverlayPanel(private val svc: OverlayService) {
           performHapticFeedback(android.view.HapticFeedbackConstants.CONFIRM) // M9 haptics
           closePicker()
           updatePickerRowText()
-          svc.flashStatus(if (id.isEmpty()) "\u5df2\u5207\u6362\u5230 \u65b0\u4f1a\u8bdd" else "\u5df2\u5207\u6362\u5230 " + text.take(20))
+          // P3-4：会话名超长时附省略号（旧实现 `take(20)` 硬截，用户看到一个像完整名字的片段）。
+          svc.flashStatus(if (id.isEmpty()) "\u5df2\u5207\u6362\u5230 \u65b0\u4f1a\u8bdd" else "\u5df2\u5207\u6362\u5230 " + UserCopy.truncateWithEllipsis(text, 20))
           svc.renderPanelOnly()
         }
       }

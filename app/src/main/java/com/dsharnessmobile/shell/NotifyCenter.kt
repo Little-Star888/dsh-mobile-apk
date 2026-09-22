@@ -88,7 +88,6 @@ object NotifyCenter {
    */
   enum class Face(
     val category: String,
-    val label: String,
     val description: String,
     val candidates: List<String>,
     val importance: Int,
@@ -103,25 +102,34 @@ object NotifyCenter {
     val interactive: Boolean,
   ) {
     SILENT(
-      "silent", "后台动态", "看门狗与引擎状态；静默更新，不弹出",
+      "silent", "看门狗与引擎状态；静默更新，不弹出",
       listOf("dsh-silent"), NotificationManager.IMPORTANCE_LOW, false, false,
     ),
     TODO(
-      "todo", "待办进度", "任务步骤进度；静默更新，不弹出",
+      "todo", "任务步骤进度；静默更新，不弹出",
       listOf("dsh-todo-progress"), NotificationManager.IMPORTANCE_LOW, false, false,
     ),
     REPORT(
-      "report", "工作汇报", "每轮任务结束的汇报；需要出现在锁屏之上",
+      "report", "每轮任务结束的汇报；需要出现在锁屏之上",
       listOf("dsh-report", "dsh-report-h2"), NotificationManager.IMPORTANCE_HIGH, true, false,
     ),
     QUESTION(
-      "question", "需要回答", "引擎向你提问；可直接在通知栏回复",
+      "question", "引擎向你提问；可直接在通知栏回复",
       listOf("dsh-question", "dsh-question-h2"), NotificationManager.IMPORTANCE_HIGH, true, true,
     ),
     APPROVAL(
-      "approval", "需要授权", "工具执行前的授权请求；请确认不是他人代答",
+      "approval", "工具执行前的授权请求；请确认不是他人代答",
       listOf("dsh-auth", "dsh-auth-h2", "dsh-auth-h3"), NotificationManager.IMPORTANCE_HIGH, true, true,
     );
+
+    /**
+     * 渠道名 / 设置页标签（**唯一真源** [UserCopy.notifyCategory]）。
+     *
+     * 为什么是 getter 而不是构造参数（0.14.1 批 3 / P3-2）：旧形态把「需要回答」写在这里、
+     * 把「提问」写在设置页，同一个东西两个名字（审查档 §4.3）；本批把用词收到一处，
+     * 这里派生取值，设置页标签同源于同一张表。
+     */
+    val label: String get() = UserCopy.notifyCategory(category)
 
     companion object {
       fun of(category: String): Face? = values().firstOrNull { it.category == category }
@@ -166,7 +174,8 @@ object NotifyCenter {
     }
 
     override fun onChannelDegraded(category: String) {
-      flash("通知渠道已降级为静默：" + category)
+      // P3-1/P3-6：类别码不上屏——用户看到的是「哪一类通知」，码只进探针日志。
+      flash("「" + UserCopy.notifyCategory(category) + "」通知已被系统降级为静默——请到系统设置里改回")
     }
 
     private fun flash(msg: String) {
@@ -409,6 +418,15 @@ object NotifyCenter {
         LogCollector.log("dsh-notify", "channel " + face.category + " created but importance=" + created.importance +
           " < " + face.importance + " (ROM override)")
       }
+    } else if (chosen != null) {
+      // 0.14.1 批 3（P3-2）：既有渠道的**展示名迁移**。
+      // 缺陷现场（设备实测 2026-09-23）：本批把 `Face.QUESTION.label` 从「需要回答」改成「提问」，
+      // 但 `createNotificationChannel` 只在 `selection.create` 时被调用——importance 已达标的老渠道
+      // 永远不再走创建分支，于是**改代码到不了老装机**：应用内说「提问」，系统设置里仍是「需要回答」
+      // （S3-13 要的正是两侧同名，光改字面量不够）。
+      // 这里按 id 校正展示名与说明：**用渠道当前 importance 重建**，不尝试提升/降低 importance,
+      // 因此不会干扰「用户改过的重要性」判定（那是降级检测的输入）。
+      renameChannelIfNeeded(manager, chosen, face)
     }
     prefs(app).edit()
       .putBoolean(KEY_CHANNELS_INITIALIZED, true)
@@ -420,9 +438,39 @@ object NotifyCenter {
     return chosen
   }
 
-  /** 一次性初始化（首启/自检/设置页可显式调用；幂等）。 */
+  /**
+   * 一次性初始化（首启/自检/设置页可显式调用；幂等）。
+   *
+   * 0.14.1 批 3（P3-2）：本方法同时负责**渠道展示名的用词迁移**（见 [syncChannelNames]）。
+   * 为什么迁移必须挂在这里、而不能只挂在 `resolveChannel` 里：`channelFor` 在
+   * `KEY_CHANNELS_INITIALIZED` 之后**只读 prefs 映射、不再重建**（S6 的设计），于是
+   * `resolveChannel` 对老装机永远不会再被调用——改名代码写在里面等于没写（本轮设备实测撞到）。
+   */
   fun ensureChannels(context: Context) {
     for (face in Face.values()) channelFor(context, face)
+    syncChannelNames(context)
+  }
+
+  /**
+   * 渠道展示名同步（0.14.1 批 3 / P3-2）：把每个已选渠道的**展示名与说明**对齐到唯一真源。
+   *
+   * 幂等且廉价：先 `getNotificationChannel` 读现状，只在 `channelRenameNeeded` 为真时才重建渠道，
+   * 且重建时**保留渠道当前 importance**（改名不得变成一次重要性调整，见 [buildChannelKeepingImportance]）。
+   * @param context - 任意 context（内部取 applicationContext）。
+   * @returns 实际改名的渠道数（诊断/测试用）。
+   */
+  fun syncChannelNames(context: Context): Int {
+    val app = context.applicationContext
+    val manager = app.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+    var renamed = 0
+    for (face in Face.values()) {
+      val id = channelFor(app, face) ?: continue
+      val existing = manager.getNotificationChannel(id) ?: continue
+      if (!channelRenameNeeded(existing.name?.toString().orEmpty(), existing.description, face.label, face.description)) continue
+      renameChannelIfNeeded(manager, id, face)
+      renamed += 1
+    }
+    return renamed
   }
 
   private fun buildChannel(id: String, face: Face): NotificationChannel {
@@ -439,12 +487,42 @@ object NotifyCenter {
     return ch
   }
 
+  /**
+   * 既有渠道的展示名/说明校正（0.14.1 批 3 / P3-2：用词迁移必须能到老装机）。
+   *
+   * 纯判据部分（[channelRenameNeeded]）抽成顶层函数以便 JVM 直测；本方法只做 Android 胶水。
+   * 关键约束：**保留渠道当前 importance**（不传入 `face.importance`），否则一次改名会变成一次
+   * 「重要性调整」，可能扰动用户改过的重要性与降级检测。
+   * @param manager - 系统通知管理器。
+   * @param id - 已选中的渠道 id。
+   * @param face - 该渠道对应的语义。
+   */
+  private fun renameChannelIfNeeded(manager: NotificationManager, id: String, face: Face) {
+    val existing = manager.getNotificationChannel(id) ?: return
+    if (!channelRenameNeeded(existing.name?.toString().orEmpty(), existing.description, face.label, face.description)) return
+    manager.createNotificationChannel(buildChannelKeepingImportance(existing, face))
+    LogCollector.log("dsh-notify", "channel " + face.category + " renamed to '" + face.label + "' (id=" + id +
+      ", importance kept=" + existing.importance + ")")
+  }
+
+  /** 按既有渠道的**当前** importance 重建，只改展示名与说明（其余保持系统现状）。 */
+  private fun buildChannelKeepingImportance(existing: NotificationChannel, face: Face): NotificationChannel {
+    val ch = NotificationChannel(existing.id, face.label, existing.importance)
+    ch.description = face.description
+    ch.setShowBadge(true)
+    ch.enableVibration(existing.shouldVibrate())
+    ch.setSound(existing.sound, existing.audioAttributes)
+    return ch
+  }
+
   // ── 自检面（NT-03：四类事实齐全 + 不可自检项如实写「无法检测」）──────────
 
   const val UNDETECTABLE = "无法检测"
 
   fun selfCheck(context: Context): JSONObject {
     val app = context.applicationContext
+    // P3-2：自检是用户会主动打开的诊断面，顺手把渠道展示名对齐到当前用词（幂等，未变则零写入）。
+    syncChannelNames(app)
     val manager = app.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
     val out = JSONObject()
     val granted = hasPermission(app)
@@ -492,15 +570,13 @@ object NotifyCenter {
     return out
   }
 
-  fun importanceLabel(importance: Int): String = when (importance) {
-    NotificationManager.IMPORTANCE_NONE -> "NONE(0)"
-    NotificationManager.IMPORTANCE_MIN -> "MIN(1)"
-    NotificationManager.IMPORTANCE_LOW -> "LOW(2)"
-    NotificationManager.IMPORTANCE_DEFAULT -> "DEFAULT(3)"
-    NotificationManager.IMPORTANCE_HIGH -> "HIGH(4)"
-    NotificationManager.IMPORTANCE_MAX -> "MAX(5)"
-    else -> "?"
-  }
+  /**
+   * 渠道重要性 → 人话（唯一真源 [UserCopy.importance]，P3-1）。
+   *
+   * 旧实现回的是 `HIGH(4)` 这样的档位名——那是**诊断口径**，页面上出现过「（重要性 4）」。
+   * 现在两侧同源：本方法（自检面用）与页面侧 `describeImportance` 覆盖同一档位集合，且都不回数字。
+   */
+  fun importanceLabel(importance: Int): String = UserCopy.importance(importance)
 
   /** 应用级通知设置深链（设置页按钮用；不在此处 startActivity）。 */
   fun appSettingsIntent(app: Context): Intent =
@@ -844,13 +920,13 @@ object NotifyCenter {
         b.setContentTitle(entry.displayTitle())
         b.setContentText(reportLine(entry))
         b.setStyle(NotificationCompat.BigTextStyle().bigText(reportBigText(entry)))
-        b.setSubText("用时 " + entry.durationLabel() + " · 工具 " + entry.toolCount)
+        b.setSubText(UserCopy.reportMetaLine(entry.durationLabel(), entry.toolCount))
         if (!silentOverride) b.setPriority(NotificationCompat.PRIORITY_HIGH)
       }
       Face.QUESTION -> {
         val questions = entry.questions
         val first = questions.firstOrNull()
-        b.setContentTitle(first?.header?.ifBlank { null } ?: "需要回答")
+        b.setContentTitle(first?.header?.ifBlank { null } ?: UserCopy.notifyCategory(Face.QUESTION.category))
         b.setContentText(first?.question ?: entry.text.ifBlank { "引擎正在等待你的回答" })
         b.setStyle(NotificationCompat.BigTextStyle().bigText(questions.joinToString("\n") { it.question }))
         b.setPriority(NotificationCompat.PRIORITY_HIGH)
@@ -859,7 +935,7 @@ object NotifyCenter {
         addQuestionActions(app, b, entry)
       }
       Face.APPROVAL -> {
-        b.setContentTitle("需要授权")
+        b.setContentTitle(UserCopy.notifyCategory(Face.APPROVAL.category))
         b.setContentText(approvalLine(entry))
         b.setStyle(NotificationCompat.BigTextStyle().bigText(approvalLine(entry) + "\n仅本次生效"))
         b.setSubText("仅本次生效")
@@ -879,7 +955,7 @@ object NotifyCenter {
       b.setPublicVersion(
         NotificationCompat.Builder(app, channelId)
           .setSmallIcon(android.R.drawable.stat_notify_chat)
-          .setContentTitle("DSH")
+          .setContentTitle(UserCopy.APP_NAME)
           .setContentText("有一项需要你的决定")
           .build(),
       )
@@ -895,7 +971,7 @@ object NotifyCenter {
 
   private fun reportBigText(entry: NotifyEntry): String {
     val sb = StringBuilder(reportLine(entry))
-    sb.append("\n用时 ").append(entry.durationLabel()).append(" · 工具 ").append(entry.toolCount)
+    sb.append("\n").append(UserCopy.reportMetaLine(entry.durationLabel(), entry.toolCount))
     if (entry.presentedFiles.isNotEmpty()) {
       sb.append("\n产出：").append(entry.presentedFiles.joinToString("、"))
     }
@@ -1093,8 +1169,26 @@ object NotifyCenter {
   }
 }
 
-/** 一条提问（通知里只重建展示所需字段；应答仍走引擎 waterfall / $events/result）。 */
-data class NotifyQuestion(
+/**
+ * 渠道展示名是否需要校正（0.14.1 批 3 / P3-2；**顶层纯函数**，JVM 可直接测）。
+ *
+ * 为什么需要它：`createNotificationChannel` 只在「需要创建/迁移」时被调用，importance 已达标的
+ * 既有渠道**永不再走创建分支** ⇒ 改代码里的用词到不了老装机（设备实测：把「需要回答」改成
+ * 「提问」后，系统通知设置里仍是「需要回答」）。判据只看「现状与期望是否一致」，不碰 importance。
+ * @param currentName - 系统里该渠道的当前展示名。
+ * @param currentDescription - 系统里该渠道的当前说明。
+ * @param expectedName - 期望展示名（唯一真源 [UserCopy.notifyCategory] 派生的 `Face.label`）。
+ * @param expectedDescription - 期望说明（`Face.description`）。
+ * @returns true = 需要重建该渠道以更新展示名/说明。
+ */
+internal fun channelRenameNeeded(
+  currentName: String,
+  currentDescription: String?,
+  expectedName: String,
+  expectedDescription: String,
+): Boolean = currentName != expectedName || (currentDescription ?: "") != expectedDescription
+
+/** 一条提问（通知里只重建展示所需字段；应答仍走引擎 waterfall / $events/result）。 */data class NotifyQuestion(
   val id: String,
   val header: String = "",
   val question: String = "",
@@ -1136,7 +1230,13 @@ data class NotifyEntry(
   val questions: List<NotifyQuestion> = emptyList(),
   val target: String? = null,
 ) {
-  fun displayTitle(): String = title.ifBlank { if (kind == "report") "工作汇报" else "DSH" }
+  fun displayTitle(): String = title.ifBlank {
+    if (kind == "report") {
+      UserCopy.notifyCategory(NotifyCenter.Face.REPORT.category)
+    } else {
+      UserCopy.APP_NAME
+    }
+  }
 
   fun outcomeLabel(): String = when (outcome) {
     "completed" -> "已完成"
@@ -1148,10 +1248,12 @@ data class NotifyEntry(
     else -> if (outcome.isBlank()) "" else "结果未知"
   }
 
-  fun durationLabel(): String = when {
-    this.durationLabel.isNotBlank() -> this.durationLabel
-    durationMs <= 0 -> "-"
-    durationMs < 60_000 -> String.format(java.util.Locale.US, "%.1fs", durationMs / 1000.0)
-    else -> (durationMs / 60_000).toString() + "m" + ((durationMs / 1000) % 60) + "s"
-  }
+  /**
+   * 时长标签（P3-3，唯一口径 [UserCopy.durationText]）。
+   *
+   * 引擎侧若已给出 `durationLabel` 则原样透传（那是引擎的事实，不在这里改写）；否则按统一口径由
+   * 毫秒数算。**未知返回空串**——旧实现回 `-`（用户分不清「未知」与「零」），调用方现在整段省略。
+   */
+  fun durationLabel(): String =
+    if (this.durationLabel.isNotBlank()) this.durationLabel else UserCopy.durationText(durationMs)
 }

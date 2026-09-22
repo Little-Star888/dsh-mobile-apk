@@ -209,7 +209,7 @@ class EngineService : Service() {
   private fun buildNotification(): android.app.Notification {
     val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
     if (Build.VERSION.SDK_INT >= 26) {
-      manager.createNotificationChannel(NotificationChannel("engine", "dsh 引擎", NotificationManager.IMPORTANCE_LOW))
+      manager.createNotificationChannel(NotificationChannel("engine", UserCopy.APP_NAME + " 引擎", NotificationManager.IMPORTANCE_LOW))
     }
     val pending = PendingIntent.getActivity(
       this, 0, Intent(this, MainActivity::class.java),
@@ -217,8 +217,8 @@ class EngineService : Service() {
     )
     return NotificationCompat.Builder(this, "engine")
       .setSmallIcon(android.R.drawable.stat_notify_chat)
-      .setContentTitle("DeepCode 引擎运行中")
-      .setContentText("DeepCode 正在后台工作")
+      .setContentTitle(UserCopy.APP_NAME + " 引擎运行中")
+      .setContentText(UserCopy.APP_NAME + " 正在后台工作")
       .setContentIntent(pending)
       .setOngoing(true)
       .build()

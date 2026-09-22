@@ -216,13 +216,13 @@ class DeviceControlService : AccessibilityService() {
       val restricted = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
       return JSONObject()
         .put("enabled", enabled)
-        .put("label", "DSH 设备控制")
+        .put("label", UserCopy.A11Y_SERVICE_NAME)
         .put("sdk", Build.VERSION.SDK_INT)
         .put("restrictedSettingsApplies", restricted)
         .put(
           "hint",
           if (enabled) "无障碍服务已开启：设备控制走无障碍通道（语义树 + performAction）"
-          else "未开启：到 系统设置 → 无障碍 → 已下载的服务 里开启「DSH 设备控制」",
+          else "未开启：到 系统设置 → 无障碍 → 已下载的服务 里开启「" + UserCopy.A11Y_SERVICE_NAME + "」",
         )
         .put("tokenConfigured", !context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_TOKEN, null).isNullOrEmpty())
         .toString()

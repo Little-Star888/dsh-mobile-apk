@@ -387,7 +387,10 @@ internal class EngineStartFlow(private val activity: MainActivity) {
           WatchdogV2.reset()
           activity.runOnUiThread {
             if (!isCurrentEngineFlow(generation)) return@runOnUiThread
-            activity.applyGuidePhase(GuidePhase.Recovering, "回撤完成，正在重启引擎…", "已恢复到快照 " + (result.snapshotId ?: "?"))
+            // P3-6：快照 id 不上屏（用户看不懂也做不了什么）——正文说清「回到哪个状态 + 接下来会怎样」，
+            // id 进日志供排查。
+            LogCollector.log("dsh-guide", "undo applied snapshot=" + (result.snapshotId ?: "?"))
+            activity.applyGuidePhase(GuidePhase.Recovering, "回撤完成，正在重启引擎…", "已恢复到上一次可用的运行时状态。")
           }
           activity.engineManager.resetCooldown()
           if (isCurrentEngineFlow(generation)) activity.engineManager.startEngine()

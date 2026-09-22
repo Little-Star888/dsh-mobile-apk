@@ -260,7 +260,7 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
     GuidePhase.Undoing -> "正在把配置/插件回滚到最后良好快照（自动回撤）。"
     GuidePhase.Error -> "可打开控制台查看 engine.log，或点击重试。"
     GuidePhase.Closed -> "引擎已停止，不会自动恢复。"
-    GuidePhase.Idle -> "引擎就绪后将进入 DeepCode。首次使用需授予存储权限——导出文件与日志要写在公共目录。"
+    GuidePhase.Idle -> "引擎就绪后将进入 " + UserCopy.APP_NAME + "。首次使用需授予存储权限——导出文件与日志要写在公共目录。"
     GuidePhase.Info -> "运行时随安装包一起更新：安装新版 APK 即完成升级。"
   }
 

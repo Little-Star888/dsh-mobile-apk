@@ -208,8 +208,8 @@ object VdisplayController {
       val selectable = owned != null
       val reason = when {
         id == Display.DEFAULT_DISPLAY -> "真实屏幕是用户前台画面，不允许镜像或作为查看器目标。"
-        owned != null -> "DSH 创建的虚拟屏，可作为查看器目标。"
-        else -> "非 DSH 创建的显示器没有受控输出 Surface，不能作为查看器目标。"
+        owned != null -> UserCopy.APP_NAME + " 创建的虚拟屏，可作为查看器目标。"
+        else -> "非 " + UserCopy.APP_NAME + " 创建的显示器没有受控输出 Surface，不能作为查看器目标。"
       }
       val metrics = DisplayMetrics()
       @Suppress("DEPRECATION")
@@ -470,7 +470,7 @@ object VdisplayController {
         .put("guidance", if (normalized == ScreenTargets.REAL) {
           "真实屏幕不允许镜像，不能作为查看器目标。"
         } else {
-          "没有名为 $normalized 的 DSH 虚拟屏；先创建虚拟屏。"
+          "没有名为 $normalized 的 " + UserCopy.APP_NAME + " 虚拟屏；先创建虚拟屏。"
         })
     synchronized(lock) {
       selectedAlias = record.alias
