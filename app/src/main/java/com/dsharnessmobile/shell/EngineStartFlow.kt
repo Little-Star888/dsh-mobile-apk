@@ -64,7 +64,14 @@ internal class EngineStartFlow(private val activity: MainActivity) {
                   // error page (long snapshot refresh): retry that navigation instead
                   // of leaving the user on ERR_CONNECTION_REFUSED.
                   lastEnginePageReloadAt = System.currentTimeMillis()
-                  try { activity.webView.reload() } catch (_: Exception) { }
+                  // 0.14.1 D3：恢复动作（reload）失败此前**完全静默**——用户继续停在
+                  // ERR_CONNECTION_REFUSED 上，而现场没有任何一行说明「我们试过重载但没成功」。
+                  // 吞掉无害清理可以，吞掉用户正在等的那个恢复动作不行。
+                  try {
+                    activity.webView.reload()
+                  } catch (e: Exception) {
+                    Log.w("dsh-shell", "engine page reload failed", e)
+                  }
                 }
               }
             } else if (activity.webView.visibility == View.VISIBLE) {
@@ -105,7 +112,12 @@ internal class EngineStartFlow(private val activity: MainActivity) {
         }
         if (!freezeReloaded) {
           freezeReloaded = true
-          try { activity.webView.reload() } catch (_: Exception) {
+          // 0.14.1 D3：与上面的引擎页重载同族——冻结自愈的唯一动作失败时必须留下痕迹，
+          // 否则日志里只有「检测到冻结」，看不出「自愈没生效」。
+          try {
+            activity.webView.reload()
+          } catch (e: Exception) {
+            Log.w("dsh-shell", "freeze recovery reload failed", e)
           }
         }
         jsAckAt = now
