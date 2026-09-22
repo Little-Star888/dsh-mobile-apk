@@ -824,6 +824,17 @@ class MainActivity : ComponentActivity() {
         onOpenA11ySettings = { openAccessibilitySettings() },
         // 0.14.0：Android 13+ 侧载应用「受限设置」解锁改走 Shizuku shell（appops）——内置 adb 已退役。
         onUnlockRestrictedSettings = { unlockRestrictedSettingsViaShizuku() },
+        // 0.14.1 设置页「手机控制」：Shizuku 引导三件套（用户 2026-09-22 定例）。
+        // 外链只收 key（下载页 / 视频教程共用这一条通道），URL 表在壳侧 ExternalLinks。
+        onOpenExternalLink = { key -> ExternalLinks.open(this, key) },
+        onOpenShizukuManager = { ExternalLinks.openShizukuManager(this) },
+        onShizukuStatus = {
+          // 读路径自带自愈（与 vdisplayStatus 同口径）：已装 + 已运行 + 已授权而未绑定时发起一次
+          // **后台**绑定并立即返回当前状态，下一次 2s 轮询即收敛。缺了这一步，设置页无论刷新多少次
+          // 都不会建连——0.14.0 设备实锤「会一直卡在这」。绝不在此阻塞等待（UI 轮询路径）。
+          ShizukuTransport.kickBind(this)
+          ShizukuTransport.status(this).toString()
+        },
       ),
       "androidBridge",
     )

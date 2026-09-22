@@ -107,7 +107,7 @@ sequenceDiagram
 | K03 | 快照事务与更新链 | 内嵌快照暂存交换事务与回滚（插件故障走**清单式外科拔除**，不整份回滚），兼在线更新与清单合并 | 启动流判指纹不新鲜 / 引导页检查更新 / WebView 下载 | 快照与更新 | 引导启动流、引擎探活、构建快照资产 | EngineStartFlow.runFlow、EngineService 看门狗、引导页按钮、MainActivity 的 WebView 回调 | SnapshotTransaction.kt,SnapshotFs.kt,SnapshotRefreshPolicy.kt,PublicRepoProvision.kt,UpdateManager.kt,PluginMounts.kt | 高 |
 | K04 | 桥与控制协议面 | 页面 JS 桥面、引擎鉴权与控制队列承载 | 页面调 androidBridge；EngineService 起控制承载 | 稳态控制 | 引导与启动（EngineService/MainActivity）、无障碍与虚拟屏宿主、快照与更新（UndoGate） | MainActivity 装桥；EngineService.onCreate 起 ControlCarrier；看门狗 tick 调 UndoGate | app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt,app/src/main/java/com/dsharnessmobile/shell/ControlPoller.kt,app/src/main/java/com/dsharnessmobile/shell/EngineAuth.kt,app/src/main/java/com/dsharnessmobile/shell/ControlProtocolV2.kt | 高 |
 | K05 | 无障碍控制面 | 按需取语义树并对设备执行点击输入滚动截屏 | 控制队列取活 + 无障碍服务回调 | 稳态控制 | K04 控制协议、K06 特权执行 | ControlCarrier 控制队列取活、onServiceConnected、ADB 键盘广播 | DeviceControlService.kt,GlobalActionCatalog.kt,AdbKeyboardService.kt,AdbKeyboardReceiver.kt | 高 |
-| K06 | 特权执行、屏幕范围与本地文件面 | Shizuku 特权 shell 通道、屏幕范围门与本地文件出入口 | 引擎 sh* op / 设置页范围写面 / 外部分享与打开 intent | 稳态控制 | 控制队列承载、引擎 bridge 插件、虚拟屏注册表、无障碍控制面 | 引擎 androidPrivilege 服务面与页面桥 | ShellOps.kt,ScreenScope.kt,ShizukuTransport.kt,ShizukuBindState.kt,ShizukuUserService.kt,ShizukuProbe.kt,ShizukuSupport.kt,ProcIo.kt,FileIncoming.kt,PathOpen.kt,ConfigTransfer.kt | 高 |
+| K06 | 特权执行、屏幕范围与本地文件面 | Shizuku 特权 shell 通道、屏幕范围门与本地文件出入口 | 引擎 sh* op / 设置页范围写面 / 外部分享与打开 intent | 稳态控制 | 控制队列承载、引擎 bridge 插件、虚拟屏注册表、无障碍控制面 | 引擎 androidPrivilege 服务面与页面桥 | ShellOps.kt,ScreenScope.kt,ShizukuTransport.kt,ShizukuBindState.kt,ShizukuUserService.kt,ShizukuProbe.kt,ShizukuSupport.kt,ProcIo.kt,FileIncoming.kt,PathOpen.kt,ExternalLinks.kt,ConfigTransfer.kt | 高 |
 | K07 | 虚拟屏宿主 | Shizuku 建屏与 viewer Surface 交接的生命周期编排 | 模型 vd 工具 / 侧栏桥面 / Activity 生命周期 | 交互面 | Shizuku 特权通道、K05 无障碍控制面、K08 浏览器宿主 | MainActivity、DeviceControlService 与 ControlCarrier、侧栏面板 | VdisplayController.kt,VdisplayHost.kt,VdisplayOps.kt | 高 |
 | K08 | 浏览器宿主 | 隔离浏览器：无桥 WebView、准入过滤、几何与保活 | 模型 browser* op（控制队列）/ 面板 browserHost* 桥 | 交互面 | S01,P03,控制队列 | MainActivity 构造，op 与面板下推拉起 | BrowserHost.kt,BrowserHostNavigationPolicy.kt,BrowserOverlayPolicy.kt | 高 |
 | K09 | 悬浮球与面板 | 悬浮球三窗口与展开面板：状态、待答、应答、完成态 | 设置页开关或 onResume 补启；点球展开；WS 帧与 live 文件事件 | 交互面 | K01,K10,引擎网关 | K01 宿主 Activity 与桥开关；EngineService 划掉后台时停它 | OverlayService.kt,OverlayPanel.kt | 高 |
@@ -449,7 +449,7 @@ sequenceDiagram
 | K05 | K07 | 屏幕范围门的 SF token 空间用 activeAliases 求交，屏一销毁其 token 立刻失效 | app/src/main/java/com/dsharnessmobile/shell/ShellOps.kt:524 |
 | K07 | K08 浏览器宿主 | 同一套「可信舞台几何 → 原生 SurfaceView」与无 catch 的 onMain 是两份同款实现 | app/src/main/java/com/dsharnessmobile/shell/VdisplayHost.kt:207 |
 | K07 | MainActivity 生命周期 | 建宿主与浮窗、onStart 回挂、onStop 换浮窗并停 reaper、onDestroy 拆宿主 | app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:206 |
-| K07 | 可信侧栏面板 | screen-control 每 2 秒轮询 vdisplayStatus，vdisplay 客户端每帧推 vdisplayBounds | dsh-client-ui-responsive/src/client/dev-section/screen-control.tsx:52 |
+| K07 | 可信侧栏面板 | phone-control 每 2 秒轮询 vdisplayStatus 与 shizukuStatus，vdisplay 客户端每帧推 vdisplayBounds | dsh-client-ui-responsive/src/client/dev-section/phone-control.tsx:180 |
 | K07 | 引擎侧 vdisplay 工具面 | 状态载荷 enabled/ops/transports/screens/viewers 与 status.ts 的 VD_OPS 逐字段对齐 | plugins/dsh-android-vdisplay/src/status.ts:14 |
 | K07 | DeviceControlService 登记门 | vd* 七个分支必须逐行留在 handle 里，scripts/check-control-ops.mjs 的 A 项按行首引号解析 | app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:652 |
 | K08 | S01 | 面板每 300ms 下推 left/top/width/height/viewportWidth/viewportHeight/visible/session，壳侧据此切当前工作台并维持停画保鲜；面板用 status().ownerSessionId 做 foreign 判定 | dsh-client-ui-responsive/src/client/mobile/browser-tab.tsx:229-241, :251, :268 |
@@ -1187,7 +1187,7 @@ flowchart TD
   - `ScreenTargets.REAL / REAL_DISPLAY_ID / isVirtual`（ScreenScope.kt:31-44）、`ScreenScopePrefs`：`screen-not-selectable`、`screen-not-found`、`screen-out-of-scope` 的判据来源。
   - `VdisplayPrefs`：SharedPreferences 文件 `dsh-vdisplay`，键 `resolutionScale`（0.4-1.0，默认 0.75）、`floatEnabled`（默认 true）——设置页写，`create` 与 `onStop` 读。
   - `AndroidBridge.kt:316-348` 的 `vdisplay*` 桥方法 + `MainActivity.kt:782-791` 的 lambda；`VdisplayHost.setStageBounds` 的入参由 `plugins/dsh-android-vdisplay/src/client/index.ts` 发布（`VIEWER_ID='files-sidebar'` 与宿主的 `viewer-<identityHashCode>` **不是同一个 id**）。
-  - 面板轮询：`dsh-client-ui-responsive/src/client/dev-section/screen-control.tsx:52` 每 2s 读 `vdisplayStatus`。
+  - 面板轮询：`dsh-client-ui-responsive/src/client/dev-section/phone-control.tsx:180` 与 `:220` 每 2s 读 `vdisplayStatus` 与 `shizukuStatus`（后者是「装没装」的事实来源，`installed` 决定「打开 Shizuku」是否可点）。
   - `DeviceControlService.activeScreenId/activeDisplayId` 与 `realScreenScopeError`（`:718` 用 `displayIdForAlias` 把 `virtual-N` 钉成动态 displayId）；反向 `ShellOps.kt:197` 用 `aliasForDisplayId` 核对模型给的 displayId，`:524` 用 `activeAliases()` 收敛 SF token 反查的**有效期**（屏一销毁 token 立即失效）。
   - `Record.viewerId/viewerSurface`（`:56-57`）是仲裁唯一状态；`generation`（`:117`）是面板与「回收后自动重挂」的观测点。
 - **关键坐标**：
@@ -1987,13 +1987,14 @@ flowchart TD
     - `getDevLogEnabled` / `setDevLogEnabled` → `DevSection.tsx:60,186`；`getOverlayEnabled` / `setOverlayEnabled` → `DevSection.tsx:31,199`
     - `hasAllFilesAccess` → `DevSection.tsx:72`；`exportConfig` / `importConfig` → `DevSection.tsx:220,230`
     - `restartEngine` / `shutdownToGuide` / `reloadWebUI` / `openConsole` → `DevSection.tsx:152,162,170,178`
-    - `getScreenScope` / `setScreenScope` → `phone-control.tsx:42,116`、`screen-control.tsx:18,55`
-    - `vdisplayStatus` → `phone-control.tsx:52`、`screen-control.tsx:28`；`getVdisplayScale` / `setVdisplayScale` → `phone-control.tsx:68,121`
-    - `getVdisplayFloatEnabled` / `setVdisplayFloatEnabled` → `phone-control.tsx:78,126`；`a11yStatus` / `openA11ySettings` → `phone-control.tsx:86,131`
-    - `forceDestroyVdisplay` → `phone-control.tsx:143`；`getNotifySetting` / `setNotifySetting` → `notify-settings.tsx:66,86`
+    - `getScreenScope` / `setScreenScope` → `phone-control.tsx:170,283`
+    - `vdisplayStatus` → `phone-control.tsx:180`；`getVdisplayScale` / `setVdisplayScale` → `phone-control.tsx:196,288`
+    - `getVdisplayFloatEnabled` / `setVdisplayFloatEnabled` → `phone-control.tsx:206,293`；`a11yStatus` / `openA11ySettings` / `unlockRestrictedSettings` → `phone-control.tsx:240,298,303`
+    - `forceDestroyVdisplay` → `phone-control.tsx:363`；`getNotifySetting` / `setNotifySetting` → `notify-settings.tsx:66,86`
+    - `shizukuStatus` / `openShizukuManager` / `openExternalLink` → `phone-control.tsx:220,346,326`（外链 key 只有 `shizuku-download` / `shizuku-tutorial`，URL 表在壳侧 `ExternalLinks.kt`）
     - `incomingWorkspacePath` → `incoming-draft.ts:150`；`browserHostStatus` → `browser-tab.tsx:200,250,317` 与 `index.ts:380`
     - `browserHostBounds` → `browser-tab.tsx:229`；`browserHostViewport` → `:335`；`browserHostIdentity` → `:373`；`browserHostShow` → `:256,354`；`browserHostHide` → `:274,283`；`browserHostReload` → `:352`
-    - 本块无页面调用点（归壳侧/文件面板/浏览器插件）：`version`、`checkEngine`、`keepScreenOn`、`showNotification`、`copyText`、`requestAllFilesAccess`、`unlockRestrictedSettings`、`vdisplayCreate`、`vdisplayDestroy`、`vdisplayBounds`、`vdisplaySelect`、`browserHostClose`
+    - 本块无页面调用点（归壳侧/文件面板/浏览器插件）：`version`、`checkEngine`、`keepScreenOn`、`showNotification`、`copyText`、`requestAllFilesAccess`、`vdisplayCreate`、`vdisplayDestroy`、`vdisplayBounds`、`vdisplaySelect`、`browserHostClose`
   - **非 androidBridge 的页壳契约**：`window.dshBackBridge.setAvailable` ← `back-stack.ts:428`（消费方 `MainActivity.kt:803` 注入、`BackGate.kt:126`）；`window.__dshBack` / `__dshBackDepth` 被 `BackGate.kt:38,44` 求值；`window.__dshExportResult` ← `index.ts:432`，生产方 `MainActivity.kt:1030`、`DownloadSaver.kt:61`；`window.__dshThemeBridge.setDark` ← `theme-bridge.ts:68` 与 `dsh-host-web-compat/lib/index.js:381`，生产方 `MainActivity.kt:880,886`；`window.__dshBridge.onDirectoryPicked/onPermissionRequired` ← `dsh-host-web-compat/lib/index.js:398-405`，生产方 `ConfigTransfer.kt:117,241`；`window.__dshOpenPath` ← `dsh-host-web-compat/lib/index.js:409`；看门狗/就绪行经 `console.error` 的 `[dsh-boot-stall]` / `[dsh-boot-ready]` 前缀（`dsh-host-web-compat/lib/index.js:302,267`）被 `LogCollector.kt:740,742` 与 `EngineStartFlow.kt:206,224` 消费。
 - **关键坐标**：
   - `dsh-host-web-compat/lib/index.js:552` — `POLYFILL_SCRIPT_BODY` 逐段补分号 + 换行装配（坑 61 防线①）。
@@ -2479,6 +2480,7 @@ app/src/main/java/com/dsharnessmobile/shell/ShizukuSupport.kt
 app/src/main/java/com/dsharnessmobile/shell/ProcIo.kt
 app/src/main/java/com/dsharnessmobile/shell/FileIncoming.kt
 app/src/main/java/com/dsharnessmobile/shell/PathOpen.kt
+app/src/main/java/com/dsharnessmobile/shell/ExternalLinks.kt
 app/src/main/java/com/dsharnessmobile/shell/ConfigTransfer.kt
 app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt
 app/src/main/java/com/dsharnessmobile/shell/VdisplayHost.kt

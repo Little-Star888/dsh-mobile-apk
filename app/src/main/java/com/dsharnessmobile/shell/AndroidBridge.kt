@@ -84,6 +84,23 @@ class AndroidBridge(
   /** 0.13.5 W4：一键解锁受限设置（Android 13+ 侧载应用默认禁止开启无障碍）。返回 JSON {ok, message}。 */
   private val onUnlockRestrictedSettings: () -> String = { """{"ok":false,"message":"未接线"}""" },
   /**
+   * 0.14.1 设置页「手机控制」：外链唯一出口。页面只能传 key（`shizuku-download` /
+   * `shizuku-tutorial`），URL 表在壳侧 [ExternalLinks]——页面不得传任意地址。
+   */
+  private val onOpenExternalLink: (String) -> String =
+    { _ -> """{"ok":false,"reason":"bridge not wired"}""" },
+  /** 0.14.1 设置页「手机控制」：拉起 Shizuku 管理器界面（未安装 → `not-installed`）。 */
+  private val onOpenShizukuManager: () -> String =
+    { """{"ok":false,"reason":"bridge not wired"}""" },
+  /**
+   * 0.14.1 设置页「手机控制」：Shizuku 特权通道**真实状态**（[ShizukuTransport.status] 全文）。
+   *
+   * 此前该页面拿不到任何 Shizuku 事实：唯一的间接来源是 `vdisplayStatus()`——它只在虚拟屏处于
+   * blocked 时顺带透出 Shizuku 的 code/guidance，其余时候同一位置讲的是虚拟屏。于是标题写着
+   * 「Shizuku 特权通道」、内容却是虚拟屏状态（0.14.1 UI 审查 P0）。本方法是那个错位的正解。
+   */
+  private val onShizukuStatus: () -> String = { """{"ok":false,"code":"shizuku-not-wired"}""" },
+  /**
    * 0.14.1 块J FIX-4：通知设置**读**面（key 为空 = 全量快照）。
    *
    * 默认实现与 [onGetImmersiveMode] 同款：**直接读壳侧单一真源**（`ShellAppContext` 由
@@ -357,9 +374,33 @@ class AndroidBridge(
     onOpenA11ySettings()
   }
 
-  /** 0.13.5 W4：一键解锁受限设置（appops set … ACCESS_RESTRICTED_SETTINGS allow，走 ADB 通道）。 */
+  /** 0.13.5 W4：一键解锁受限设置（appops set … ACCESS_RESTRICTED_SETTINGS allow，走 Shizuku 特权 shell）。 */
   @JavascriptInterface
   fun unlockRestrictedSettings(): String = onUnlockRestrictedSettings()
+
+  /**
+   * 0.14.1 设置页「手机控制」：打开登记在册的外部链接。
+   * @param key 只能是 `shizuku-download` / `shizuku-tutorial`（[ExternalLinks.keys]）；未登记一律拒收。
+   * @return JSON `{ok, reason?}`；reason ∈ `unknown-key` / `insecure-url` / `no-handler` / 异常类名。
+   */
+  @JavascriptInterface
+  fun openExternalLink(key: String): String = onOpenExternalLink(key)
+
+  /**
+   * 0.14.1 设置页「手机控制」：拉起 Shizuku 管理器界面。
+   *
+   * 授权只能由用户在 Shizuku 内完成（被提权方不得自改授权），故壳侧只负责把人送到界面；
+   * 未安装时回 `{"ok":false,"reason":"not-installed"}`，由页面提示去下载。
+   */
+  @JavascriptInterface
+  fun openShizukuManager(): String = onOpenShizukuManager()
+
+  /**
+   * 0.14.1 设置页「手机控制」：Shizuku 特权通道状态（页面据此决定「打开 Shizuku」是否可点）。
+   * 字段：`installed` / `running` / `granted` / `bound` / `binding` / `code` / `guidance` / `ok`。
+   */
+  @JavascriptInterface
+  fun shizukuStatus(): String = onShizukuStatus()
 
   /**
    * 0.14.1 块J FIX-4：通知设置读回（设置页「开发者选项」的初始态与写后读回）。
