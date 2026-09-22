@@ -884,7 +884,7 @@ class MainActivity : ComponentActivity() {
         onExportSettingsDocument = { engineManager.settingsDocumentExport() },
         onCopyTextRequest = { text -> copyTextNative(text) },
         pickToken = pickToken,
-        onRestartEngine = { engineFlow.restart() },
+        onRestartEngine = { engineFlow.restart() },  // S3-15：返回 Boolean，页面据此如实反馈
         onShutdownToGuide = { engineFlow.shutdownToGuide() },
         onReloadWebUI = {
           webView.reload()

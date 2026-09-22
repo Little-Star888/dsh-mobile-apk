@@ -32,7 +32,7 @@ class AndroidBridge(
   private val onGetImmersiveMode: () -> Boolean = { ImmersiveMode.current() },
   private val onCopyTextRequest: (text: String) -> Boolean = { false },
   private val pickToken: String? = null,
-  private val onRestartEngine: () -> Unit = {},
+  private val onRestartEngine: () -> Boolean = { false },
   private val onShutdownToGuide: () -> Unit = {},
   private val onReloadWebUI: () -> Unit = {},
   private val onOpenConsole: () -> Unit = {},
@@ -248,11 +248,14 @@ class AndroidBridge(
   @JavascriptInterface
   fun getPickToken(): String? = pickToken
 
-  /** Restart the engine service process: kill the engine, the EngineService watchdog brings it back. */
+  /**
+   * Restart the engine service process: kill the engine, the EngineService watchdog brings it back.
+   *
+   * S3-15：返回**是否真的发起了**重启（false = 已在重启中或上下文缺失）。页面据此决定要不要进入
+   * 「重启中…」的忙碌态——旧实现是 void，页面只能假装忙碌两秒再自己变回。
+   */
   @JavascriptInterface
-  fun restartEngine() {
-    onRestartEngine()
-  }
+  fun restartEngine(): Boolean = onRestartEngine()
 
   /** Shut down the harness: stop the engine and fall back to the init (startup/test) screen (no auto-restart). */
   @JavascriptInterface

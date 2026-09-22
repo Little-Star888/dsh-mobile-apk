@@ -469,8 +469,14 @@ try{fetch('/api/android/dir-pick/poll',{headers:pickHeaders()}).then(function(r)
 if(j&&j.requestId&&window.androidBridge&&!requestedIds[j.requestId]){
 requestedIds[j.requestId]=true;window.androidBridge.pickDirectory(j.requestId)
 }
-}).catch(function(){}).then(function(){setTimeout(poll,500)})}catch(e){setTimeout(poll,500)}
+}).catch(function(){}).then(schedule)}catch(e){schedule()}
 }
+// S3-22：页面隐藏时暂停轮询（旧实现无条件每 500ms 打一次 /api/android/dir-pick/poll，
+// 应用切到后台/锁屏后照样打——纯耗电与日志噪声；可见时立即续上，不留空窗）。
+// 注意：本段位于模板串内，注释里不得出现反引号。
+var POLL_MS=500;
+function schedule(){if(document.hidden){return}setTimeout(poll,POLL_MS)}
+document.addEventListener('visibilitychange',function(){if(!document.hidden){schedule()}})
 poll()
 })();
 (function(){

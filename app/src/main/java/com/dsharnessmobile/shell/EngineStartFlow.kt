@@ -765,8 +765,10 @@ internal class EngineStartFlow(private val activity: MainActivity) {
    * 流程守卫 → 1s 后重新走启动流程（EngineService 看门狗亦会拉起，
    * 进程级 CAS + 冷却保证双路径幂等）。防连点：in-flight 守卫。
    */
-  fun restart() {
-    if (!engineRestarting.compareAndSet(false, true)) return
+  fun restart(): Boolean {
+    // S3-15：返回「是否真的发起了重启」。页面侧旧实现无论成败都显示「重启中…」两秒后自己变回
+    // ——那是假忙碌。CAS 失败（已在重启中）同样属于「没发起」，如实回 false。
+    if (!engineRestarting.compareAndSet(false, true)) return false
     activity.userClosedEngine = false
     flowGeneration.incrementAndGet()
     EngineService.setUserShutdown(activity, false)
@@ -788,6 +790,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
         engineRestarting.set(false)
       }
     }.start()
+    return true
   }
 }
 
