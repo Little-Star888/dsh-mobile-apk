@@ -745,9 +745,14 @@ class EngineManager(private val context: Context, private val pickToken: String?
    *    references to bundles that do not exist.
    *  - session-persistence-jsonl-index.js: Android link(2) fallback — rebuilt onto 0.1.2-rc.1
    *    source (0.13.3 W9): link(tmp, finalPath) failure on EACCES/EPERM/ENOTSUP → rename fallback.
-   *  - 0.13.3 retirements (both rc.2-locked assets, upstream 0.1.2-rc.1 covers them natively):
-   *    primitives (execCommand clipboard fallback is upstream-native) and fs-local
-   *    (rename fallback is upstream-native). llm-deepseek remains a dormant legacy asset.
+   *  - fs-local-index.js: Android link(2) fallback for the createIfAbsent publication (issue #246).
+   *    Materialised onto 0.1.5-rc.1 source. The 0.13.3 retirement read upstream as covering
+   *    fs-local natively; that holds for the replacement path (plain rename) but not for the
+   *    hard-link no-replace path — the only link(2) call site in this package, and it had no
+   *    fallback at all, so the write tool could not create a new file on Android.
+   *  - 0.13.3 retirements (upstream 0.1.2-rc.1 covers them natively): primitives (execCommand
+   *    clipboard fallback is upstream-native). llm-deepseek remains a dormant legacy asset.
+   *    fs-local left this list again with the fs-local-index.js asset above.
    *  Patches use a content fingerprint (no fixed marker), so an updated asset re-applies on
    *  upgrade instead of being skipped by a stale marker string (the v1→v2 update bug).
    * (v0.12.4 rc8 removed the onImagePicked/llm-deepseek/textzoom patches — rc8's native image
@@ -759,6 +764,8 @@ class EngineManager(private val context: Context, private val pickToken: String?
       File(dshPkgs, "dsh-attachment-local/lib/index.js"))
     applyAssetPatch("patched/session-persistence-jsonl-index.js",
       File(dshPkgs, "dsh-session-persistence-jsonl/lib/index.js"))
+    applyAssetPatch("patched/fs-local-index.js",
+      File(dshPkgs, "dsh-fs-local/lib/index.js"))
   }
 
   /** Overwrite-style patch: applies when the target differs from the bundled asset (content
