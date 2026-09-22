@@ -152,8 +152,29 @@ internal class DirectoryPickerController(private val activity: MainActivity) {
       val callback = pendingPickCallback
       pendingPickCallback = null
       pendingPermissionRequest = false
-      if (callback == null) return@registerForActivityResult
+      // P0-4：这行 `return` 是「点了没反应」的现场——「去授权存储」那条路径**从不开选择器**，
+      // 因而不设 pendingPickCallback，回调进来第一件事就是 return，于是用户点「拒绝」后：
+      // 无 toast、无 hint、chip 不变、什么都没有。现在无论有没有在途选择都给可见回执。
       val granted = !grants.values.contains(false)
+      if (callback == null) {
+        // 授权入口（非 pick 在途）路径：结果要看得见，且要区分「本次拒绝」与「永久拒绝」。
+        if (granted) {
+          toastIfPossible("存储权限已授予")
+        } else {
+          // 永久拒绝（勾了「不再询问」）后再点系统框也不弹，必须引导去系统设置页——文案不同、下一步不同。
+          val permanent = grants.keys.any { grants[it] != true && !activity.shouldShowRequestPermissionRationale(it) }
+          toastIfPossible(
+            if (permanent) {
+              "存储权限已被拒绝且不再询问——请在系统「应用信息 → 权限 → 文件和媒体」里手动开启"
+            } else {
+              "存储权限未授予——应用暂时无法读写公共目录（Documents/dshdata），可再点一次「去授权存储」"
+            },
+          )
+        }
+        // chip 必须跟着真实结果变（此前拒绝后 chip 仍是「去授权存储」，看起来像没生效过）。
+        activity.guideRenderer.refreshGuideMeta()
+        return@registerForActivityResult
+      }
       if (granted) {
         // 授权成功：占槽 + 起 SAF 树选择器（外部工作区=真实路径）。
         pendingPickCallback = callback
@@ -279,9 +300,20 @@ internal class DirectoryPickerController(private val activity: MainActivity) {
       // Some OEMs lack the per-app screen; fall back to the global one.
       try {
         activity.startActivity(Intent(android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
-      } catch (_: Exception) {
-        // 无任何可用入口：静默忽略（引擎侧会以取消结算）。
+      } catch (e2: Exception) {
+        // P0-4：两级入口都失败时此前是空 catch「静默忽略」——用户按了「去授权存储」看不到任何反应。
+        // 现在必须说话：告诉他系统没有这个页面，以及可以怎么办（下一步动作）。
+        toastIfPossible("系统没有提供「所有文件访问」设置页——请改用「应用信息 → 权限」逐项授权，或改用文件选择器指定目录")
+        Log.w("dsh-storage", "no All-Files-Access entry on this ROM: " + e2.message)
       }
+    }
+  }
+
+  /** 用户可见回执（Toast）。统一收口：凡是「用户按了某入口」的路径都必须能说话。 */
+  private fun toastIfPossible(msg: String) {
+    try {
+      android.widget.Toast.makeText(activity, msg, android.widget.Toast.LENGTH_LONG).show()
+    } catch (_: Throwable) {
     }
   }
 

@@ -9,6 +9,7 @@
 // route. Protected rows need a local guard marker; narrow public rows need a response marker and a
 // reviewed rationale.
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { TAR } from './lib/shell.mjs'
 import { dirname, join, relative } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
@@ -252,7 +253,7 @@ if (snapshotIndex >= 0 && snapshotPath === undefined) {
         marker,
         tarPath: 'home/.dsh/profiles/' + profile + '/node_modules/' + relativePath,
       }))
-      const result = spawnSync('tar', ['-xOf', snapshotPath, ...entries.map((entry) => entry.tarPath)], {
+      const result = spawnSync(TAR, ['-xOf', snapshotPath, ...entries.map((entry) => entry.tarPath)], {
         encoding: 'utf8',
         maxBuffer: 32 * 1024 * 1024,
       })

@@ -158,9 +158,13 @@ export function apply(ctx: Context): void {
     },
   }))
 
-  /** 会话键：生命周期 op 一律带归属会话，壳侧据此做单实例归属校验（0.14.0）。 */
+  /** 会话对象（`exec.agent.session` 原样）——**档位门**要的是它，不是 id 字符串。 */
+  const rawSessionOf = (exec: unknown): unknown =>
+    (exec as { agent?: { session?: unknown } } | undefined)?.agent?.session
+
+  /** 会话 id：生命周期 op 的**归属键**，壳侧据此做单实例归属校验（0.14.0）。 */
   const sessionOf = (exec: unknown): string | undefined => {
-    const session = (exec as { agent?: { session?: unknown } } | undefined)?.agent?.session
+    const session = rawSessionOf(exec)
     if (typeof session === 'string' && session !== '') return session
     if (session !== null && session !== undefined && typeof session === 'object') {
       const id = (session as { id?: unknown }).id
@@ -173,7 +177,8 @@ export function apply(ctx: Context): void {
    * AI 自主建屏：把 vd* 生命周期 op 经控制队列投递给壳侧（neverA11y 的壳桥 op 借队列投递）。
    * 失败一律结构化（ok:false + 稳定 code/guidance），从不静默，也不在工具层猜测壳侧状态。
    */
-  const callVdOp = async (op: VdOp, timeoutMs: number, session?: string, extra?: Record<string, unknown>): Promise<Record<string, unknown>> => {
+  const callVdOp = async (op: VdOp, timeoutMs: number, exec?: unknown, extra?: Record<string, unknown>): Promise<Record<string, unknown>> => {
+    const session = sessionOf(exec)
     // **必须以服务对象为接收者调用**（0.14.0 设备实锤：Agent 全工具扫描揪出）。
     //
     // 错误写法（曾存在）：先 const controlExec = faceOf()?.controlExec，再 controlExec(op, ...)。
@@ -194,8 +199,22 @@ export function apply(ctx: Context): void {
     }
     try {
       const payload: Record<string, unknown> = { ...(extra ?? {}) }
+      // 两个「会话」用途不同，别混：
+      //   · payload.session —— 壳侧单实例**归属**校验（0.14.0：生命周期 op 带归属会话）；
+      //   · auth.session    —— bridge 服务面的**档位门**来源。`TIER_REQUIRED_OPS`（含 vdInput）
+      //     按 resolveAuth 取值顺序「显式 auth > AsyncLocalStorage 绑定 > 无」解析，解析不到即
+      //     fail-closed 拒绝。0.14.1 设备实测：本插件此前只给 payload、不给 auth，也不 bindSession
+      //     ⇒ `android_vdisplay_input` 恒回「缺少调用方会话」，而工具描述与三处指引都在承诺它可用。
       if (session !== undefined) payload.session = session
-      const reply = await service.controlExec(op, payload, timeoutMs)
+      // 档位门（`authorizePrivileged` → `gateFor` → `sandboxPolicy.resolve({session})`）要的是
+      // **会话对象**，不是 id 字符串：上游 resolve 会访问会话上的成员，传字符串会抛
+      // 「session.snapshotEvents is not a function」——设备实测（W2 真实任务）第一次修就是
+      // 传了 id 字符串，于是 vdInput 从「denied-no-session」变成另一条失败，仍旧不可用。
+      // 与 manage 的 `bindSession(exec?.agent?.session)` 同源：**原样传对象**。
+      const raw = rawSessionOf(exec)
+      const reply = await service.controlExec(
+        op, payload, timeoutMs, raw === undefined || raw === null ? undefined : { session: raw },
+      )
       if (reply === null || typeof reply !== 'object' || reply.ok !== true) {
         const message = typeof reply?.error === 'string' && reply.error !== ''
           ? reply.error
@@ -255,7 +274,7 @@ export function apply(ctx: Context): void {
       + '此时请用 android_vdisplay_status 复核，不要假设屏幕已存在。',
     parameters: {},
     output: lifecycleOutput('虚拟屏创建') as never,
-    execute: async (_args: unknown, exec: unknown) => callVdOp('vdCreate', 45_000, sessionOf(exec)) as never,
+    execute: async (_args: unknown, exec: unknown) => callVdOp('vdCreate', 45_000, exec) as never,
   }))
 
   ctx.tools.register(defineTool({
@@ -265,7 +284,7 @@ export function apply(ctx: Context): void {
       + '调用前应确认虚拟屏上没有任何未保存的用户工作。',
     parameters: {},
     output: lifecycleOutput('虚拟屏销毁') as never,
-    execute: async (_args: unknown, exec: unknown) => callVdOp('vdDestroy', 30_000, sessionOf(exec)) as never,
+    execute: async (_args: unknown, exec: unknown) => callVdOp('vdDestroy', 30_000, exec) as never,
   }))
   /** 输入工具的拒绝形态（与 callVdOp 的失败形态同形，便于模型统一处理）。 */
   const rejectInput = (guidance: string): Record<string, unknown> => ({ ok: false, code: 'invalid-arguments', guidance })
@@ -350,7 +369,7 @@ export function apply(ctx: Context): void {
       } else {
         return rejectInput('verb 必须是 tap / swipe / keyevent / text') as never
       }
-      return { ...(await callVdOp('vdInput', 15_000, sessionOf(exec), payload)), verb } as never
+      return { ...(await callVdOp('vdInput', 15_000, exec, payload)), verb } as never
     },
   }))
 

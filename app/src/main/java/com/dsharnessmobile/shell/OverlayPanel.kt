@@ -72,6 +72,21 @@ class OverlayPanel(private val svc: OverlayService) {
   private val qSingle = HashMap<String, String>()               // 单选暂存：questionId → label
   private val qCustom = HashMap<String, String>()               // 自定义答案：questionId → text
   private var qPage = 0                                          // 多问分页（官方卡 1/N 风格）
+  /**
+   * 选项超过 6 项时「展开全部」的记忆（questionId 集合）。P0-8：此前 `coerceAtMost(6)` 直接丢弃
+   * 第 7 项起的候选，无任何提示——用户看不到剩余项，只能手打。现在默认仍只列 6 项（卡面高度有限），
+   * 但给出「还有 N 项（点此展开）」的可点入口，展开后全量列出。
+   */
+  private val qOptsExpanded = HashSet<String>()
+  /**
+   * 审批「批准一次」的二次确认态（P0-9）。
+   *
+   * 证书：批准的是一次**真实工具执行**（`reason` 里往往就是待执行命令），而此前两枚 12sp 小药丸
+   * 水平紧邻、单击即放行、无撤销。现在首次点击只进入「待确认」，第二次点击（10 秒内）才放行；
+   * 超时或点了「取消」即撤臂，避免陈旧待确认态把后来的一次单击变成放行。
+   */
+  private var approvalArmedId: String? = null
+  private var approvalArmedAtMs = 0L
   private var pendingKey = ""                                    // 当前卡指纹（kind:eventId），变化即清作答态
   private var renderedCardKey = ""                               // 卡片已渲染指纹（防 live 流重绘打断输入）
 
@@ -186,7 +201,9 @@ class OverlayPanel(private val svc: OverlayService) {
     val key = currentPending()?.let { "${it.first}:${(it.second as? PendingApproval)?.eventId ?: (it.second as? PendingQuestion)?.eventId ?: ""}" } ?: ""
     if (key != pendingKey) {
       pendingKey = key
-      multiSel.clear(); qSingle.clear(); qCustom.clear(); qPage = 0; renderedCardKey = ""
+      multiSel.clear(); qSingle.clear(); qCustom.clear(); qOptsExpanded.clear(); qPage = 0; renderedCardKey = ""
+      // 卡换了就撤臂：待确认态绝不跨卡片存活（否则后来的一次单击会变成放行）。
+      approvalArmedId = null
     }
     updateBallOnly()
   }
@@ -613,8 +630,33 @@ class OverlayPanel(private val svc: OverlayService) {
       }
       box.addView(body)
       val buttonRow = LinearLayout(svc).apply { orientation = LinearLayout.HORIZONTAL }
-      buttonRow.addView(pendingChip("批准一次", filled = true, red = false, dp) { respondApproval(a, "allowed-once") }, lpChip(dp))
-      buttonRow.addView(pendingChip("拒绝", filled = false, red = true, dp) { respondApproval(a, "rejected") }, lpChip(dp))
+      // P0-9：放行 = 一次真实工具执行（reason 里往往就是待执行命令），而全界面代价最大的一步
+      // 此前交互最轻（单击即放行、无撤销）。现在改成两步：首点进入待确认（药丸变红加粗 + 出现「取消」），
+      // 10 秒内再点同一按钮才真正放行。超出窗口即重新进入待确认（不让陈旧状态吞掉一次单击）。
+      val armed = approvalArmed(approvalArmedId, approvalArmedAtMs, a.eventId, System.currentTimeMillis())
+      buttonRow.addView(
+        pendingChip(if (armed) "确认批准（执行）" else "批准一次", filled = true, red = false, dp) {
+          if (!armed) {
+            approvalArmedId = a.eventId
+            approvalArmedAtMs = System.currentTimeMillis()
+            renderPendingCard(true)
+            return@pendingChip
+          }
+          approvalArmedId = null
+          respondApproval(a, "allowed-once")
+        },
+        lpChip(dp),
+      )
+      if (armed) {
+        buttonRow.addView(pendingChip("取消", filled = false, red = false, dp) {
+          approvalArmedId = null
+          renderPendingCard(true)
+        }, lpChip(dp))
+      }
+      buttonRow.addView(pendingChip("拒绝", filled = false, red = true, dp) {
+        approvalArmedId = null
+        respondApproval(a, "rejected")
+      }, lpChip(dp))
       box.addView(buttonRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
         setMargins(0, (6 * dp).toInt(), 0, 0)
       })
@@ -660,7 +702,13 @@ class OverlayPanel(private val svc: OverlayService) {
     // 选项行：[编号徽章] 标签(粗) + 描述(灰)，选中淡蓝底
     val opts = item.optJSONArray("options")
     if (opts != null) {
-      for (oi in 0 until opts.length().coerceAtMost(6)) {
+      // P0-8：第 7 项起此前被 `coerceAtMost(6)` **静默丢弃**（无提示、无展开），引擎给 7 个以上
+      // 选项时用户看不到剩余候选，只能被迫手打。现在默认列 6 项（卡面高度有限）+ 一行明示入口。
+      val optsTotal = opts.length()
+      val expanded = qOptsExpanded.contains(qid)
+      val optsShown = optionsShownCount(optsTotal, expanded)
+      val optsHidden = optionsHiddenCount(optsTotal, expanded)
+      for (oi in 0 until optsShown) {
         val o = opts.optJSONObject(oi) ?: continue
         val label = o.optString("label").ifBlank { "选项${oi + 1}" }
         val on = if (multi) multiSel[qid]?.contains(label) == true else qSingle[qid] == label
@@ -703,6 +751,19 @@ class OverlayPanel(private val svc: OverlayService) {
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = (8 * dp).toInt() })
         box.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
           setMargins(0, 0, 0, (4 * dp).toInt())
+        })
+      }
+      if (optsHidden > 0) {
+        // 明示「还有什么」，并给出展开入口（再一次点击回到折叠态，避免卡面失控）。
+        box.addView(TextView(svc).apply {
+          text = "还有 $optsHidden 项（点此展开全部 $optsTotal 项）"
+          textSize = 12f
+          setTextColor(0xFF4176E6.toInt())
+          setPadding((6 * dp).toInt(), (8 * dp).toInt(), (6 * dp).toInt(), (8 * dp).toInt())
+          minHeight = (44 * dp).toInt()
+          contentDescription = "展开剩余 $optsHidden 个选项"
+          isClickable = true
+          setOnClickListener { qOptsExpanded.add(qid); renderPendingCard(true) }
         })
       }
     }
@@ -760,13 +821,42 @@ class OverlayPanel(private val svc: OverlayService) {
       gravity = Gravity.CENTER_VERTICAL
     }
     if (n > 1) {
+      // P0-7：此前整个「‹ 1/N ›」是**一个** TextView，监听写成 (qPage + 1) % n —— 视觉上的「上一题」
+      // 实际跳下一题，末页还回卷到第 1 页（用户按了会做错事）。现在拆成两个独立可点区域：
+      // 左=上一题（首页禁用）、右=下一题（末页禁用），都不回卷；中间只作进度标签。
+      // 热区 ≥44dp（批 5 的同批口径：可点元素不得小于触摸目标下限）。
+      val pagerFont = 15f
       foot.addView(TextView(svc).apply {
-        text = "‹ ${qPage + 1}/$n ›"
+        text = "‹"
+        textSize = pagerFont
+        gravity = Gravity.CENTER
+        setTextColor(if (qPage > 0) textColor else subColor)
+        alpha = if (qPage > 0) 1f else 0.4f
+        minWidth = (44 * dp).toInt()
+        minHeight = (44 * dp).toInt()
+        contentDescription = "上一题"
+        isEnabled = qPage > 0
+        isClickable = qPage > 0
+        if (qPage > 0) setOnClickListener { qPage = pagerIndex(qPage, n, -1); renderPendingCard(true) }
+      })
+      foot.addView(TextView(svc).apply {
+        text = "${qPage + 1}/$n"
         textSize = 12f
         setTextColor(subColor)
-        setPadding((4 * dp).toInt(), (6 * dp).toInt(), (4 * dp).toInt(), (6 * dp).toInt())
-        isClickable = true
-        setOnClickListener { qPage = (qPage + 1) % n; renderPendingCard(true) }
+        gravity = Gravity.CENTER
+      })
+      foot.addView(TextView(svc).apply {
+        text = "›"
+        textSize = pagerFont
+        gravity = Gravity.CENTER
+        setTextColor(if (qPage < n - 1) textColor else subColor)
+        alpha = if (qPage < n - 1) 1f else 0.4f
+        minWidth = (44 * dp).toInt()
+        minHeight = (44 * dp).toInt()
+        contentDescription = "下一题"
+        isEnabled = qPage < n - 1
+        isClickable = qPage < n - 1
+        if (qPage < n - 1) setOnClickListener { qPage = pagerIndex(qPage, n, +1); renderPendingCard(true) }
       })
       foot.addView(View(svc), LinearLayout.LayoutParams(0, 1, 1f))
       if (qPage > 0) {
@@ -1000,7 +1090,16 @@ class OverlayPanel(private val svc: OverlayService) {
         else it.visibility = View.GONE
       }
       updateClock()
-      stopBtn?.alpha = if (svc.sessionBusy) 1f else 0.35f
+      // P0-6：此前只改 alpha（看起来禁用、实际可点），点了落到 requestStop 的第一支
+      // 「if (!sessionBusy) return」——静默返回，什么都不发生。现在视觉与行为一致：
+      // 空闲/引擎离线时**真的禁用**（isEnabled=false 且不可点），面板状态行同时显示「空闲」。
+      stopBtn?.let {
+        val canStop = svc.sessionBusy
+        it.alpha = if (canStop) 1f else 0.35f
+        it.isEnabled = canStop
+        it.isClickable = canStop
+        it.contentDescription = if (canStop) "停止当前任务" else "停止当前任务（当前没有运行中的任务）"
+      }
       renderPendingCard()
     }
   }
@@ -1220,3 +1319,62 @@ internal data class PendingApproval(val eventId: String, val agentId: String, va
 
 /** AI 提问待处理项（$events waterfall 帧投影，request.questions 原始 JSONArray）。 */
 internal data class PendingQuestion(val eventId: String, val agentId: String, val items: org.json.JSONArray, var submittedAt: Long = 0L)
+
+// ── 待答卡/审批卡的常量（顶层：纯判据函数与 UI 代码共用同一份真源）──────────────────
+
+/** 折叠态一次列出的选项数（卡面高度有限；超出的走「还有 N 项」入口，绝不静默丢弃）。 */
+internal const val OPTIONS_COLLAPSED_MAX = 6
+
+/** 审批二次确认的有效窗口：超窗即撤臂，避免陈旧待确认态把后来的一次单击变成放行。 */
+internal const val APPROVAL_ARM_MS = 10_000L
+
+// ── 待答卡/审批卡的纯判据（0.14.1 批 2；纯 JVM 单测，不需要 Robolectric）──────────────
+//
+// 为什么抽成顶层纯函数：这三条都是「用户点一下会发生什么」的判据，此前散在监听器里，
+// 于是一类缺陷（箭头方向错、候选被丢、放行无确认）**没有任何离线判据**，只能靠设备实报。
+// 抽出来之后，「改坏即判红」的单测可以钉住语义（见 OverlayPendingCardTest）。
+
+/**
+ * 翻页索引（**钳制，不回卷**）。
+ *
+ * P0-7 的语义纠正：旧实现把「‹ 1/N ›」整块做成一枚按钮，监听写成 `(qPage + 1) % n`
+ * ——点视觉上的「上一题」实际跳下一题，末页还会回卷到第 1 页（多问题卡片上这是**做错事**）。
+ * @param current - 当前页（0 基）。
+ * @param total - 总页数。
+ * @param delta - -1 上一题 / +1 下一题。
+ * @return 钳制在 [0, total-1] 的页号；越界点击保持原页（按钮本身在端点禁用，这里做二重保险）。
+ */
+internal fun pagerIndex(current: Int, total: Int, delta: Int): Int {
+  if (total <= 0) return 0
+  return (current + delta).coerceIn(0, total - 1)
+}
+
+/**
+ * 折叠态一次展示的选项数（P0-8）。
+ *
+ * 旧实现是 `coerceAtMost(6)` 直接**丢弃**第 7 项起的候选——用户看不到剩余项，只能手打。
+ * 现在折叠 ≠ 丢弃：折叠只决定「先列几项」，剩余项由「还有 N 项（点此展开）」入口补足。
+ */
+internal fun optionsShownCount(total: Int, expanded: Boolean): Int {
+  if (total <= 0) return 0
+  return if (expanded) total else total.coerceAtMost(OPTIONS_COLLAPSED_MAX)
+}
+
+/** 折叠态被隐藏的候选数（> 0 时必须给出可见入口）。 */
+internal fun optionsHiddenCount(total: Int, expanded: Boolean): Int =
+  (total - optionsShownCount(total, expanded)).coerceAtLeast(0)
+
+/**
+ * 审批「批准一次」是否处于**已确认待放行**态（P0-9）。
+ *
+ * 放行的是一次真实工具执行（reason 里往往就是待执行命令），而此前单击即放行。
+ * 判据要点：① 必须是**同一张卡**（armedId 相等）——换卡即撤臂，杜绝陈旧状态把后来的一次单击变成放行；
+ * ② 必须落在确认窗口内（超窗视为未确认）。
+ */
+internal fun approvalArmed(
+  armedId: String?,
+  armedAtMs: Long,
+  eventId: String,
+  nowMs: Long,
+  windowMs: Long = APPROVAL_ARM_MS,
+): Boolean = armedId != null && armedId == eventId && nowMs - armedAtMs in 0 until windowMs

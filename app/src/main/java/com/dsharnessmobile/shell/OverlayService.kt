@@ -597,9 +597,12 @@ class OverlayService : Service() {
     }.start()
   }
 
-  /** 停止当前轮次：仅工作中可用（无轮次时按钮已置灰，不再静默 return——P4）。 */
+  /** 停止当前轮次：仅工作中可用（无轮次时按钮已置灰，不再静默 return——P4/P0-6）。 */
   internal fun requestStop() {
-    if (!sessionBusy) return
+    // 注释此前就写着「不再静默 return」，而代码里这一行一直在静默返回（P0-6 复核发现：
+    // 注释说的修法与代码不一致）。按钮现已按忙态真正禁用，此支只剩「渲染与点击之间的竞态」，
+    // 仍要给出可见回执——用户视角里「点了没反应」正是这样产生的。
+    if (!sessionBusy) { flashStatus("当前没有正在运行的任务"); return }
     if (!engineRunning) { flashStatus("引擎离线，无法停止"); return }
     if (activeSessionId.isEmpty()) { flashStatus("无活动会话"); return }
     setHalo(Halo.WORKING)

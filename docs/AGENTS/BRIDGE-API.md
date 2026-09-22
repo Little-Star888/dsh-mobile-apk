@@ -177,6 +177,24 @@ cd ..\plugins\dsh-android-<pkg> && npm run build
 | 页面 → 壳 | `openExternalLink(key)` | AndroidBridge → MainActivity → `ExternalLinks.open` | 外部链接的唯一出口。`key ∈ {shizuku-download, shizuku-tutorial}`，**URL 表在壳侧 `ExternalLinks.kt`，页面不传 URL**（页面内容按不可信处理，避免把「拉起任意 Intent」的能力交给页面）。两个 key 共用同一条通道。返回 `{ok, reason?}`，reason ∈ `unknown-key` / `insecure-url` / `no-handler` / 异常类名；登记值一律 https |
 | 同上（页面消费） | — | `dsh-client-ui-responsive/src/client/dev-section/phone-control.tsx` | 「下载 Shizuku」与「点击查看教程」→ `openExternalLink`；「打开 Shizuku」→ `openShizukuManager`（未安装时禁用）；受限设置解锁 → `unlockRestrictedSettings`（0.14.1 前该桥方法**零页面调用点**） |
 
+## 0.14.1 增量（通知落点与自检面——批 4，2026-09-22）
+
+> 背景：0.14.1 UI 审查发现整族通知是**单向公告板**——`contentIntent` 一直在写 `dsh.notify.*`
+> extras 而全仓没有读取者、`MainActivity` 连 `onNewIntent` 都没有；同时 `selfCheck` 与两个系统设置
+> 深链在页面侧零调用点（「系统已降级，应用无法调回」这句用户永远看不到）。另外
+> `cat.question` / `cat.approval` 被关掉时通知被**丢弃**，而引擎侧提问/审批**没有超时**
+> ⇒ 任务永久挂起（用户看到的是「AI 不动了」），已改为「静默投递」。
+
+| 方向 | 方法 | 位置 | 说明 |
+|---|---|---|---|
+| 壳 → 页面 | `window.__dshOpenSession(sessionId): boolean` | `dsh-client-ui-responsive/src/client/mobile/notify-landing.ts`（`apply` 里挂到 window） | 通知落点的**页面半**：切到目标会话。契约 = **同步返回 boolean**（true 已确认切换 / false 未切过去），壳侧 `MainActivity.deliverNotifyRoute` 依 evaluateJavascript 回执给可见提示。判据不做事后无验证的成功声明：未加载的会话先 `open()` 再回头确认 `scope()` |
+| 页面 → 壳 | `notifySelfCheck()` | AndroidBridge（默认实现读 `ShellAppContext`）→ `NotifyCenter.selfCheck` | 每渠道**系统实际状态**（enabled/importance/是否被降级）JSON。默认实现钉在真源上、不依赖 MainActivity 传参（漏接线这一失效形态从结构上消失） |
+| 页面 → 壳 | `openNotifyAppSettings()` | AndroidBridge → MainActivity → `NotifyCenter.appSettingsIntent` | 系统「本应用通知设置」深链；返回 boolean，false = 该 ROM 无此页（页面如实提示，不假装拉起过） |
+| 页面 → 壳 | `openNotifyChannelSettings(channelId)` | AndroidBridge → MainActivity → `NotifyCenter.channelSettingsIntent` | 渠道级深链；channelId 来自 `notifySelfCheck` 回执 |
+| 同上（页面消费） | — | `src/client/dev-section/notify-settings.tsx` | 「通知自检」+「系统通知设置」两枚入口 + 每渠道一行「系统实际状态 + 打开该渠道设置」；五类开关各配一句「关掉会怎样」（提问/授权两类写明「关闭 = 不弹窗，仍可作答」） |
+| 壳侧语义变更 | — | `NotifyCenter.Face.interactive` | 交互类（question/approval）类别关闭 ⇒ **降级为静默渠道**（不弹窗不响铃、仍投递、仍可作答），不再 `return DISABLED`；非交互类（report/todo/silent）才允许丢弃 |
+| 壳侧载荷修正 | `dsh.notify.*` extras | `NotifyCenter.EXTRA_KIND / EXTRA_TARGET_SESSION / EXTRA_TARGET_AGENT` | 旧实现把 `sessionId` 与 `agentId` **依次写进同一个 key**（后写覆盖先写）。现按键语义拆开，读取者 = `MainActivity.consumeNotifyRoute` / `onNewIntent` |
+
 ## 0.13.7 增量（追上游 dsh 0.1.5，2026-09-10）
 
 > 本节为本轮桥面变更的权威增量；上行各表仍是 0.13.3-0.13.6 的行号锚点，未逐行重排。

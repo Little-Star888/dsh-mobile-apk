@@ -13,7 +13,7 @@ import java.io.File
 
 /** 引导页（启动/测试界面）纯代码 UI：GuidePhase 状态机驱动视图渲染 + WebUI/引导页切换（自 MainActivity 拆出）。 */
 
-internal enum class GuidePhase { Idle, Starting, Extracting, Updating, Recovering, Undoing, Error, Closed }
+internal enum class GuidePhase { Idle, Starting, Extracting, Updating, Recovering, Undoing, Error, Closed, Info }
 
 internal class GuidePageRenderer(private val activity: MainActivity) {
 
@@ -108,7 +108,7 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
       GuidePhase.Starting, GuidePhase.Extracting -> activity.getString(R.string.ds_starting)
       GuidePhase.Updating -> activity.getString(R.string.ds_updating)
       GuidePhase.Undoing -> activity.getString(R.string.ds_undoing)
-      GuidePhase.Idle -> activity.getString(R.string.ds_start_engine)
+      GuidePhase.Idle, GuidePhase.Info -> activity.getString(R.string.ds_start_engine)
     }
 
     val showProgress = busy
@@ -120,12 +120,28 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
       GuidePhase.Error, GuidePhase.Closed -> activity.getColor(R.color.ds_danger)
       GuidePhase.Updating, GuidePhase.Extracting -> activity.getColor(R.color.ds_warn)
       GuidePhase.Starting, GuidePhase.Recovering, GuidePhase.Undoing -> activity.getColor(R.color.ds_accent)
-      GuidePhase.Idle -> activity.getColor(R.color.ds_text_tertiary)
+      // Info = 中性事实陈述（本版没有这项能力、无需处理），既不是故障（红）也不是进行中（黄）。
+      GuidePhase.Idle, GuidePhase.Info -> activity.getColor(R.color.ds_text_tertiary)
     }
     chrome.statusDot.background = DsUi.oval(dotColor)
     setStatusPulse(busy)
     refreshGuideMeta()
   }
+
+  /** 只更新副标题（不动相位/状态点/主按钮）。
+   *
+   *  用途：**不可打断的相位**（首启解压 / 启动 / 回滚）进行中，旁路动作（如「检查更新」）的结果
+   *  不该抢占状态行——否则「正在更新运行时 686MB」会被一行「本版不提供在线更新」顶掉，
+   *  用户以为解压被取消了（设备实测：首启解压期间点「检查更新」正是这个现象）。 */
+  fun applyGuideHint(text: String) {
+    chrome.statusHint.text = text
+    chrome.statusHint.visibility = if (text.isBlank()) View.GONE else View.VISIBLE
+  }
+
+  /** 当前相位是否为**不可打断**（旁路动作只能写 hint，不得改相位）。 */
+  fun phaseLocked(): Boolean = lastGuidePhase == GuidePhase.Starting ||
+    lastGuidePhase == GuidePhase.Extracting ||
+    lastGuidePhase == GuidePhase.Undoing
 
   private fun defaultHint(phase: GuidePhase): String = when (phase) {
     GuidePhase.Starting -> "首次启动会解压内嵌运行时，请保持应用在前台。"
@@ -136,6 +152,7 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
     GuidePhase.Error -> "可打开控制台查看 engine.log，或点击重试。"
     GuidePhase.Closed -> "引擎已停止，不会自动恢复。"
     GuidePhase.Idle -> "引擎就绪后将进入 DeepCode。"
+    GuidePhase.Info -> "运行时随安装包一起更新：安装新版 APK 即完成升级。"
   }
 
   private fun setStatusPulse(on: Boolean) {
@@ -328,7 +345,12 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
       return
     }
     if (!UpdateChecker.canInstall(activity)) {
+      // P0-3：此前这里只改 hint，而按钮还停在「下载中 100%」且 `enabled=false`——文案让用户
+      // 「再点按钮」而按钮收不到点击，唯一出路是杀应用重来（且内存里的 apkReadyToInstall 会丢）。
+      // 现在把按钮复原成**可点**的「授权后继续安装」：onUpdateButton 见到 apkReadyToInstall 即走
+      // continueInstall，所以「再点按钮」这句文案从此是事实。
       apkHint(activity.getString(R.string.ds_apk_need_permission))
+      setUpdateButton(activity.getString(R.string.ds_apk_grant_install), enabled = true)
       UpdateChecker.requestInstallPermission(activity)
       return
     }
@@ -347,7 +369,11 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
   fun settlePendingInstall() {
     if (apkReadyToInstall == null || apkBusy) return
     if (UpdateChecker.canInstall(activity)) continueInstall()
-    else apkHint(activity.getString(R.string.ds_apk_permission_denied))
+    else {
+      // 拒绝并返回：文案说清「还能怎么办」，按钮保持可点（P0-3）——用户可直接再点，或去授权页。
+      apkHint(activity.getString(R.string.ds_apk_permission_denied))
+      setUpdateButton(activity.getString(R.string.ds_apk_grant_install), enabled = true)
+    }
   }
 
   private fun toast(msg: String) {

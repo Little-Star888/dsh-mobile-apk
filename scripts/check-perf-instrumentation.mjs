@@ -13,6 +13,7 @@
 // 用法：node scripts/check-perf-instrumentation.mjs [--require] [--snapshot <tar>] [--abi <arm64|x86_64>]
 // 退出码：0 = 通过（SKIP 有计数）；1 = 失败。
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, statSync } from 'node:fs'
+import { TAR } from './lib/shell.mjs'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -130,7 +131,7 @@ if (p1Ok) {
 const autoTar = join(ROOT, '.deploy-tmp', 'snapshot-013', ABI, 'snapshot.tar.xz')
 const tarPath = argOf('snapshot') || (existsSync(autoTar) ? autoTar : null)
 const readFromTar = (tar, member) => {
-  try { return execFileSync('tar', ['-xO', '-f', tar, member], { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 }) } catch { return null }
+  try { return execFileSync(TAR, ['-xO', '-f', tar, member], { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 }) } catch { return null }
 }
 if (!tarPath) {
   skip('无快照可对账（--snapshot <tar> 或 ' + autoTar + '）——A1 出厂值未在真实产物上核对')

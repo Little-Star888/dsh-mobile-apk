@@ -23,6 +23,7 @@
 //   --require   严格模式：任何 SKIP 分支转失败（构建链/发布链必须用）
 // 退出码：0 = 通过（或非严格模式下明确计数并打印的 SKIP）；1 = 资产与快照不同源 / 严格模式下缺件。
 import { readFileSync, existsSync, readdirSync } from 'node:fs'
+import { TAR } from './lib/shell.mjs'
 import { createHash } from 'node:crypto'
 import { join, dirname, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -81,7 +82,7 @@ const sourcesFor = (asset) => {
 /** 从快照里取源文件字节（tar -xO；工作目录切到快照目录，规避 Windows/MSYS 的绝对路径改写）。 */
 const readFromSnapshot = (path) => {
   try {
-    return execFileSync('tar', ['-xO', '-f', SNAPSHOT_NAME, path], {
+    return execFileSync(TAR, ['-xO', '-f', SNAPSHOT_NAME, path], {
       cwd: dirname(SNAP),
       maxBuffer: 64 * 1024 * 1024,
     })

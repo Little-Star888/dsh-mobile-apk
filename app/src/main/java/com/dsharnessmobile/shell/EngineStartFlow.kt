@@ -308,16 +308,33 @@ internal class EngineStartFlow(private val activity: MainActivity) {
     activity.guideRenderer.chrome.updateButton.isEnabled = false
     activity.guideRenderer.chrome.updateButton.alpha = 0.55f
     activity.applyGuidePhase(GuidePhase.Updating, "检查更新…")
-    UpdateManager(activity).checkAndApply { status ->
+    UpdateManager(activity).checkAndApply { st ->
       activity.runOnUiThread {
-        val done = status.startsWith("更新完成") || status.startsWith("更新失败")
-        activity.applyGuidePhase(
-          if (status.startsWith("更新失败")) GuidePhase.Error
-          else if (status.startsWith("更新完成")) GuidePhase.Recovering
-          else GuidePhase.Updating,
-          status,
-        )
-        if (done) {
+        // 相位由**类型**决定（0.14.1 批 2 / P0-2）：旧实现按字符串前缀猜，于是「本版没配发布源」
+        // 被当失败渲染成满屏红字，而那串错误里写着 overrideManifestUrl（只存在于代码里的名字）。
+        // 现在 NotConfigured 走 Info（中性事实 + 下一步），只有真正的失败才是红。
+        //
+        // 但**不可打断的相位**（首启解压/启动/回滚）进行中不许抢占状态行：那时用户正盯着一件
+        // 不能中断的事，旁路结果只写 hint（设备实测：解压到 686MB 时点「检查更新」会把进度顶掉）。
+        val locked = activity.guideRenderer.phaseLocked()
+        val phase = when (st.outcome) {
+          UpdateManager.UpdateOutcome.NotConfigured -> GuidePhase.Info
+          UpdateManager.UpdateOutcome.Failed -> GuidePhase.Error
+          UpdateManager.UpdateOutcome.Done -> GuidePhase.Recovering
+          UpdateManager.UpdateOutcome.Working -> GuidePhase.Updating
+        }
+        if (locked) {
+          activity.guideRenderer.applyGuideHint(
+            if (phase == GuidePhase.Error) st.text else st.text + "（当前动作不受影响）",
+          )
+        } else {
+          activity.applyGuidePhase(
+            phase,
+            if (phase == GuidePhase.Error) "更新失败" else st.text,
+            if (phase == GuidePhase.Error) st.text.removePrefix("更新失败：") else null,
+          )
+        }
+        if (st.outcome != UpdateManager.UpdateOutcome.Working) {
           updateRunning.set(false)
           activity.guideRenderer.chrome.updateButton.isEnabled = true
           activity.guideRenderer.chrome.updateButton.alpha = 1f
@@ -680,18 +697,21 @@ internal class EngineStartFlow(private val activity: MainActivity) {
   fun runUpdate() {
     val statusFile = File(activity.filesDir, "update-status.txt")
     val manager = UpdateManager(activity)
-    manager.checkAndApply { status ->
+    manager.checkAndApply { st ->
       activity.runOnUiThread {
-        val phase = when {
-          status.startsWith("更新失败") -> GuidePhase.Error
-          status.startsWith("更新完成") -> GuidePhase.Recovering
-          else -> GuidePhase.Updating
+        // 与 startUpdateCheck 同口径（0.14.1 批 2 / P0-2）：相位由**类型**决定，不猜字符串前缀。
+        val phase = when (st.outcome) {
+          UpdateManager.UpdateOutcome.NotConfigured -> GuidePhase.Info
+          UpdateManager.UpdateOutcome.Failed -> GuidePhase.Error
+          UpdateManager.UpdateOutcome.Done -> GuidePhase.Recovering
+          UpdateManager.UpdateOutcome.Working -> GuidePhase.Updating
         }
-        activity.applyGuidePhase(phase, status)
+        activity.applyGuidePhase(phase, st.text)
         activity.showGuide()
       }
       try {
-        statusFile.appendText(status + "\n")
+        // 落盘仍是纯文本（adb 侧判据读它），保留原始状态串。
+        statusFile.appendText(st.text + "\n")
       } catch (_: Exception) {
       }
     }

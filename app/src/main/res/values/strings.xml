@@ -22,6 +22,8 @@
   <string name="ds_apk_need_permission">需要「安装未知应用」权限，已打开授权页——开启后返回即自动安装</string>
   <string name="ds_apk_permission_denied">未获得「安装未知应用」权限——APK 已下载，授权后可再点按钮继续安装</string>
   <string name="ds_apk_installing">已拉起系统安装器——安装完成后重新打开应用即生效</string>
+  <!-- 0.14.1 批 2（P0-3）：权限缺失/被拒时按钮必须**可点**（文案说「再点按钮」，按钮就得真能点） -->
+  <string name="ds_apk_grant_install">授权后继续安装</string>
   <string name="ds_copy_log">复制</string>
   <string name="ds_log_title">engine.log</string>
   <string name="ds_runtime_ready">运行时已就绪</string>

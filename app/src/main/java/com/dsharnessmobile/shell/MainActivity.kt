@@ -269,6 +269,65 @@ class MainActivity : ComponentActivity() {
       // 「拷完 POST 早于引擎 listen」的竞态窗口（投递另有待发清单 + 引擎就绪钩子兜底）。
       startEngineFlow()
       FileIncoming.processIncomingIntent(this, intent) { title, text -> showTestNotification(title, text) }
+      // P0-1：冷启动路径的通知落点（热路径在 onNewIntent）。放在 startEngineFlow 之后：
+      // 落点要等页面把会话列表装起来，故这里只登记，真正的投递由页面就绪/onNewIntent 触发。
+      consumeNotifyRoute(intent)
+    }
+  }
+
+  /**
+   * 通知点击的**落点**（0.14.1 批 4 / P0-1）。
+   *
+   * 缺陷形态：`NotifyCenter.contentIntent` 一直在写 `dsh.notify.*` extras，而**全仓没有读取者**、
+   * `MainActivity` 也没有 `onNewIntent` ⇒ 整族通知是单向公告板：点进去只是把应用拉到前台，
+   * 停在原页面——不打开对应会话、不定位那条待答问题。同一处还把 sessionId 与 agentId 写进
+   * 同一个 key（已拆成 [NotifyCenter.EXTRA_TARGET_SESSION] / [NotifyCenter.EXTRA_TARGET_AGENT]）。
+   *
+   * 落点由**页面**执行（`window.__dshOpenSession`，页面才有会话视图与切换能力）；壳侧只负责
+   * 把 id 送进去、并在送不进去时**说话**（不静默）。
+   */
+  private var pendingNotifySession: String? = null
+
+  private fun consumeNotifyRoute(intent: Intent?) {
+    val session = intent?.getStringExtra(NotifyCenter.EXTRA_TARGET_SESSION).orEmpty()
+    if (session.isEmpty()) return
+    pendingNotifySession = session
+    deliverNotifyRoute()
+  }
+
+  override fun onNewIntent(intent: Intent) {
+    super.onNewIntent(intent)
+    // SINGLE_TOP：应用已在前台时点击通知走这里（此前**没有这个覆写**，intent 直接丢掉）。
+    setIntent(intent)
+    consumeNotifyRoute(intent)
+  }
+
+  /** 把待投递的通知落点交给页面；页面未就绪则留到 onPageFinished 再送一次。 */
+  internal fun deliverNotifyRoute() {
+    val session = pendingNotifySession ?: return
+    if (!webViewReady || webView.visibility != android.view.View.VISIBLE) return
+    pendingNotifySession = null
+    val script = "(() => { try { return (typeof window.__dshOpenSession === 'function') && window.__dshOpenSession(" +
+      jsString(session) + ") === true } catch (e) { return false } })()"
+    try {
+      webView.evaluateJavascript(script) { raw ->
+        if (raw?.trim() != "true") {
+          // 落点失败必须可见：会话可能已被删除，或页面还没装好会话视图。
+          notifyRouteFailed()
+        }
+      }
+    } catch (t: Throwable) {
+      Log.w("dsh-notify", "notify route failed: " + t.message)
+      notifyRouteFailed()
+    }
+  }
+
+  private fun notifyRouteFailed() {
+    runOnUiThread {
+      try {
+        Toast.makeText(this, "无法打开对应的会话（可能已被删除）——请从会话列表手动选择", Toast.LENGTH_LONG).show()
+      } catch (_: Throwable) {
+      }
     }
   }
 
@@ -671,6 +730,9 @@ class MainActivity : ComponentActivity() {
         // 悬浮球避让帧补放（启动期首帧注入若因页面未就绪落空，此处重放）
         if (isEngineSource(url)) OverlayService.instance?.replayFrame()
         if (isEngineSource(url) && !userClosedEngine) engineFlow.startFreezeWatchdog()
+        // P0-1：冷启动时点的通知，落点要等这一帧之后页面才有会话视图（文档级就绪 ≠ 会话列表就绪，
+        // 故页面侧的回执为 false 时会给出可见提示，而不是静默失败）。
+        if (isEngineSource(url)) deliverNotifyRoute()
       }
     }
     // WebView 下载：会话日志导出与其余引擎源下载统一走 DownloadSaver（app 内
@@ -751,6 +813,27 @@ class MainActivity : ComponentActivity() {
         onPickRequest = { callbackId -> dirPickerController.pickDirectoryWithPermissionCheck(callbackId) },
         onKeepScreen = { enable -> keepScreenOn(enable) },
         onNotify = { title, text -> NotifyCenter.notify(this, "task", title, text) },
+        // 0.14.1 批 4：通知设置页的系统深链（此前 `appSettingsIntent`/`channelSettingsIntent`
+        // 在页面侧零调用点——「系统已降级，应用无法调回」这句用户永远看不到）。
+        // 返回 boolean：该 ROM 没有对应设置页时页面必须如实提示，不能假装拉起过。
+        onOpenNotifyAppSettings = {
+          try {
+            startActivity(NotifyCenter.appSettingsIntent(this))
+            true
+          } catch (t: Throwable) {
+            Log.w("dsh-notify", "app notification settings unavailable: " + t.message)
+            false
+          }
+        },
+        onOpenNotifyChannelSettings = { channelId ->
+          try {
+            startActivity(NotifyCenter.channelSettingsIntent(this, channelId))
+            true
+          } catch (t: Throwable) {
+            Log.w("dsh-notify", "channel settings unavailable: " + t.message)
+            false
+          }
+        },
         onAllFilesAccessRequest = { dirPickerController.openAllFilesAccessSettings() },
 
         onExportConfig = { ConfigTransfer(engineManager.homeDir, engineManager.dshDataDir).exportToShared() },

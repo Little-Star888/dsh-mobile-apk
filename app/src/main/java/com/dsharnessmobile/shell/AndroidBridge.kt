@@ -126,6 +126,23 @@ class AndroidBridge(
     if (app == null) """{"ok":false,"reason":"no-shell-context"}"""
     else NotifyCenter.applySetting(app, key, value).toString()
   },
+  /**
+   * 0.14.1 批 4：通知**自检**（`NotifyCenter.selfCheck` 的页面入口）。
+   *
+   * 此前 `selfCheck` / `appSettingsIntent` / `channelSettingsIntent` 三者在页面侧**零调用点**：
+   * 系统把渠道降级（用户关掉或 ROM 改了重要性）时，应用看得见、用户看不见，「系统已降级，
+   * 应用无法调回」这句提示永远到不了用户眼前。与 FIX-4 同款修法：默认实现钉在真源上，
+   * 不依赖 MainActivity 传参（漏接线这一失效形态从结构上消失）。
+   */
+  private val onNotifySelfCheck: () -> String = {
+    val app = ShellAppContext.get()
+    if (app == null) """{"ok":false,"reason":"no-shell-context"}"""
+    else NotifyCenter.selfCheck(app).toString()
+  },
+  /** 页面的「打开系统通知设置」入口（App 级）。 */
+  private val onOpenNotifyAppSettings: () -> Boolean = { false },
+  /** 页面的「打开该渠道的系统设置」入口（渠道级）。 */
+  private val onOpenNotifyChannelSettings: (String) -> Boolean = { _ -> false },
 ) {
 
   @JavascriptInterface
@@ -420,6 +437,23 @@ class AndroidBridge(
    */
   @JavascriptInterface
   fun setNotifySetting(key: String, value: Boolean): String = onSetNotifySetting(key, value)
+
+  /**
+   * 0.14.1 批 4：通知自检（每个渠道的系统实际状态 + 是否被降级 + 该走哪个设置页）。
+   *
+   * 返回 `{ok, channels:[{category,label,channelId,importance,enabled,silenced?}], degraded:[...]}`
+   * ——页面据此显示「系统已降级，应用无法调回」并给出直达系统设置的入口（此前这条信息零调用点）。
+   */
+  @JavascriptInterface
+  fun notifySelfCheck(): String = onNotifySelfCheck()
+
+  /** 打开系统的「本应用通知设置」页；返回是否真的拉起（false = 该 ROM 无此页，页面须如实提示）。 */
+  @JavascriptInterface
+  fun openNotifyAppSettings(): Boolean = onOpenNotifyAppSettings()
+
+  /** 打开某个渠道的系统设置页（channelId 由 notifySelfCheck 给出）；返回是否真的拉起。 */
+  @JavascriptInterface
+  fun openNotifyChannelSettings(channelId: String): Boolean = onOpenNotifyChannelSettings(channelId)
 
   companion object {
     /**

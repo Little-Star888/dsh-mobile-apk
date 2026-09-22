@@ -18,6 +18,7 @@
 //       node scripts/check-combo-cache.mjs --self-test
 // 退出码：0 = 通过；1 = 覆盖缺口；2 = 用法或输入不可读。
 import { createHash } from 'node:crypto'
+import { TAR } from './lib/shell.mjs'
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative, posix } from 'node:path'
@@ -77,7 +78,7 @@ let tmpRoot = null
 if (tar) {
   let members
   try {
-    members = execFileSync('tar', ['-tf', tar], { encoding: 'utf8', maxBuffer: 1024 * 1024 * 1024 })
+    members = execFileSync(TAR, ['-tf', tar], { encoding: 'utf8', maxBuffer: 1024 * 1024 * 1024 })
       .split('\n').map((s) => s.trim()).filter((s) => s && !s.endsWith('/'))
   } catch (e) {
     console.error('CHECK-COMBO-CACHE FAILED：tar 不可读（' + e.message + '）')
@@ -93,7 +94,7 @@ if (tar) {
   const extract = (list, label) => {
     if (list.length === 0) return
     try {
-      execFileSync('tar', ['-xf', tar, '-C', tmpRoot, ...list], { encoding: 'utf8', maxBuffer: 1024 * 1024 * 1024 })
+      execFileSync(TAR, ['-xf', tar, '-C', tmpRoot, ...list], { encoding: 'utf8', maxBuffer: 1024 * 1024 * 1024 })
     } catch (e) {
       console.error('CHECK-COMBO-CACHE FAILED：tar 选择性解出失败（' + label + '：' + e.message + '）')
       rmSync(tmpRoot, { recursive: true, force: true })

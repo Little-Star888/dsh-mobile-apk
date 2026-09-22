@@ -31,6 +31,19 @@ object NotifyCenter {
 
   // ── 偏好键（PREFS 沿用历史 "dsh-notify"；channelsInitialized 是 §6.1.2 S6 的一次性标记）──
   const val PREFS = "dsh-notify"
+
+  /**
+   * 通知点击的落点载荷（P0-1）。
+   *
+   * 旧实现把 `sessionId` 与 `agentId` **依次写进同一个 key** `"dsh.notify.target"`（后写覆盖先写），
+   * 且全仓没有任何读取者——点通知只是把应用拉到前台，停在原页面。现在按键的**语义**分开，
+   * 由 [MainActivity] 读取并路由到对应会话。
+   */
+  const val EXTRA_KIND = "dsh.notify.kind"
+  /** 目标**会话** id（落点主键：打开这个会话）。 */
+  const val EXTRA_TARGET_SESSION = "dsh.notify.session"
+  /** 目标**agent** id（辅助键：会话尚未建立时的兜底匹配，与 sessionId 不是同一个东西）。 */
+  const val EXTRA_TARGET_AGENT = "dsh.notify.agent"
   private const val KEY_CHANNELS_INITIALIZED = "channelsInitialized"
   private const val KEY_SELECTED_PREFIX = "channel."
   private const val KEY_SUPPRESS_FOREGROUND = "suppressForeground"
@@ -80,26 +93,34 @@ object NotifyCenter {
     val candidates: List<String>,
     val importance: Int,
     val popup: Boolean,
+    /**
+     * 引擎是否**在等一个回答**（P0-5）。
+     *
+     * 提问与审批：引擎侧 `ask_user_question` / 授权请求**没有超时**，通知被丢弃 = 任务永久挂起，
+     * 用户看到的现象是「AI 不动了」。故这两类的类别开关语义只能是「不弹窗」（降到静默渠道），
+     * **绝不能**是「不投递」。汇报/进度类丢了只是少一条消息，引擎不等它。
+     */
+    val interactive: Boolean,
   ) {
     SILENT(
       "silent", "后台动态", "看门狗与引擎状态；静默更新，不弹出",
-      listOf("dsh-silent"), NotificationManager.IMPORTANCE_LOW, false,
+      listOf("dsh-silent"), NotificationManager.IMPORTANCE_LOW, false, false,
     ),
     TODO(
       "todo", "待办进度", "任务步骤进度；静默更新，不弹出",
-      listOf("dsh-todo-progress"), NotificationManager.IMPORTANCE_LOW, false,
+      listOf("dsh-todo-progress"), NotificationManager.IMPORTANCE_LOW, false, false,
     ),
     REPORT(
       "report", "工作汇报", "每轮任务结束的汇报；需要出现在锁屏之上",
-      listOf("dsh-report", "dsh-report-h2"), NotificationManager.IMPORTANCE_HIGH, true,
+      listOf("dsh-report", "dsh-report-h2"), NotificationManager.IMPORTANCE_HIGH, true, false,
     ),
     QUESTION(
       "question", "需要回答", "引擎向你提问；可直接在通知栏回复",
-      listOf("dsh-question", "dsh-question-h2"), NotificationManager.IMPORTANCE_HIGH, true,
+      listOf("dsh-question", "dsh-question-h2"), NotificationManager.IMPORTANCE_HIGH, true, true,
     ),
     APPROVAL(
       "approval", "需要授权", "工具执行前的授权请求；请确认不是他人代答",
-      listOf("dsh-auth", "dsh-auth-h2", "dsh-auth-h3"), NotificationManager.IMPORTANCE_HIGH, true,
+      listOf("dsh-auth", "dsh-auth-h2", "dsh-auth-h3"), NotificationManager.IMPORTANCE_HIGH, true, true,
     );
 
     companion object {
@@ -609,9 +630,19 @@ object NotifyCenter {
         return Result.UNKNOWN_KIND
       }
     }
-    if (!enabled(app, face.category)) {
+    // P0-5：类别被关掉 ≠ 可以把引擎的问题丢掉。
+    // 旧实现一律 `return Result.DISABLED` 且**没有任何 listener 回调**——而提问/审批在引擎侧
+    // 没有超时，于是「少点打扰」的实际后果是任务永久挂起，界面上只表现为「AI 不动了」，
+    // 设置页也一个字都没解释。现在：交互类降级为**静默投递**（不弹窗、不响，但仍在通知栏可作答），
+    // 非交互类（汇报/进度）才允许丢弃。
+    val categoryOff = !enabled(app, face.category)
+    if (categoryOff && !face.interactive) {
       NotifyProbe.log(app, "dsh-notify", "notify skipped (category disabled): " + face.category)
       return Result.DISABLED
+    }
+    if (categoryOff) {
+      NotifyProbe.log(app, "dsh-notify", "notify degraded to silent (category disabled, interactive): " + face.category)
+      listener?.onForegroundSuppressed(face.category)
     }
     if (!hasPermission(app)) {
       NotifyProbe.log(app, "dsh-notify", "notify skipped (POST_NOTIFICATIONS not granted): " + face.category)
@@ -634,7 +665,8 @@ object NotifyCenter {
     if (form.note == "interactive-popup-kept") {
       NotifyProbe.log(app, "dsh-notify", "popup=false ignored for interactive kind: " + face.category)
     }
-    val channelId = if (form.degradeToSilent) channelFor(app, Face.SILENT) else channelFor(app, face)
+    // 类别关闭的交互类：一律走静默渠道（用户要的是「别打扰」，不是「别告诉我」）。
+    val channelId = if (form.degradeToSilent || categoryOff) channelFor(app, Face.SILENT) else channelFor(app, face)
     val fallback = channelId ?: channelFor(app, Face.SILENT)
     if (fallback == null) {
       // 连静默渠道都不可用（极端：用户逐个降级）——明确记录，绝不静默失败
@@ -887,9 +919,12 @@ object NotifyCenter {
   private fun contentIntent(app: Context, entry: NotifyEntry): PendingIntent {
     val intent = Intent(app, MainActivity::class.java).apply {
       flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
-      putExtra("dsh.notify.kind", entry.kind)
-      if (entry.sessionId.isNotEmpty()) putExtra("dsh.notify.target", entry.sessionId)
-      entry.target?.let { putExtra("dsh.notify.target", it) }
+      putExtra(EXTRA_KIND, entry.kind)
+      // P0-1：目标键按**语义**分开（旧实现把 sessionId 与 agentId 依次写进同一个
+      // "dsh.notify.target"——后写覆盖先写，两种 id 混用，接线必读错）。落点由
+      // MainActivity 读取并路由到对应会话（页面侧 window.__dshOpenSession）。
+      if (entry.sessionId.isNotEmpty()) putExtra(EXTRA_TARGET_SESSION, entry.sessionId)
+      entry.target?.let { if (it.isNotEmpty()) putExtra(EXTRA_TARGET_AGENT, it) }
     }
     return PendingIntent.getActivity(
       app,

@@ -18,6 +18,7 @@
 // 退出码：0 全绿 / 1 判红（真缺陷）/ 2 前置不满足或**证据不足**（不得当作通过）。
 import { spawnSync } from 'node:child_process'
 import { mkdirSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -344,29 +345,40 @@ async function main() {
   const sfDump = run('dumpsys SurfaceFlinger | grep -E "^(Virtual Display|    name=)"')
   const token = sfTokenForAlias(sfDump, vd.alias)
   let vdBefore = 0
+  let vdBeforeSha = ''
   let realBefore = 0
   if (token !== null) {
     const r = spawnSync('adb', ['-s', SERIAL, 'exec-out', 'screencap', '-p', '-d', token], { maxBuffer: 64 * 1024 * 1024 })
-    writeFileSync(join(EVID, 'p3-vd-before.png'), r.stdout ?? Buffer.alloc(0))
-    vdBefore = (r.stdout ?? Buffer.alloc(0)).length
+    const bytes = r.stdout ?? Buffer.alloc(0)
+    writeFileSync(join(EVID, 'p3-vd-before.png'), bytes)
+    vdBefore = bytes.length
+    vdBeforeSha = createHash('sha256').update(bytes).digest('hex').slice(0, 12)
   }
   realBefore = shot(join(EVID, 'p3-real-before.png'))
   const inputTask = await runModelTask(
-    `请在虚拟屏 ${vd.alias} 上点一下屏幕左上角附近那块区域，并输入文字 dsh-test。`
+    // 任务目标必须**带可见结果**（0.14.1 W2 修正）：上一版是「点左上角 + 输入 dsh-test」，
+    // 而那块区域是纯背景、输入又没有焦点控件 ⇒ 画面天然不变，像素判据恒得 INCONCLUSIVE
+    // （两轮实跑都是如此）。那不是「注入没生效」，是**判据不可能有信号**。
+    // 现在只给目标（让画面发生可见变化）+ 完成信号，步骤仍由模型自己编排（AGENTS §2.1 第 3 条）。
+    `请在虚拟屏 ${vd.alias} 上操作一次，让这块屏幕的画面发生**可见变化**（例如点开界面里的按钮或切换页面）。`
     + '完成后只回复一行 DONE，不要解释。',
   )
   writeFileSync(join(EVID, 'p3-conversation.txt'), await pageConversationText())
   const realAfter = shot(join(EVID, 'p3-real-after.png'))
   if (token !== null) {
     const r = spawnSync('adb', ['-s', SERIAL, 'exec-out', 'screencap', '-p', '-d', token], { maxBuffer: 64 * 1024 * 1024 })
-    writeFileSync(join(EVID, 'p3-vd-after.png'), r.stdout ?? Buffer.alloc(0))
-    const vdAfter = (r.stdout ?? Buffer.alloc(0)).length
-    const changed = Math.abs(vdAfter - vdBefore) > 0 && vdAfter > 0 && vdBefore > 0
+    const vdAfterBytes = r.stdout ?? Buffer.alloc(0)
+    writeFileSync(join(EVID, 'p3-vd-after.png'), vdAfterBytes)
+    const vdAfter = vdAfterBytes.length
+    // 判据用**内容哈希**而不是长度：两张不同的图压缩后可能等长（长度相等只是弱代理）。
+    const sha = (b) => createHash('sha256').update(b).digest('hex').slice(0, 12)
+    const changed = vdAfter > 0 && vdBeforeSha !== sha(vdAfterBytes)
     // 任务没真跑起来时（凭据/发起失败），像素变化可能来自「刚建屏的过渡帧 → 空屏」，不能当证据。
     const usable = inputTask.sent !== undefined && inputTask.blocker === ''
     record('P3', '虚拟屏可注入且像素有变化', usable ? (changed ? 'PASS' : 'INCONCLUSIVE') : 'INCONCLUSIVE',
       usable
-        ? `虚拟屏截图 ${vdBefore} B → ${vdAfter} B（${changed ? '有变化' : '未观察到变化：可能注入未生效，或该屏画面本身静止'}）`
+        ? `虚拟屏截图 ${vdBefore} B → ${vdAfter} B（sha ${vdBeforeSha} → ${sha(vdAfterBytes)}，`
+          + (changed ? '有变化' : '未观察到变化：可能注入未生效，或该屏画面本身静止') + '）'
         : (inputTask.blocker !== '' ? inputTask.blocker : '任务未发起，像素对照不构成证据')
           + `（截图仍留证：${vdBefore} B → ${vdAfter} B）`)
   } else {
