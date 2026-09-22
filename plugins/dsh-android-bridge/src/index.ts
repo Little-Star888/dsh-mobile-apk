@@ -59,6 +59,7 @@ import {
   turnEndKind,
   turnEndOk,
   TURN_END_KINDS,
+  visibleText,
 } from './notify-projection.js'
 
 export {
@@ -79,6 +80,7 @@ export {
   turnEndKind,
   turnEndOk,
   TURN_END_KINDS,
+  visibleText,
   toLosslessJson,
   findUndefinedPaths,
   authorizeMobileRoute,
@@ -1596,8 +1598,12 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
         return
       }
       if (k === 'assistant/message') {
-        const content = (ev.data as { message?: { content?: Array<{ text?: string }> } })?.message?.content
-        const text = Array.isArray(content) ? content.map((c) => c.text ?? '').join('').trim() : ''
+        // 0.14.1：只取可见正文（type==='text'）。此前 `content.map(c => c.text ?? '').join('')`
+        // 会把 reasoning 块一并拼进来——上游 TextBlock 与 ReasoningBlock **共用 `text` 字段名**
+        // （dsh/packages/llm/llm/src/types.ts:54-64），思考通常排在最前，于是壳侧的汇报摘要
+        // 与工具行 chip 显示的是「某一段思考内容」。判据与修法见 notify-projection.visibleText。
+        const content = (ev.data as { message?: { content?: unknown } })?.message?.content
+        const text = visibleText(content)
         appendLive(JSON.stringify({ t, s, k: 'text', sum: text.slice(0, 160) || '（空回复）' }) + '\n')
         return
       }
@@ -1640,8 +1646,10 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
             notifyState.countToolCall(sessId)
             break
           case 'assistant/message': {
-            const content = (ev.data as { message?: { content?: Array<{ text?: string }> } })?.message?.content
-            const text = Array.isArray(content) ? content.map((c) => c.text ?? '').join('').trim() : ''
+            // 0.14.1：可见正文只认 type==='text'（同上一条 appendLive 路径的理由——
+            // 报告栏首行 / 通知展开正文 / .live.ndjson sum 三者同源于这一个 summary）。
+            const content = (ev.data as { message?: { content?: unknown } })?.message?.content
+            const text = visibleText(content)
             notifyState.setSummary(sessId, text)
             // 兼容期：老壳仍读 .task-done.ndjson（新壳只读 .notify.ndjson，双读不双发）。
             appendTaskMarker(sessId, notifyState.titleFor(sessId), summarize(text, 80) || '任务完成')

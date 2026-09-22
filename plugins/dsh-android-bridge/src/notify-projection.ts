@@ -104,6 +104,33 @@ export function sessionTag(sessionId: unknown): string {
   return (h >>> 0).toString(16).padStart(8, '0').slice(0, 6)
 }
 
+/**
+ * 从 `assistant/message` 的 content 块数组里取**可见正文**（0.14.1 设备缺陷修复）。
+ *
+ * 缺陷本体：上游 `TextBlock { type:'text'; text }` 与 `ReasoningBlock { type:'reasoning'; text }`
+ * **共用 `text` 字段名**（dsh/packages/llm/llm/src/types.ts:54-64）。投影层此前写的是
+ * `content.map(c => c.text ?? '').join('')`——**按字段取值而不按类型过滤**，于是思考块被当成回答。
+ * 思考块在一条 assistant message 里通常排在最前，再经 `summarize(text, 120)` 硬截断，
+ * 用户在上拉汇报栏看到的正是「某一段思考内容」的开头。同一条 summary 还是通知展开正文与
+ * `.live.ndjson` 的 `sum` 来源，故修在这一处即可三处同好。
+ *
+ * 判据来源：上游 `agent.ts:486` 用 `message.content.filter(block => block.type === 'tool-call')`
+ * 判别块类型，证明运行期 content 项**带 `type` 字段**。
+ *
+ * **兼容分支（刻意保留）**：仅当整条消息**没有任何块带 `type`**（未知 provider 的旧形状）时，
+ * 才退化为「取全部 `text`」。没有这条兜底，一次 provider 形状差异就会把缺陷从
+ * 「显示思考」直接劣化成「什么都不显示」——那不是修复，是把可见的错误换成不可见的错误。
+ */
+export function visibleText(content: unknown): string {
+  if (!Array.isArray(content)) return ''
+  const blocks = content.filter(
+    (b): b is { type?: unknown; text?: unknown } => b !== null && typeof b === 'object',
+  )
+  const typed = blocks.filter((b) => typeof b.type === 'string')
+  const picked = typed.length > 0 ? typed.filter((b) => b.type === 'text') : blocks
+  return picked.map((b) => (typeof b.text === 'string' ? b.text : '')).join('').trim()
+}
+
 /** 摘要压缩（单行、去空白、硬截断；上限默认 120 字＝§6.1.1 的汇报摘要口径）。 */
 export function summarize(text: unknown, max = 120): string {
   const s = String(text ?? '').replace(/\s+/g, ' ').trim()
