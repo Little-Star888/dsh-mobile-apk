@@ -446,59 +446,81 @@ internal class EngineStartFlow(private val activity: MainActivity) {
       if (!isCurrentEngineFlow(generation)) return@Thread
       if (!activity.engineManager.snapshotFresh()) {
         if (!isCurrentEngineFlow(generation)) return@Thread
-        activity.runOnUiThread {
-          if (!isCurrentEngineFlow(generation)) return@runOnUiThread
-          activity.applyGuidePhase(GuidePhase.Extracting, "正在解压运行时")
-          activity.guideRenderer.progressText.visibility = View.VISIBLE
-          activity.guideRenderer.progressText.text = "准备写入内嵌环境…"
-        }
-        val ok = activity.engineManager.refreshSnapshot(
-          onProgress = { done, _ ->
-            activity.runOnUiThread {
-              if (!isCurrentEngineFlow(generation)) return@runOnUiThread
-              // done 是解压后字节数，total 是压缩包字节数，口径不一致；只显示已解压量。
-              val mb = done / 1024 / 1024
-              activity.guideRenderer.progressText.visibility = View.VISIBLE
-              activity.guideRenderer.progressText.text = "已写入 " + mb + " MB"
-              if (activity.guideRenderer.lastGuidePhase != GuidePhase.Extracting) {
-                activity.applyGuidePhase(GuidePhase.Extracting, "正在解压运行时")
-              }
-            }
-          },
-          onStage = { stage ->
-            activity.runOnUiThread {
-              if (!isCurrentEngineFlow(generation)) return@runOnUiThread
-              activity.applyGuidePhase(GuidePhase.Extracting, "正在更新运行时")
-              activity.guideRenderer.progressText.visibility = View.VISIBLE
-              activity.guideRenderer.progressText.text = stage
-            }
-          },
-        )
-        if (!ok) {
-          // 任务 19：失败终态落盘（快照解压失败是「启动起不来」的已知成因之一）。
-          // 【0.14.1 升级路径 P0】必须带上**真因**：`refreshSnapshot` 只回布尔值，真因挂在
-          // `EngineManager.lastRefreshFailure`。旧实现此处不传 error → boot-fail.log 只有
-          // `error=none(boolean-failure-path)`，排障者拿不到 `Directory not empty` 那条真因。
-          val refreshCause = activity.engineManager.lastRefreshFailure
+        // 0.14.1 D2（issue #240 建议 2）：**降级闸门**。同一份快照上刷新已连续失败达阈、
+        // 且 live 运行时完整时，不再自动重跑那一次注定失败的刷新——以可用态启动，并显式留档。
+        //
+        // 为什么判据是 live 完整性而不是失败次数：refresh 失败的常见真因是快照缺失/解压不全，
+        // 那种情况下「放行」等于拉起一棵不完整的运行时（以「引擎能起但插件缺」的形态静默劣化），
+        // 比拦在引导页更坏。issue 现场的真正特征是 live 完整可用、缺的只是提交文件。
+        // 出口：换快照（App 升级 → fingerprint 变 → 账本自然失配）或用户手动点「重试」
+        // （GuidePageRenderer 的 onStartEngine 会 clearRefreshLedger，见那里）。
+        if (activity.engineManager.shouldDegradeRefresh()) {
           LogCollector.writeBootFail(
-            activity, "snapshot-refresh-failed",
-            "内嵌运行时快照解压/写入失败（refreshSnapshot 返回 false）"
-              + (refreshCause?.let { " cause=" + it.javaClass.name + ": " + (it.message ?: "无消息") } ?: ""),
-            refreshCause,
+            activity, "snapshot-refresh-degraded",
+            "自动刷新连续失败达阈且 live 运行时完整：跳过本次自动刷新，以现有运行时启动"
+              + "（手动点「重试」可强制再刷一次；升级到新快照后本闸门自然失效）",
           )
           activity.runOnUiThread {
             if (!isCurrentEngineFlow(generation)) return@runOnUiThread
-            // 0.13.1 W3：解压失败此前零落盘（engine.log 尚不存在、仅 logcat），镜像现场到共享目录。
-            // review C5：文案按**实际落点**回填（共享不可写时回落私有目录，不再写死 Documents 路径）。
-            val dir = activity.engineManager.mirrorDiagnosticsToShared("snapshot-refresh-failed")
-            activity.applyGuidePhase(GuidePhase.Error, "运行时更新失败（" + diagnosticsLocationHint(dir) + "）")
-            activity.showGuide()
+            activity.applyGuidePhase(GuidePhase.Starting, "运行时更新未完成，正以现有运行时启动…")
+            activity.guideRenderer.progressText.visibility = View.GONE
           }
-          return@Thread
-        }
-        activity.runOnUiThread {
-          if (!isCurrentEngineFlow(generation)) return@runOnUiThread
-          activity.applyGuidePhase(GuidePhase.Starting, "正在启动引擎…")
+        } else {
+          if (!isCurrentEngineFlow(generation)) return@Thread
+          activity.runOnUiThread {
+            if (!isCurrentEngineFlow(generation)) return@runOnUiThread
+            activity.applyGuidePhase(GuidePhase.Extracting, "正在解压运行时")
+            activity.guideRenderer.progressText.visibility = View.VISIBLE
+            activity.guideRenderer.progressText.text = "准备写入内嵌环境…"
+          }
+          val ok = activity.engineManager.refreshSnapshot(
+            onProgress = { done, _ ->
+              activity.runOnUiThread {
+                if (!isCurrentEngineFlow(generation)) return@runOnUiThread
+                // done 是解压后字节数，total 是压缩包字节数，口径不一致；只显示已解压量。
+                val mb = done / 1024 / 1024
+                activity.guideRenderer.progressText.visibility = View.VISIBLE
+                activity.guideRenderer.progressText.text = "已写入 " + mb + " MB"
+                if (activity.guideRenderer.lastGuidePhase != GuidePhase.Extracting) {
+                  activity.applyGuidePhase(GuidePhase.Extracting, "正在解压运行时")
+                }
+              }
+            },
+            onStage = { stage ->
+              activity.runOnUiThread {
+                if (!isCurrentEngineFlow(generation)) return@runOnUiThread
+                activity.applyGuidePhase(GuidePhase.Extracting, "正在更新运行时")
+                activity.guideRenderer.progressText.visibility = View.VISIBLE
+                activity.guideRenderer.progressText.text = stage
+              }
+            },
+          )
+          if (!ok) {
+            // 任务 19：失败终态落盘（快照解压失败是「启动起不来」的已知成因之一）。
+            // 【0.14.1 升级路径 P0】必须带上**真因**：`refreshSnapshot` 只回布尔值，真因挂在
+            // `EngineManager.lastRefreshFailure`。旧实现此处不传 error → boot-fail.log 只有
+            // `error=none(boolean-failure-path)`，排障者拿不到 `Directory not empty` 那条真因。
+            val refreshCause = activity.engineManager.lastRefreshFailure
+            LogCollector.writeBootFail(
+              activity, "snapshot-refresh-failed",
+              "内嵌运行时快照解压/写入失败（refreshSnapshot 返回 false）"
+                + (refreshCause?.let { " cause=" + it.javaClass.name + ": " + (it.message ?: "无消息") } ?: ""),
+              refreshCause,
+            )
+            activity.runOnUiThread {
+              if (!isCurrentEngineFlow(generation)) return@runOnUiThread
+              // 0.13.1 W3：解压失败此前零落盘（engine.log 尚不存在、仅 logcat），镜像现场到共享目录。
+              // review C5：文案按**实际落点**回填（共享不可写时回落私有目录，不再写死 Documents 路径）。
+              val dir = activity.engineManager.mirrorDiagnosticsToShared("snapshot-refresh-failed")
+              activity.applyGuidePhase(GuidePhase.Error, "运行时更新失败（" + diagnosticsLocationHint(dir) + "）")
+              activity.showGuide()
+            }
+            return@Thread
+          }
+          activity.runOnUiThread {
+            if (!isCurrentEngineFlow(generation)) return@runOnUiThread
+            activity.applyGuidePhase(GuidePhase.Starting, "正在启动引擎…")
+          }
         }
       }
       if (!isCurrentEngineFlow(generation)) return@Thread

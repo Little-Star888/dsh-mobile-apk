@@ -100,6 +100,32 @@ class EngineManager(private val context: Context, private val pickToken: String?
     onProgress: (Long, Long) -> Unit,
     onStage: (String) -> Unit = {},
   ): Boolean {
+    val fingerprint = bundledFingerprint()
+    val ok = refreshSnapshotInternal(onProgress, onStage)
+    // 0.14.1 D2（issue #240 建议 2）：把成败**跨进程**记账。失败账本按 fingerprint 计键，
+    // 是「同一份快照连续失败」与「换了快照又失败」的唯一区分依据——内存里那个
+    // engineRetryCount 是引擎启动重试计数（#118），进程一死即清零，管不到这里。
+    try {
+      if (ok) {
+        SnapshotFs.deletePath(refreshLedgerFile())
+      } else {
+        refreshLedgerFile().writeText(SnapshotRefreshPolicy.afterFailure(readRefreshLedger(), fingerprint))
+      }
+    } catch (t: Throwable) {
+      // 记账失败不得影响刷新结果本身（它是判据的输入，不是判据）。
+      Log.w(TAG, "could not update snapshot refresh ledger", t)
+    }
+    return ok
+  }
+
+  /**
+   * 刷新主体。抽出来只为在**单点**包一层成败记账（上面那个包装），
+   * 否则六处 `return false` 各写一次记账必然漏。
+   */
+  private fun refreshSnapshotInternal(
+    onProgress: (Long, Long) -> Unit,
+    onStage: (String) -> Unit = {},
+  ): Boolean {
     val filesDir = context.filesDir
     val fingerprint = bundledFingerprint()
     val startedAt = System.currentTimeMillis()
@@ -370,6 +396,53 @@ class EngineManager(private val context: Context, private val pickToken: String?
       )
     }
     return complete
+  }
+
+  /**
+   * 0.14.1 D2：**live 树**的完整性判据（与 [stagedRuntimeComplete] 同口径，只是根不同）。
+   *
+   * 它决定「刷新连续失败时能不能降级启动」——live 不完整时放开拦截等于拉起一棵缺件的运行时，
+   * 会以「引擎能起但插件缺」的形态静默劣化。issue 现场的真正特征是 live 完整、缺的只是提交文件。
+   */
+  fun liveRuntimeComplete(): Boolean {
+    val node = File(usrDir, "bin/node")
+    val bin = File(usrDir, "lib/node_modules/@deepseek-ai/dsh/lib/bin.js")
+    val profile = File(homeDir, ".dsh/profiles/web")
+    return SnapshotFs.exists(node) && SnapshotFs.exists(bin) && SnapshotFs.exists(profile)
+  }
+
+  /** 刷新失败账本（单行 `<fingerprint>\t<N>`；成功即删）。 */
+  private fun refreshLedgerFile(): File = File(context.filesDir, ".snapshot-refresh-failures")
+
+  private fun readRefreshLedger(): String? = try {
+    refreshLedgerFile().takeIf { it.exists() }?.readText()
+  } catch (t: Throwable) {
+    Log.w(TAG, "could not read snapshot refresh ledger", t)
+    null
+  }
+
+  /**
+   * 是否应当跳过自动刷新、以现有运行时启动（0.14.1 D2）。判据全在 [SnapshotRefreshPolicy]：
+   * live 完整 + 账本存在 + 指纹一致 + 连续失败达阈。任一不满足即返回 false（维持现状拦截）。
+   */
+  fun shouldDegradeRefresh(): Boolean = SnapshotRefreshPolicy.shouldDegrade(
+    raw = readRefreshLedger(),
+    fingerprint = bundledFingerprint(),
+    liveComplete = liveRuntimeComplete(),
+  )
+
+  /**
+   * 清空刷新失败账本。**手动重试路径必须调用它**——用户显式点「重试」就是要求「再试一次刷新」，
+   * 若不清账，降级闸门会让他永远拿不到那次刷新（引导页按钮就成了摆设）。
+   * 与 `EngineStartFlow.engineRetryCount = 0` 是同一件事的两个面：一个管进程内的引擎启动重试，
+   * 一个管跨进程的快照刷新重试。
+   */
+  fun clearRefreshLedger() {
+    try {
+      SnapshotFs.deletePath(refreshLedgerFile())
+    } catch (t: Throwable) {
+      Log.w(TAG, "could not clear snapshot refresh ledger", t)
+    }
   }
 
   /**

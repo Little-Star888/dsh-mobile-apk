@@ -45,6 +45,9 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
       GuideCallbacks(
         onStartEngine = {
           activity.engineFlow.engineRetryCount = 0 // 手动重试归零自动重试计数
+          // 0.14.1 D2：同时清空**跨进程**的快照刷新失败账本。用户显式点「重试」就是要求
+          // 「再试一次刷新」；不清账的话降级闸门会让他永远拿不到那次刷新，按钮就成了摆设。
+          activity.engineManager.clearRefreshLedger()
           activity.startEngineFlow()
         },
         onOpenConsole = { activity.startActivity(Intent(activity, ConsoleActivity::class.java)) },
