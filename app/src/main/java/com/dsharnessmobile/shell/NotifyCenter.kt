@@ -75,8 +75,15 @@ object NotifyCenter {
   const val ID_WATCHDOG = 0x1001
   const val ID_TODO = 0x1002
 
-  /** 提问弹窗超时（只撤弹窗，不是拒绝——引擎侧 ask_user_question 无超时，见 §6.3.2 注）。 */
-  const val QUESTION_TIMEOUT_MS = 30 * 60 * 1000L
+  /**
+   * 提问通知的超时：**0 = 不超时**（0.14.1 批 8 / S3-6 起）。
+   *
+   * 旧值是 30 分钟，行为是 `setTimeoutAfter` 到点撤掉通知——而引擎侧的提问**没有超时**
+   * （§6.3.2 注），于是「30 分钟后通知无声消失、引擎仍在等」＝ 用户丢掉唯一作答入口，
+   * 与 P0-5（关掉提醒 = 任务永久挂起）同一形态。通知寿命现在与请求寿命一致：由 cancel 帧
+   * （他人已答 / 引擎撤销）或本机提交结算。常量保留为 0，让这条决定**显式可 grep**。
+   */
+  const val QUESTION_TIMEOUT_MS = 0L
 
   /** 审批动作是否要求解锁（NT-18，B4 批）。B3 保持 false：真机 keyguard 行为未确证，先不阻塞开发循环。 */
   const val APPROVAL_REQUIRE_UNLOCK = false
@@ -351,7 +358,13 @@ object NotifyCenter {
    * @param reason 可 grep 的判定原因（selected / create / migrated / user-demoted / exhausted）
    * @param create 该 ID 首次创建（必须以目标 importance 建）
    */
-  data class ChannelSelection(val channelId: String?, val reason: String, val create: Boolean) {
+  data class ChannelSelection(
+    val channelId: String?,
+    val reason: String,
+    val create: Boolean,
+    /** S3-2：被本次迁移**替代**的旧候选（调用方负责删除，避免同名重复渠道）。 */
+    val retire: List<String> = emptyList(),
+  ) {
     val degraded: Boolean get() = channelId == null
   }
 
@@ -371,7 +384,14 @@ object NotifyCenter {
     for ((index, id) in candidates.withIndex()) {
       val fact = facts[id]
       when {
-        fact == null -> return ChannelSelection(id, if (index == 0) "create" else "migrated", true)
+        fact == null -> return ChannelSelection(
+          id,
+          if (index == 0) "create" else "migrated",
+          true,
+          // 首次创建时前面的候选都不存在（facts 为 null 才走到这里），retire 取「前面所有存在的」——
+          // 事实上只有迁移那一支会命中非空（前面的候选 importance 太低但确实存在）。
+          retire = candidates.take(index).filter { facts[it] != null },
+        )
         fact.importance >= targetImportance -> return ChannelSelection(id, "selected", false)
         !fact.userSetImportance -> continue // 历史代码建错 → 下一个候选（S3）
         else -> return ChannelSelection(null, "user-demoted", false) // S4
@@ -410,6 +430,20 @@ object NotifyCenter {
     }
     val selection = selectChannel(face.candidates, face.importance, facts)
     val chosen = selection.channelId
+    // S3-2：迁移（历史构建把首选建成了低 importance）会新建 `*-h2`/`*-h3`，而它们与首选**同名**
+    // （都用 Face.label）——系统设置里于是出现两三条都叫「授权请求」的渠道，用户无从分辨。迁移既已
+    // 选定新候选，就把被替代的旧候选删掉：此时用户从未改过它的 importance（改了就不会迁移），
+    // 删除不丢用户设置。
+    if (chosen != null && selection.retire.isNotEmpty()) {
+      for (old in selection.retire) {
+        try {
+          manager.deleteNotificationChannel(old)
+          LogCollector.log("dsh-notify", "channel " + face.category + " retired duplicate: " + old)
+        } catch (t: Throwable) {
+          LogCollector.log("dsh-notify", "channel retire failed " + old + ": " + t.message)
+        }
+      }
+    }
     if (chosen != null && selection.create) {
       manager.createNotificationChannel(buildChannel(chosen, face))
       val created = manager.getNotificationChannel(chosen)
@@ -654,6 +688,64 @@ object NotifyCenter {
     entry.reason, entry.toolName, entry.count.toString(), entry.popup.toString(),
   ).joinToString("\u0001")
 
+  // ── §3.3 通知结构族（0.14.1 批 8）的纯判据 ─────────────────────────────
+  //
+  // 这几条都曾以「界面上看起来对、实际不是那么回事」的形态活着，只能靠设备复现；抽成纯函数
+  // 之后每条都能在 JVM 上判红（详见各函数注释里的缺陷现场）。
+
+  /**
+   * 汇报通知的**分桶键**（S3-3；纯函数）。
+   *
+   * 缺陷现场：`notificationId` 用 `"dsh-report:" + entry.sessionId` 当键，而 sessionId 可能为空
+   * （引擎事件缺会话身份时）——于是**所有会话的汇报挤进同一个通知 ID**，后来的覆盖先前的，
+   * 用户只看到最后一条。这里给出稳定回退：会话 → 事件 → 标题，保证不同来源不同桶。
+   *
+   * 与 [deferredKey]（延后队列的覆盖式去重键）**必须同粒度**：两者若不同，退后台补投会为同一
+   * 会话补弹一串陈旧汇报，与「覆盖式 ID」的语义自相矛盾。故两者共用本函数。
+   * @param entry - 通知条目。
+   * @returns 稳定的分桶键（空串代表无法区分：此时退化到内容指纹，至少不互相吞掉）。
+   */
+  internal fun reportBucketKey(entry: NotifyEntry): String = when {
+    entry.sessionId.isNotEmpty() -> "s:" + entry.sessionId
+    entry.eventId.isNotEmpty() -> "e:" + entry.eventId
+    entry.displayTitle().isNotEmpty() -> "t:" + entry.displayTitle()
+    else -> "k:" + entry.kind
+  }
+
+  /**
+   * 结算回执的文案（S3-9；纯函数）。
+   *
+   * 缺陷现场：`cancel` 帧（别人答了 / 引擎撤销）与「本机提交成功」走同一条结算路径、同一句
+   * **「已提交」**——用户没答任何东西，却在本机收到「已提交」的回执。作答方与旁观方必须说不同的话。
+   * @param kind - `question` / `approval`。
+   * @param remote - true = 本机没提交（别人答了或引擎撤销了）。
+   * @returns 回执标题与正文。
+   */
+  internal fun settleCopy(kind: String, remote: Boolean): SettleCopy = when {
+    remote && kind == "approval" -> SettleCopy("该请求已结束", "这条授权请求已在别处处理或已撤销——无需你再操作")
+    remote -> SettleCopy("已作答", "这个问题已在别处作答或已撤销——无需你再回答")
+    kind == "approval" -> SettleCopy("已提交", "决定已提交，等待引擎确认")
+    else -> SettleCopy("已提交", "回答已提交，等待引擎确认")
+  }
+
+  /** 结算回执文案载体（见 [settleCopy]）。 */
+  internal data class SettleCopy(val title: String, val text: String)
+
+  /**
+   * 授权正文的**目标保留**脱敏（S3-7；纯函数）。
+   *
+   * 缺陷现场：`sanitize` 把 `/data/...` 整段替换成 `[路径]`，而审批要确认的**正是那个目标**——
+   * 用户在通知栏看到的是一句「工具 bash：[路径]」，无从判断放行的是什么。这里保留路径的**末段**
+   * （文件名/目录名），去掉目录树：既说清「动的是什么」，又不把完整目录结构摊在锁屏上。
+   * token 形态的遮挡与总长上限沿用 [sanitize] 的口径。
+   * @param text - 原始正文。
+   * @returns 保留目标末段的脱敏文本。
+   */
+  internal fun redactPathsKeepingTail(text: String): String {
+    val kept = text.replace(Regex("""(/[^\s:，。；]*/)([^\s:，。；/]+)""")) { m -> "…/" + m.groupValues[2] }
+    return sanitize(kept)
+  }
+
   /** 单条事件的形态决策（DEF-NOTIFY-01；纯函数，JVM 单测覆盖）。 */
   data class FormDecision(val degradeToSilent: Boolean, val keepPopup: Boolean, val note: String)
 
@@ -744,6 +836,12 @@ object NotifyCenter {
     // 类别关闭的交互类：一律走静默渠道（用户要的是「别打扰」，不是「别告诉我」）。
     val channelId = if (form.degradeToSilent || categoryOff) channelFor(app, Face.SILENT) else channelFor(app, face)
     val fallback = channelId ?: channelFor(app, Face.SILENT)
+    // S3-1：**系统把渠道降级**（channelFor 回 null）时，交互类会改投静默渠道。旧实现只把这件事写进
+    // 探针与一行 flashStatus（面板收起时看不到），用户看到一条不响的提问通知却不知道原因。这里让
+    // 「为什么静默 + 怎么恢复」**跟着通知本身走**：通知在哪儿，解释就在哪儿。
+    val degradedNotice = if (channelId == null && face.interactive) {
+      "系统已把「" + face.label + "」通知降级为静默——到系统设置里可恢复"
+    } else null
     if (fallback == null) {
       // 连静默渠道都不可用（极端：用户逐个降级）——明确记录，绝不静默失败
       NotifyProbe.log(app, "dsh-notify", "notify dropped (no usable channel): " + face.category)
@@ -760,7 +858,7 @@ object NotifyCenter {
       NotifyProbe.log(app, "dsh-notify", "notify dropped (duplicate within " + DEDUP_WINDOW_MS + "ms): id=" + id + " kind=" + kind)
       return Result.DUPLICATE_SUPPRESSED
     }
-    val notification = build(app, face, entry, fallback, form.degradeToSilent)
+    val notification = build(app, face, entry, fallback, form.degradeToSilent, degradedNotice)
     (app.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).notify(id, notification)
     lastPostId = id
     lastPostSig = sig
@@ -803,7 +901,9 @@ object NotifyCenter {
   fun notificationId(entry: NotifyEntry, face: Face): Int = when (face) {
     Face.SILENT -> ID_WATCHDOG
     Face.TODO -> ID_TODO
-    Face.REPORT -> stableId("dsh-report:" + entry.sessionId)
+    // S3-3：分桶键走 [reportBucketKey]（会话缺失时回退到事件/标题），否则无会话身份的汇报
+    // 会全部挤进同一个 ID 互相覆盖。
+    Face.REPORT -> stableId("dsh-report:" + reportBucketKey(entry))
     else -> stableId("dsh-" + face.category + ":" + entry.eventId)
   }
 
@@ -840,11 +940,12 @@ object NotifyCenter {
    * 「正在发送」的回复 UI 在应用收尾前消失。官方流程是**再 notify() 一次**（重投即清掉该标志），
    * 之后才能真正撤掉。所以这里两步走：notify(已提交/静默) → 短延时 cancel。
    */
-  fun settleInteractive(context: Context, kind: String, eventId: String, label: String = "已提交") {
+  fun settleInteractive(context: Context, kind: String, eventId: String, remote: Boolean = false) {
     val app = context.applicationContext
     val face = Face.of(kind.lowercase()) ?: Face.QUESTION
     val channelId = channelFor(app, face) ?: channelFor(app, Face.SILENT) ?: return
-    val entry = NotifyEntry(kind = kind, eventId = eventId, title = label)
+    val copy = settleCopy(kind, remote)
+    val entry = NotifyEntry(kind = kind, eventId = eventId, title = copy.title)
     val id = notificationId(entry, face)
     val manager = app.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
     try {
@@ -852,8 +953,8 @@ object NotifyCenter {
         id,
         NotificationCompat.Builder(app, channelId)
           .setSmallIcon(android.R.drawable.stat_notify_chat)
-          .setContentTitle(label)
-          .setContentText(if (kind == "question") "回答已提交，等待引擎确认" else "决定已提交，等待引擎确认")
+          .setContentTitle(copy.title)
+          .setContentText(copy.text)
           .setAutoCancel(true)
           .setSilent(true)
           .setOnlyAlertOnce(true)
@@ -894,6 +995,7 @@ object NotifyCenter {
     entry: NotifyEntry,
     channelId: String,
     silentOverride: Boolean = false,
+    degradedNotice: String? = null,
   ): Notification {
     val b = NotificationCompat.Builder(app, channelId)
       .setSmallIcon(android.R.drawable.stat_notify_chat)
@@ -927,15 +1029,23 @@ object NotifyCenter {
         val questions = entry.questions
         val first = questions.firstOrNull()
         b.setContentTitle(first?.header?.ifBlank { null } ?: UserCopy.notifyCategory(Face.QUESTION.category))
-        b.setContentText(first?.question ?: entry.text.ifBlank { "引擎正在等待你的回答" })
-        b.setStyle(NotificationCompat.BigTextStyle().bigText(questions.joinToString("\n") { it.question }))
+        // S3-4：旧写法是 `first?.question ?: entry.text.ifBlank {...}`——`first.question` 是**空串**
+        // （非 null）时 elvis 不触发，通知正文于是空白。`ifBlank { null }` 才能让空串也落到兜底。
+        b.setContentText(first?.question?.ifBlank { null } ?: entry.text.ifBlank { "引擎正在等待你的回答" })
+        b.setStyle(NotificationCompat.BigTextStyle().bigText(questionBigText(entry)))
         b.setPriority(NotificationCompat.PRIORITY_HIGH)
-        b.setTimeoutAfter(QUESTION_TIMEOUT_MS)
-        // 超时只是撤弹窗：不得发 rejected（引擎侧没有超时，请求仍 pending）
+        // S3-6：**不再** setTimeoutAfter(30 分钟)。引擎侧的提问没有超时，而通知栏是唯一的作答入口
+        // ——「30 分钟后无声消失、引擎仍在等」与 P0-5（关掉提醒 = 任务永久挂起）是同一形态的静默失败。
+        // 通知寿命现在与请求寿命一致：由 cancel 帧（引擎撤销/他人已答）或本机提交来结算。
         addQuestionActions(app, b, entry)
       }
       Face.APPROVAL -> {
-        b.setContentTitle(UserCopy.notifyCategory(Face.APPROVAL.category))
+        // S3-8：旧标题恒为类别词「需要授权」，把引擎给的**具体对象**（工具名）丢在正文里——用户
+        // 一眼看到「需要授权」四个字，不知道要放行什么。标题带上具体对象，类别词只作兜底。
+        b.setContentTitle(
+          entry.toolName.ifBlank { null }?.let { "「" + it + "」需要授权" }
+            ?: entry.displayTitle().ifBlank { UserCopy.notifyCategory(Face.APPROVAL.category) },
+        )
         b.setContentText(approvalLine(entry))
         b.setStyle(NotificationCompat.BigTextStyle().bigText(approvalLine(entry) + "\n仅本次生效"))
         b.setSubText("仅本次生效")
@@ -943,6 +1053,8 @@ object NotifyCenter {
         addApprovalActions(app, b, entry)
       }
     }
+    // S3-1：降级告示只在传了它时出现，且不覆盖更具体的 subText（如提问的「仅本次生效」）。
+    if (degradedNotice != null) b.setSubText(degradedNotice)
     b.setContentIntent(contentIntent(app, entry))
     // DEF-NOTIFY-01：降级为静默条目时补静默标志（渠道已是 dsh-silent，这是第二道保险）
     if (silentOverride) {
@@ -978,10 +1090,14 @@ object NotifyCenter {
     return sb.toString()
   }
 
+  /**
+   * 审批正文（S3-7）：保留被操作目标的可辨识末段，而不是把整条路径抹成 `[路径]`。
+   * 用户要确认的**正是那个目标**；抹掉它等于让用户在不知道放行什么的情况下点「批准一次」。
+   */
   private fun approvalLine(entry: NotifyEntry): String {
     val tool = entry.toolName.ifBlank { "未知工具" }
     val reason = entry.reason.trim()
-    return if (reason.isBlank()) "工具 " + tool + " 请求执行" else "工具 " + tool + "：" + sanitize(reason)
+    return if (reason.isBlank()) "工具 " + tool + " 请求执行" else "工具 " + tool + "：" + redactPathsKeepingTail(reason)
   }
 
   /** 正文脱敏：绝对路径截断 + token 形态遮挡（§5.6；不改写 engine.log 本体）。 */
@@ -1041,6 +1157,26 @@ object NotifyCenter {
     return PendingIntent.getBroadcast(app, stableId(key), actionIntent(app, entry, action, option, questionId), flags)
   }
 
+  /**
+   * 提问正文的多问形态（S3-5）：逐个列出问题，并在**不能给按钮**时明说去哪儿作答。
+   *
+   * 旧行为：正文只 join 各问的 `question`，而选项多于两个的问句在通知里没有任何动作——用户看到
+   * 三四个选项的问句，却发现通知栏里点不出东西，也没人告诉他去应用里答。
+   */
+  private fun questionBigText(entry: NotifyEntry): String {
+    val lines = entry.questions.map { it.question }.filter { it.isNotBlank() }
+    val body = if (lines.isEmpty()) "引擎正在等待你的回答" else lines.joinToString("\n")
+    return if (questionNeedsAppEntry(entry)) body + "\n（本题选项多于两个，请打开应用作答）" else body
+  }
+
+  /**
+   * 纯判据：这条提问是否**无法**在通知栏作答（选项多于两个 ⇒ 通知里没有对应按钮）。
+   * @param entry - 通知条目。
+   * @returns true = 需要在通知里显式给出「打开应用作答」的入口。
+   */
+  internal fun questionNeedsAppEntry(entry: NotifyEntry): Boolean =
+    entry.questions.any { it.options.size > 2 }
+
   private fun addQuestionActions(app: Context, b: NotificationCompat.Builder, entry: NotifyEntry) {
     // 动作 1：直接回复（RemoteInput）。只有回复动作开 mutable——结果经 ClipData 注入，
     // FLAG_IMMUTABLE 会让回复静默失败（§6.3.1 / NT-16）。
@@ -1071,6 +1207,17 @@ object NotifyCenter {
         }
       }
     }
+    // S3-5：选项多于两个 ⇒ 上面一个按钮都加不出来，用户在通知栏无从作答。旧实现什么都不加、
+    // 也不提示；现在显式给一个「打开应用作答」的入口（与通知点击同一条 contentIntent）。
+    if (questionNeedsAppEntry(entry)) {
+      b.addAction(
+        NotificationCompat.Action.Builder(
+          android.R.drawable.ic_menu_view,
+          "打开应用作答",
+          contentIntent(app, entry),
+        ).build(),
+      )
+    }
   }
 
   private fun addApprovalActions(app: Context, b: NotificationCompat.Builder, entry: NotifyEntry) {
@@ -1094,10 +1241,34 @@ object NotifyCenter {
   }
 
   /**
-   * 投递失败的**可见态**（NT-17）：同 (kind,eventId) 同 ID 覆盖，动作 = 点击重试（广播，不 startActivity）。
-   * 现状对照：NotifyCenter 旧实现遇到未授权/异常只写日志——用户的动作看上去「点了没反应」。
+   * 投递失败的**可见态**（NT-17；§3.3 批 8 重做）。
+   *
+   * 三处旧形态在本批被收掉：
+   *  - **S3-12 覆盖原内容**：旧实现用 `notificationId(entry, face)`（与原提问/审批**同一个 ID**），
+   *    于是失败通知把用户正在看的提问内容整个替换掉——用户既看不到自己答的是什么，也看不到原问题。
+   *    现在失败通知有**自己的 ID 桶**，并且**主动撤掉**原交互通知（它的按钮已经无意义）。
+   *  - **S3-11 死按钮**：旧实现无条件加「重试」按钮，而「该请求已失效」（引擎重启后 eventId 不在
+   *    交付表）这一类失败**重试必然同样失败**——按钮点下去什么也不会发生。现在按 [retryable] 决定
+   *    是否有重试动作：不可重试的只说清后果与下一步。
+   *  - **上下文丢失**：旧实现只给一句「提交失败」。现在 [detail] 带上失败的那次作答（已截断），
+   *    用户知道「我答的是哪一条没送到」。
+   *
+   * @param kind - 交互类型（question/approval）。
+   * @param eventId - 事件 id。
+   * @param title - 失败标题（如「提交失败」/「该请求已失效」）。
+   * @param text - 用户可读正文（含下一步）。
+   * @param retryable - 重试是否**可能**成功（false ⇒ 不加重试动作，避免死按钮）。
+   * @param detail - 失败上下文（如被提交的答案文本），可为空；只作正文补充。
    */
-  fun postDeliveryFailure(context: Context, kind: String, eventId: String, title: String, text: String) {
+  fun postDeliveryFailure(
+    context: Context,
+    kind: String,
+    eventId: String,
+    title: String,
+    text: String,
+    retryable: Boolean = true,
+    detail: String = "",
+  ) {
     val app = context.applicationContext
     val face = Face.of(kind.lowercase()) ?: Face.QUESTION
     if (!hasPermission(app)) {
@@ -1105,30 +1276,71 @@ object NotifyCenter {
       return
     }
     val channelId = channelFor(app, face) ?: channelFor(app, Face.SILENT) ?: return
-    val entry = NotifyEntry(kind = kind, eventId = eventId, title = title)
-    val retry = Intent(app, NotifyActionReceiver::class.java).apply {
-      action = NotifyActionReceiver.ACTION_NOTIFY_ACTION
-      putExtra(NotifyActionReceiver.EXTRA_ACTION, NotifyActionReceiver.ACTION_RETRY)
-      putExtra(NotifyActionReceiver.EXTRA_EVENT_ID, eventId)
-      putExtra(NotifyActionReceiver.EXTRA_KIND, kind)
-    }
-    val pending = PendingIntent.getBroadcast(
-      app,
-      stableId("dsh.retry:" + eventId),
-      retry,
-      PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-    )
-    val n = NotificationCompat.Builder(app, channelId)
+    // S3-12：撤掉原交互通知（同 eventId 的两个候选 ID 都撤），否则通知栏上会同时留着一条
+    // 「点了没反应」的旧提问/审批。
+    cancel(app, eventId)
+    val body = if (detail.isBlank()) text else text + "\n你所提交的内容：" + UserCopy.truncateWithEllipsis(detail, 60)
+    val b = NotificationCompat.Builder(app, channelId)
       .setSmallIcon(android.R.drawable.stat_notify_sync)
       .setContentTitle(title)
       .setContentText(text)
-      .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+      .setStyle(NotificationCompat.BigTextStyle().bigText(body))
       .setAutoCancel(true)
       .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
-      .addAction(NotificationCompat.Action.Builder(android.R.drawable.ic_menu_rotate, "重试", pending).build())
-      .build()
-    (app.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).notify(notificationId(entry, face), n)
-    LogCollector.log("dsh-notify", "delivery failure visible: kind=" + kind + " eventId=" + eventId + " text=" + text)
+      // 点击打开应用（用户下一步多半是去应用里重做）——比一个死按钮有用。
+      .setContentIntent(contentIntent(app, NotifyEntry(kind = kind, eventId = eventId, title = title)))
+    if (retryable) {
+      val retry = Intent(app, NotifyActionReceiver::class.java).apply {
+        action = NotifyActionReceiver.ACTION_NOTIFY_ACTION
+        putExtra(NotifyActionReceiver.EXTRA_ACTION, NotifyActionReceiver.ACTION_RETRY)
+        putExtra(NotifyActionReceiver.EXTRA_EVENT_ID, eventId)
+        putExtra(NotifyActionReceiver.EXTRA_KIND, kind)
+      }
+      val pending = PendingIntent.getBroadcast(
+        app,
+        stableId("dsh.retry:" + eventId),
+        retry,
+        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+      )
+      b.addAction(NotificationCompat.Action.Builder(android.R.drawable.ic_menu_rotate, "重试", pending).build())
+    }
+    (app.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
+      .notify(failureId(kind, eventId), b.build())
+    LogCollector.log(
+      "dsh-notify",
+      "delivery failure visible: kind=" + kind + " eventId=" + eventId + " retryable=" + retryable + " text=" + text,
+    )
+  }
+
+  /** 失败通知的独立 ID 桶（S3-12：不得覆盖原提问/审批通知的 ID）。 */
+  internal fun failureId(kind: String, eventId: String): Int =
+    stableId("dsh-failure:" + kind.lowercase() + ":" + eventId)
+
+  /**
+   * 发送**全部五类**测试通知（设置页「通知」分区的自证按钮；0.14.1 批 8 / S3-26）。
+   *
+   * 为什么需要它：`sendTest` 此前**全仓零调用点**——「能力在、入口无」，与 J-1 同形。而通知这一族
+   * 最需要用户自证的问题恰恰是：「我把某个提醒关了 / 系统把渠道降级了之后，任务完成还会不会提醒我？」
+   * 自检面告诉用户**渠道状态**，这个按钮让用户看到**实际到达效果**（哪几条真的弹出来、哪几条是静默）。
+   *
+   * 五类各发一条（静默类也会发，但用户在通知栏能看见它——「没弹出来」正是要观察的事实）。
+   * 权限缺失时不发送并如实回 0，由界面提示（不静默）。
+   * @param context - 任意 context。
+   * @returns 实际投递成功的条数（0..5）。
+   */
+  fun sendTestAll(context: Context): Int {
+    val app = context.applicationContext
+    if (!hasPermission(app)) {
+      NotifyProbe.log(app, "dsh-notify", "sendTestAll skipped (POST_NOTIFICATIONS not granted)")
+      listener?.onPermissionDenied()
+      return 0
+    }
+    var posted = 0
+    for (category in listOf("report", "question", "approval", "todo", "silent")) {
+      if (sendTest(app, category) == Result.POSTED) posted++
+    }
+    NotifyProbe.log(app, "dsh-notify", "sendTestAll posted=" + posted + "/5")
+    return posted
   }
 
   /** 发送测试通知（设置页自证按钮；按类各一条；权限缺失时二次请求由界面负责）。 */

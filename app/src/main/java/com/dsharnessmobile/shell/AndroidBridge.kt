@@ -143,6 +143,16 @@ class AndroidBridge(
   private val onOpenNotifyAppSettings: () -> Boolean = { false },
   /** 页面的「打开该渠道的系统设置」入口（渠道级）。 */
   private val onOpenNotifyChannelSettings: (String) -> Boolean = { _ -> false },
+  /**
+   * 页面的「发送测试通知」入口（0.14.1 批 8 / S3-26）。
+   *
+   * 默认实现同样钉在真源上（`NotifyCenter.sendTestAll`），不依赖 MainActivity 传参——`sendTest`
+   * 此前全仓零调用点的成因就是「能力在、没人接线」。返回实际投递条数（0 = 没发出去，页面如实提示）。
+   */
+  private val onNotifySendTest: () -> Int = {
+    val app = ShellAppContext.get()
+    if (app == null) 0 else NotifyCenter.sendTestAll(app)
+  },
 ) {
 
   @JavascriptInterface
@@ -454,6 +464,14 @@ class AndroidBridge(
   /** 打开某个渠道的系统设置页（channelId 由 notifySelfCheck 给出）；返回是否真的拉起。 */
   @JavascriptInterface
   fun openNotifyChannelSettings(channelId: String): Boolean = onOpenNotifyChannelSettings(channelId)
+
+  /**
+   * 发送五类测试通知，返回实际投递条数（0..5）。
+   * 让用户自证「关掉某类提醒 / 系统降级渠道之后，任务完成还会不会提醒我」——渠道状态由
+   * `notifySelfCheck` 给出，本方法给的是**实际到达效果**。
+   */
+  @JavascriptInterface
+  fun notifySendTest(): Int = onNotifySendTest()
 
   companion object {
     /**
