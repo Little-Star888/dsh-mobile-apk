@@ -390,8 +390,11 @@ class MainActivity : ComponentActivity() {
       }
     }
     // 0.13.2 W7 + ST-02：悬浮球开关已开且权限在场时补启。权限缺失时 OverlayController 把偏好
-    // 回落 false，本行随即短路——不再每次回前台弹系统页；用户重新授予后需再点一次开关。
+    // 回落 false，本行随即短路——不再每次回前台弹系统页。
+    // S2-17：另外结算「用户已经表达过开启意图、刚去系统页授了权」这一笔——旧实现里这条路径
+    // 是死路（偏好已回落 → 短路 → 球不出现、开关自己变回关闭、零解释）。
     OverlayController.ensureStarted(this)
+    OverlayController.settlePendingEnable(this)
     // 0.14.0：ADB 端口预取与 server 预热随内置 adb 退役（Shizuku UserService 自身常驻，无需预热）。
     // Back from the directory picker / Termux: re-route if the engine came up.
     // 仅当 WebView 未展示（引导页/首次启动）时才探测并重路由；相册/文件选择器

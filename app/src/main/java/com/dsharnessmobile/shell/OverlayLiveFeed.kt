@@ -119,7 +119,13 @@ class OverlayLiveFeed(private val svc: OverlayService) {
                 // 执行期间面板会挡住被控 App 的坐标命中区（「点列表第2条实点面板」）——
                 // 识别到自动化工具调用即自动收起面板；不自动恢复（用户点球重开），
                 // 避免恢复动作与下一发自动化点击竞态。
-                if (svc.currentToolName.startsWith("android_") && svc.expanded) svc.hidePanel()
+                // S2-13：自动收起必须**有说明**。旧实现静默把面板收掉：用户正看着面板，
+                // 它自己消失了，既不知道是谁干的、也不知道还能不能回来（而且此刻面板已不可见，
+                // 写状态行也没人看得到——所以用 Toast：它在面板收起后仍然可见）。
+                if (svc.currentToolName.startsWith("android_") && svc.expanded) {
+                  svc.hidePanel()
+                  svc.notifyAutoCollapsedForAutomation()
+                }
                 // 0.13.8 G1-2（缺陷 B-2）：状态写入统一走 deriveHalo 唯一权威
                 svc.setHalo(svc.deriveHalo())
                 changed = true

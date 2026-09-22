@@ -35,7 +35,8 @@ class OverlayPanel(private val svc: OverlayService) {
   private var reportEntryView: TextView? = null   // P5-1：状态行右侧的可见「查看汇报」入口
   private var toolChip: TextView? = null
   private var clockText: TextView? = null
-  private var closeView: ImageView? = null       // 展开态收起按钮（✕，会话选择行右端）
+  private var closeView: View? = null                // 收起按钮（✕，44dp 命中区；S2-18）
+  private var closeIcon: ImageView? = null           // 收起按钮的内层图标（20dp，换肤时改色用）
   private var dividerView: View? = null
   private var sendBtn: View? = null
   private var stopBtn: View? = null
@@ -244,6 +245,11 @@ class OverlayPanel(private val svc: OverlayService) {
       textSize = 13f
       setTypeface(null, android.graphics.Typeface.BOLD)
       setTextColor(c.idleText)
+      // S2-1：长按/三击手势挂在**这一行文字**上，而文字本身只有约 20dp 高——手势热区此前
+      // 等于一行字，实测「按不准」。批 5 补了可见入口（「查看汇报」），这里把**手势本身**
+      // 的热区也顶到 44dp：手势语义未变，只是让它在手指尺度上成立。
+      minHeight = (MIN_TOUCH_TARGET_DP * dp).toInt()
+      gravity = Gravity.CENTER_VERTICAL
     }
     statusText = status
     attachStatusGesture(status)
@@ -272,22 +278,30 @@ class OverlayPanel(private val svc: OverlayService) {
     // 收起按钮（✕）：放顶行（会话选择行）右端。旧版收起箭头在状态行、与 Spinner 下拉
     // 三角同为三角且下拉展开后被列表盖住（视觉引导错误，用户实测）——✕ 与下拉三角可区分
     // 且位于下拉弹出层之上，永不被盖。
-    val close = ImageView(svc).apply {
-      setImageResource(R.drawable.dsh_ic_close)
-      setColorFilter(c.chevron)
+    // S2-18（批 5 设备验收时发现）：**触摸目标必须 ≥44dp**。旧实现是 20×20dp 的 ImageView
+    // （uiautomator 实测 `收起面板 40×40px = 20×20dp`），而它是面板上唯一的收起入口。
+    // 做法与批 5 同口径：外层 FrameLayout 撑到 44dp 命中区，内层 20dp 图标保持观感；
+    // 为不让选择行白长 20dp，行的上下内边距在下面按需收紧。
+    val close = FrameLayout(svc).apply {
       contentDescription = "收起面板"
       isClickable = true
       setOnClickListener { svc.hidePanel() }
+      addView(ImageView(svc).apply {
+        setImageResource(R.drawable.dsh_ic_close)
+        setColorFilter(c.chevron)
+      }, FrameLayout.LayoutParams((20 * dp).toInt(), (20 * dp).toInt(), Gravity.CENTER))
     }
     closeView = close
+    closeIcon = (close.getChildAt(0) as? ImageView)
 
     // 会话选择行（独立一行，向下箭头 Spinner）+ 右端 ✕ 收起
+    // S2-18：✕ 的命中区 44dp，行内边距按需收紧（旧行高 38dp → 44dp，只多 6dp）。
     val pickerRow = LinearLayout(svc).apply {
       orientation = LinearLayout.HORIZONTAL
       gravity = Gravity.CENTER_VERTICAL
-      setPadding((12 * dp).toInt(), (10 * dp).toInt(), (12 * dp).toInt(), (2 * dp).toInt())
+      setPadding((12 * dp).toInt(), (3 * dp).toInt(), (8 * dp).toInt(), (3 * dp).toInt())
       addView(pickerRowText, LinearLayout.LayoutParams(0, (26 * dp).toInt(), 1f))
-      addView(close, LinearLayout.LayoutParams((20 * dp).toInt(), (20 * dp).toInt()).apply { marginStart = (8 * dp).toInt() })
+      addView(close, LinearLayout.LayoutParams((MIN_TOUCH_TARGET_DP * dp).toInt(), (MIN_TOUCH_TARGET_DP * dp).toInt()).apply { marginStart = (8 * dp).toInt() })
     }
 
     // 状态行：状态文字 + 汇报入口 + 工具×N + 时钟（收起按钮已移至顶行 ✕）
@@ -411,7 +425,7 @@ class OverlayPanel(private val svc: OverlayService) {
         st.setTextColor(if (!svc.engineRunning) c.offText else c.idleText)
       }
     }
-    closeView?.setColorFilter(c.chevron)
+    closeIcon?.setColorFilter(c.chevron)
     reportEntryView?.setTextColor(c.chevron)   // P5-1：汇报入口用主题强调色（换肤时必须同步）
     inputBox?.apply {
       setTextColor(c.inputText)

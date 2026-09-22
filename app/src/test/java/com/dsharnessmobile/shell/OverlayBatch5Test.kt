@@ -176,8 +176,9 @@ class OverlayBatch5Test {
 
     val panel = codeOnly(source("OverlayPanel.kt"))
     val sites = Regex(Regex.escape("(MIN_TOUCH_TARGET_DP * dp).toInt()")).findAll(panel).count()
-    // 回报入口 minWidth + minHeight + 发送(宽/高) + 停止(宽/高) = 6
-    assertEquals("面板侧六处尺寸必须都取同一常量（实测 $sites 处）", 6, sites)
+    // 回报入口 minWidth + minHeight、状态行手势热区 minHeight（S2-1）、发送(宽/高)、停止(宽/高)、
+    // 面板 ✕ 命中区(宽/高，S2-18) = 9
+    assertEquals("面板侧九处尺寸必须都取同一常量（实测 $sites 处）", 9, sites)
   }
 
   @Test

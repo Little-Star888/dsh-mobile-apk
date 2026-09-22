@@ -738,6 +738,29 @@ class OverlayService : Service() {
     }
   }
 
+  /**
+   * 面板因自动化（`android_*` 工具）执行而被自动收起时的可见说明（S2-13）。
+   *
+   * 为什么用 Toast 而不是状态行：此刻面板**已经收起**，状态行没人看得到（这正是旧实现
+   * 「不给说明」的根因——它想说也没地方说）。Toast 不依赖任何窗口存活，正是这个场景的合适原语。
+   * 文案要回答三个问题：谁收的（自动化在执行）、为什么（面板会挡住被控应用）、怎么回来（点球）。
+   */
+  internal fun notifyAutoCollapsedForAutomation() {
+    main.post {
+      try {
+        android.widget.Toast.makeText(
+          this,
+          "自动化执行中，已临时收起面板（面板会挡住被控应用）。工具跑完后点球可再打开。",
+          android.widget.Toast.LENGTH_LONG,
+        ).show()
+      } catch (_: Exception) {
+        // Toast 在某些 ROM 的后台限制下会失败——失败不静默：留日志（这条提示是尽力而为的告知，
+        // 不影响自动化本身）。
+        LogCollector.log("dsh-overlay", "auto-collapse toast failed (automation hint dropped)")
+      }
+    }
+  }
+
   /** 面板已展开时刷新（状态行/徽标/时钟）。 */
   internal fun renderPanelOnly() {
     if (!expanded) return
