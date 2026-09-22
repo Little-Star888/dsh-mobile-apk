@@ -123,14 +123,14 @@
       "provenance": "2026-09-10 模拟器实测；上游把孤儿锁回收定义为 operator action，Android 应用私有目录无 operator 可达（残留 .credentials.yaml.lock 等于永久起不来）",
       "marker": "dsh-mobile stale-lock recovery (F4)"
     },
-  {
-    "id": "attach-durable-F2",
-    "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-attachment-local/lib/index.js",
-    "scope": "engine",
-    "summary": "附件持久化 Android 三件套：① 祖先 fsync 在应用私有路径（/data/user/0）EACCES 即止步（原实现一路 sync 到文件系统根 → 所有图片上传被 api-proxy 兜底成 session/agent-busy）；② publishImmutableAlias.source 与 publishStagedObject.staged.path 两处 link(2) 在 EACCES/EPERM/ENOTSUP 时回退 rename（Android SELinux 拒 hardlink）；③ publishStagedObject 的 unlink(staged.path) 容忍 ENOENT（回退 rename 已消费 staged 文件）",
-    "provenance": "① 2026-09-10 实测（模拟器 16416：上传图片发送 → prompt rejected (session/agent-busy)，details.reason=EACCES open '/data/user/0'；同一根因解释 read_image 读任意路径都报同一 EACCES）；② ③ 2026-09-14 review C1（此前只在运行时 asset：资产↔快照逐字节同源判据落地时快照侧补齐）",
-    "marker": "dsh-mobile durable-walk guard"
-  },
+    {
+      "id": "attach-durable-F2",
+      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-attachment-local/lib/index.js",
+      "scope": "engine",
+      "summary": "附件持久化 Android 三件套：① 祖先 fsync 在应用私有路径（/data/user/0）EACCES 即止步（原实现一路 sync 到文件系统根 → 所有图片上传被 api-proxy 兜底成 session/agent-busy）；② publishImmutableAlias.source 与 publishStagedObject.staged.path 两处 link(2) 在 EACCES/EPERM/ENOTSUP 时回退 rename（Android SELinux 拒 hardlink）；③ publishStagedObject 的 unlink(staged.path) 容忍 ENOENT（回退 rename 已消费 staged 文件）",
+      "provenance": "① 2026-09-10 实测（模拟器 16416：上传图片发送 → prompt rejected (session/agent-busy)，details.reason=EACCES open '/data/user/0'；同一根因解释 read_image 读任意路径都报同一 EACCES）；② ③ 2026-09-14 review C1（此前只在运行时 asset：资产↔快照逐字节同源判据落地时快照侧补齐）",
+      "marker": "dsh-mobile durable-walk guard"
+    },
     {
       "id": "spj-migration-link-F5",
       "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js",
@@ -145,8 +145,18 @@
       "scope": "engine",
       "summary": "发布独占语义找回 + 失败回收：F5 的 rename 回退会静默覆盖已存在的目标（link 的 EEXIST 语义在 Android 上成死代码）→ O_EXCL 原子占位抽成模块级小函数 dshMobileClaimExclusive()，F5 的两站（publishCurrentExclusive + materializePosix）共用：publish 站输家得 EEXIST 并 return false、materialize 站输家得 EEXIST 并抛出（该站上游只有抛错通道）；两站占位成功后 rename 失败一律 unlink 回收占位，防 0 字节残留让之后每次发布都输掉竞争",
       "provenance": "2026-09-12 apk issue #170 / FX-207.1+207.2（审计 F5 输出）；触发面 = 双引擎进程并发发布同一会话/同一日志；跨进程独占只剩原子发布是 flock-android-F3 stub 的后果",
-      "requires": ["spj-migration-link-F5"],
+      "requires": [
+        "spj-migration-link-F5"
+      ],
       "marker": "dsh-mobile exclusive materialize (F7)"
+    },
+    {
+      "id": "fs-local-link-F8",
+      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-fs-local/lib/index.js",
+      "scope": "engine",
+      "summary": "文件写工具 createIfAbsent 的 link(2) 回退：dsh-fs-observation-policy 对「未观察过/确认不存在」的路径判 createIfAbsent，dsh-fs-local 的 writeFileAtomic 只能用 link(2) 做 no-replace 发布且失败即抛（该分支无回退）→ Android 应用域恒拒 hardlink（EACCES）⇒ 真机上 write 工具建不了任何新文件（覆盖已存在文件走 rename，正常）。修法：EACCES/EPERM/ENOTSUP 时改用 O_EXCL 占位 + rename 等价实现 no-replace（保住 link 的独占语义，输家仍得 EEXIST 与同一拒绝文案），rename 失败回收占位防 0 字节残留",
+      "provenance": "2026-09-22 apk issue #246（真机实测三连：write 新建失败 / write 覆盖成功 / edit 修改成功；同域 ln 直接失败佐证）；与坑位 #77 / attach-durable-F2 / spj-migration-link-F5 同一 sepolicy 限制的第 4 个站点。0.13.3 曾以「上游 0.1.2-rc.1 已原生覆盖 rename 回退」为由退役 fs-local-index.js，该结论对 createIfAbsent 站点不成立（0.1.5-rc.1 实测全文仅此一处 link、无任何回退）",
+      "marker": "dsh-mobile link->rename fallback (F8)"
     },
     {
       "id": "perf-patch-reload-N1",
@@ -168,7 +178,9 @@
       "id": "combo-cache-A3",
       "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-modules/lib/index.js",
       "scope": "engine",
-      "requires": ["combo-lazy-A4"],
+      "requires": [
+        "combo-lazy-A4"
+      ],
       "summary": "identity combo 源码与 section map 按 sha256(client.js) 查构建期缓存（快照段 client-combos.json + 注入段 client-combos.inject.json，按序合并），未命中/损坏/id 不符一律回退现场生成并计数（fail-open）；预计算脚本 scripts/lib/combo-precompute.mjs，覆盖门禁 scripts/check-combo-cache.mjs",
       "provenance": "0.14.0 启动性能 P1-2（同上方案 §4.A3 / 计划 §5.2 P1-2）；验收 P-AC-05 篡改回落 + 缓存覆盖门禁",
       "marker": "dsh-mobile combo cache (A3)"
@@ -177,7 +189,9 @@
       "id": "combo-single-lazy-A5",
       "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-modules/lib/index.js",
       "scope": "engine",
-      "requires": ["combo-lazy-A4"],
+      "requires": [
+        "combo-lazy-A4"
+      ],
       "summary": "单条 combo 延迟到首次被请求：compose() 只登记单条 URL -> 记录映射（不建产物）；bundleResource() 命中单条 URL 时按需 buildCombo 并缓存（按组合世代失效 + 用重建 URL 比对挡陈旧 rev）；批 combo 与 notifyGraphChanged 语义不变；探针计数 __dshMobileComboLazyStats.singleBuilds 区分「已延迟」与「探针没接上」",
       "provenance": "0.14.1 块F P0-1（docs/0.14.1-preview-BOOT-SPEED-AND-LAZY-PLUGINS.md §3.3(4) 与 §4 第 1 项）；A 档设备实测 boot 期浏览器只请求 2 个 /plugins/ 资源（两个批 combo），56 条单条 combo 零请求——单条 URL 的唯一生产者是 HMR invalidate()",
       "marker": "dsh-mobile combo single lazy (A5)"
@@ -186,7 +200,11 @@
       "id": "combo-parallel-C3",
       "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-modules/lib/index.js",
       "scope": "engine",
-      "requires": ["combo-lazy-A4", "combo-cache-A3", "combo-single-lazy-A5"],
+      "requires": [
+        "combo-lazy-A4",
+        "combo-cache-A3",
+        "combo-single-lazy-A5"
+      ],
       "summary": "compose 重活分片并行（K=min(2,cores-1)）：buildCombo 的逐记录字节计算（comboSource 解码/正则、identitySectionMap 的 mappings 与 sourcesContent、newlineCount）分片到启动期临时 worker 池；A3 命中与 rev 分配、批拼接、framedHash 全留主线程；每次组合过程结束 finally 里 terminate() 全池（不驻留 RSS）；任何异常回退单线程现场生成（正确性不依赖池），分片带 deadline 不挂死",
       "provenance": "0.14.1 块F P1（docs/0.14.1-preview-BOOT-SPEED-AND-LAZY-PLUGINS.md §3.6(e) 与 §4 第 3 项；用户 2026-09-19 拍板 C3 为 0.14.1 必做）；A3/A4/A5 之后那唯一一次 compose 仍是落在首个页面请求路径上的同步块（设备 2795 ms）",
       "marker": "dsh-mobile combo parallel (C3)"
@@ -195,7 +213,12 @@
       "id": "combo-probe-P1",
       "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-modules/lib/index.js",
       "scope": "engine",
-      "requires": ["combo-lazy-A4", "combo-cache-A3", "combo-single-lazy-A5", "combo-parallel-C3"],
+      "requires": [
+        "combo-lazy-A4",
+        "combo-cache-A3",
+        "combo-single-lazy-A5",
+        "combo-parallel-C3"
+      ],
       "summary": "把 compose 探针送进产品内（收口 t_compose_total 恒 -1）：在 compose() 返回处打印 `[perf] compose #N at=.. dur=..` 与 `[perf] TOTAL calls=.. totalMs=.. instances=.. firstAt=..ms singles=.. loopP99Ms=.. loopSamples=.. comboCache=..`（字段齐备，无值报 -1）；只主线程安装（worker 的 calls=0 TOTAL 不得冒充真读数）；不新增快照成员、壳侧解析器零改动",
       "provenance": "0.14.1 块F（T6 设备实测真因 + 详档 §5.1 C6/P-AC-04）：42/42 恒为 -1；preload/注入方案结构性无效——① count-compose 的 TOTAL 只在 process.on('exit') 打印，落在 killExistingEngine() 内、早于 rotateEngineLog()，被搬进 engine.log.1 而新生代从偏移 0 读不到；② --import/NODE_OPTIONS 在 file-based worker 线程也执行（Node v24.17 实测，引擎树至少 5 处 worker），worker 临终打 calls=0 而解析取最后一条，得到「非 -1 但为 0」的假绿，且 NODE_OPTIONS 会继承到 agent 全部子进程、缺 COMBO_LIB 直接 exit(2)。落点在 compose() 返回处 = LISTEN 之后、首个页面请求路径上，正是 C2 要测的同步块",
       "marker": "dsh-mobile combo probe (P1)"
