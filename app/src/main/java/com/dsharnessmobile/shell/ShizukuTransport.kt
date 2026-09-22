@@ -37,22 +37,38 @@ object ShizukuTransport {
    */
   private const val BIND_TOTAL_MS = 15_000L
 
-  /** 「正在建立连接」的结构化 code（可重试语义，与「未绑定需排查」区分）。 */
-  private const val CONNECTING_CODE = "shizuku-user-service-connecting"
+  /**
+   * 绑定看门狗阈值（0.14.1 设备实锤，Redmi K70E）：一次绑定超过本阈值仍**既无回调也无同步异常**，
+   * 就判定这次尝试已死并复位——否则 `binding` 永久为 true，`kickBind` 从此不再发起任何尝试，
+   * UI 永久停在「正在建立」（本缺陷的形态）。详见 [ShizukuBindState] 的类注释。
+   *
+   * 取值依据：真机/模拟器实测回调耗时 ~5s（[BIND_TOTAL_MS] 的注释已录），阈值取 4 倍余量；
+   * 且**大于**单次调用的总预算（15s），使第一次 `ensureBound` 能先正常用满自己的窗口、
+   * 不会在半途被判定为僵尸（否则会与调用方语义打架）。该值未经多机型校准，调整只改这一处。
+   */
+  private const val BIND_WATCHDOG_MS = 20_000L
+
+  /** 「正在建立」的结构化 code（可重试语义，与「未绑定需排查」区分）。 */
+  private const val CONNECTING_CODE = ShizukuBindCodes.CONNECTING
 
   private val lock = Any()
   @Volatile private var service: ShizukuUserService? = null
-  @Volatile private var binding = false
-  @Volatile private var lastError = "shizuku-user-service-not-bound"
+
+  /**
+   * 绑定状态机（绑定闩 / 次数 / 最近错误码 / 看门狗）。替代原先裸的 `@Volatile binding + lastError`：
+   * 那对字段没有超时面，一次不回调的 bind 就能把整条通道永久闩死。
+   */
+  private val bindState = ShizukuBindState(BIND_WATCHDOG_MS)
+
   @Volatile private var connectedAt = 0L
   private var bindLatch: CountDownLatch? = null
 
   private val connection = object : ServiceConnection {
     override fun onServiceConnected(name: ComponentName, binder: IBinder) {
       service = ShizukuUserService.Stub.asInterface(binder)
-      binding = false
+      // 先探活再记账：binder 无效时不得当成「连上」（与 status() 的 bound 判据同口径）。
+      bindState.onConnected(binder.pingBinder())
       connectedAt = SystemClock.elapsedRealtime()
-      lastError = if (binder.pingBinder()) "" else "shizuku-user-service-invalid-binder"
       bindLatch?.countDown()
       // 连接已建立，latch 使命完成：清空以便断连后重建。留着它会让下一次 ensureBound 的
       // await 立即返回、永远看不到新的等待窗口（本缺陷的根因形态）。
@@ -62,13 +78,32 @@ object ShizukuTransport {
 
     override fun onServiceDisconnected(name: ComponentName) {
       service = null
-      binding = false
-      lastError = "shizuku-user-service-disconnected"
+      bindState.onDisconnected()
       bindLatch?.countDown()
       // 断连后旧 latch 已经 countDown、语义作废；清掉它，下一次 ensureBound 才会新建并真正等待。
       // 复用已放行的 latch 会让 await 立即返回 → 又变成「第一次必失败」，正是本缺陷的成因。
       bindLatch = null
       Log.w(TAG, "user service disconnected ${name.className}")
+    }
+  }
+
+  /**
+   * 看门狗执行点（**非阻塞**，可安全出现在 status() 这类高频读路径上）。
+   *
+   * 只在确有一次僵尸绑定时才动锁与日志（[ShizukuBindState.reapIfStale] 幂等），
+   * 因此热路径上的开销是一次 synchronized + 一次减法。
+   */
+  private fun reapStaleBind() {
+    if (!bindState.reapIfStale(SystemClock.elapsedRealtime())) return
+    Log.w(
+      TAG,
+      "bind watchdog: no callback within ${BIND_WATCHDOG_MS}ms; reset binding state (attempts=${bindState.attempts})",
+    )
+    synchronized(lock) {
+      // 放行并作废当前 latch。留着它会让后续 ensureBound 一直复用一个永不 countDown 的 latch，
+      // 于是每轮仍然只是「等满预算再报正在建立」——那正是本缺陷的形态。
+      bindLatch?.countDown()
+      bindLatch = null
     }
   }
 
@@ -83,12 +118,21 @@ object ShizukuTransport {
 
   /** Stable JSON state suitable for the native bridge and VirtualDisplay controller. */
   fun status(context: Context): JSONObject {
+    // 看门狗先跑：它是**读路径**上唯一的自愈点（设置页与面板每 2s 轮询 status）。
+    // 不放在这里的话，一次不回调的 bind 会让状态永远停在「正在建立」，没有任何人会发现。
+    reapStaleBind()
     val out = JSONObject().put("installed", installed(context))
     val running = runCatching { Shizuku.pingBinder() }.getOrDefault(false)
     out.put("running", running)
     out.put("granted", false)
     out.put("bound", service?.asBinder()?.pingBinder() == true)
     out.put("userServiceAgeMs", if (connectedAt > 0L) SystemClock.elapsedRealtime() - connectedAt else -1)
+    // 绑定面三态的可观测出口（0.14.1）：调用方（设置页 / 工具面 / 诊断）据此区分
+    // 「尚未发起」「正在建立（确有 bind 在飞）」「已失败」，而不是由一句文案猜。
+    out.put("binding", bindState.binding)
+    out.put("bindAttempts", bindState.attempts)
+    out.put("bindAgeMs", bindState.attemptAgeMs(SystemClock.elapsedRealtime()))
+    out.put("lastError", bindState.lastError)
 
     if (!out.optBoolean("installed")) {
       return out.put("ok", false).put("code", "shizuku-absent")
@@ -116,8 +160,16 @@ object ShizukuTransport {
         .put("guidance", "尚未获得 Shizuku 授权。点击创建虚拟屏后会由 Shizuku 管理器显示用户确认；DSH 不会自行授予权限。")
     }
     if (service?.asBinder()?.pingBinder() != true) {
-      return out.put("ok", false).put("code", lastError.ifBlank { "shizuku-user-service-not-bound" })
-        .put("guidance", "Shizuku 已授权，正在建立 shell UserService；请稍候重试。")
+      // 三态化（0.14.1）：code 只报「正在建立」当且仅当确有 bind 在飞。
+      // 旧实现在这里恒报 connecting + 「正在建立 shell UserService」，把「从未发起」与
+      // 「绑定已失败（超时/无效 binder/被拒）」都盖成了同一句——正是本缺陷的文案面。
+      val binding = bindState.binding
+      val ageMs = bindState.attemptAgeMs(SystemClock.elapsedRealtime())
+      val code = if (binding) CONNECTING_CODE else bindState.lastError.ifBlank { ShizukuBindCodes.NOT_BOUND }
+      val answer = out.put("ok", false).put("code", code)
+        .put("guidance", shizukuBindGuidance(code, binding, ageMs, BIND_WATCHDOG_MS))
+      if (binding) answer.put("retryAfterMs", BIND_TIMEOUT_MS)
+      return answer
     }
     return out.put("ok", true).put("code", "shizuku-ready")
       .put("guidance", "Shizuku shell UserService 已就绪（uid=$uid）。")
@@ -137,12 +189,14 @@ object ShizukuTransport {
    */
   fun kickBind(context: Context) {
     val app = context.applicationContext
+    // status() 内部先跑看门狗：若上一次绑定已成僵尸，这里读到的 binding 已是 false，
+    // 下面的守卫不会再把它挡回去——「一次不回调的 bind 永久关掉重试」的闭环由此打开。
     val current = status(app)
     if (!current.optBoolean("installed") || !current.optBoolean("running")) return
     if (!current.optBoolean("granted")) return
     if (current.optBoolean("bound")) return
     // 已有绑定在飞（binding=true）时不重复发起——Shizuku.bindUserService 幂等但没必要抖动。
-    if (binding) return
+    if (bindState.binding) return
     Thread({
       runCatching { ensureBound(app) }.onFailure {
         Log.w(TAG, "background bind failed: " + it.javaClass.simpleName + ": " + (it.message ?: ""))
@@ -166,20 +220,21 @@ object ShizukuTransport {
     }
     if (service?.asBinder()?.pingBinder() == true) return status(context)
 
+    // 进入等待前先回收僵尸绑定：否则 `beginAttempt` 会因 binding=true 直接返回 false，
+    // 而调用方只能一路空等满预算——「每轮都报正在建立、永远不重试」正是本缺陷的形态。
+    reapStaleBind()
+
     val deadline = SystemClock.elapsedRealtime() + BIND_TOTAL_MS
     while (true) {
       val latch: CountDownLatch
       synchronized(lock) {
         if (service?.asBinder()?.pingBinder() == true) return status(context)
         latch = bindLatch ?: CountDownLatch(1).also { bindLatch = it }
-        if (!binding) {
-          binding = true
-          lastError = CONNECTING_CODE
+        if (bindState.beginAttempt(SystemClock.elapsedRealtime())) {
           try {
             Shizuku.bindUserService(args(context.applicationContext), connection)
           } catch (t: Throwable) {
-            binding = false
-            lastError = "shizuku-user-service-bind-failed:${t.javaClass.simpleName}"
+            bindState.onBindThrew(ShizukuBindCodes.bindFailed(t))
             // 发起就抛异常：latch 永不会因回调而放行，必须换新的，否则后续调用会永远复用一个死 latch。
             bindLatch = null
             latch.countDown()
@@ -192,15 +247,24 @@ object ShizukuTransport {
       // 到点即复用当次结果，不把 4s 片拉长到整段预算——调用方的超时语义不变。
       latch.await(minOf(BIND_TIMEOUT_MS, remaining), TimeUnit.MILLISECONDS)
       if (service?.asBinder()?.pingBinder() == true) return status(context)
-      if (!binding) {
-        // 回调已发生但服务仍不可用（invalid-binder / disconnected）：不要继续等，如实汇报。
-        break
-      }
+      // 回调已发生但服务仍不可用（invalid-binder / disconnected）：不要继续等，如实汇报。
+      // 僵尸超时不能走这条 break——那会把「这次尝试已死」当成「已失败并就此定论」，
+      // 而正确的语义是「已复位、可立即再试」，故先跑看门狗再看 binding。
+      reapStaleBind()
+      if (!bindState.binding) break
     }
-    // 预算耗尽且仍在连接中：给出「可重试」而不是「去设置页排查」。区分这两者是本缺陷的核心。
-    return if (binding) {
+    // 预算耗尽且确实还在连接中：给出「可重试」而不是「去设置页排查」。区分这两者是本缺陷的核心。
+    return if (bindState.binding) {
       status(context).put("code", CONNECTING_CODE).put("retryAfterMs", BIND_TIMEOUT_MS)
-        .put("guidance", "Shizuku shell 通道正在建立（通常几秒内完成）；请稍候直接重试同一命令，无需去设置页排查。")
+        .put(
+          "guidance",
+          shizukuBindGuidance(
+            CONNECTING_CODE,
+            true,
+            bindState.attemptAgeMs(SystemClock.elapsedRealtime()),
+            BIND_WATCHDOG_MS,
+          ),
+        )
     } else {
       status(context)
     }
