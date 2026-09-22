@@ -600,14 +600,14 @@ class EngineManager(private val context: Context, private val pickToken: String?
     seedPhoneControlPreset(privateDsh)
     val privateMarker = File(privateDsh, ".private-layout")
     if (privateMarker.exists()) {
-      ensurePublicExportRepo(dshData)
+      provisionPublicRepo(PublicRepoProvision.TRIGGER_ENGINE_START)
       return privateDsh
     }
     if (isLegacyPublicLayout(dshData, privateDsh)) {
       try {
         reverseMigrate(dshData, privateDsh)
         privateMarker.writeText("private")
-        ensurePublicExportRepo(dshData)
+        provisionPublicRepo(PublicRepoProvision.TRIGGER_ENGINE_START)
         Log.i(TAG, "dshdata reverse migration done -> " + privateDsh.absolutePath)
       } catch (t: Throwable) {
         // A migration failure must not block startup: DSH_HOME stays private, the engine works, retry later.
@@ -620,7 +620,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
       } catch (t: Throwable) {
         Log.w(TAG, "private layout marker write failed", t)
       }
-      ensurePublicExportRepo(dshData)
+      provisionPublicRepo(PublicRepoProvision.TRIGGER_ENGINE_START)
     }
     return privateDsh
   }
@@ -733,12 +733,73 @@ class EngineManager(private val context: Context, private val pickToken: String?
     }
   }
 
-  /** Ensure the public export repo exists: root dir + .nomedia + exports/. */
-  private fun ensurePublicExportRepo(dshData: File) {
+  /** 供给结果落点（**私有目录**：公共目录刚建失败时往它里面写结果必然也失败）。 */
+  private fun publicRepoStatusFile(): File = File(context.filesDir, PublicRepoProvision.STATUS_FILE_NAME)
+
+  /**
+   * 上一次公共目录供给的结果。落盘畸形或从未尝试一律 [PublicRepoStatus.UNKNOWN]
+   * （**不得**当成成功——「尚未探测」与「已就绪」必须是两个可区分的状态，坑 161 同族）。
+   */
+  internal fun publicRepoStatus(): PublicRepoStatus = try {
+    PublicRepoProvision.parseStatus(publicRepoStatusFile().takeIf { it.exists() }?.readText())
+  } catch (t: Throwable) {
+    Log.w(TAG, "public repo status read failed", t)
+    PublicRepoStatus.UNKNOWN
+  }
+
+  /** 上一次尝试的细节与触发来源（诊断用；空串 = 无）。 */
+  internal fun publicRepoLastAttempt(): String = try {
+    val raw = publicRepoStatusFile().takeIf { it.exists() }?.readText()
+    PublicRepoProvision.parseTrigger(raw) + " " + PublicRepoProvision.parseDetail(raw)
+  } catch (_: Throwable) {
+    ""
+  }
+
+  /**
+   * 本机这条路上「理论上能不能写公共 Documents」——决定失败该记 NOT_AUTHORIZED 还是 FAILED。
+   *
+   * API>=30 看 All Files Access；API<30 没有这套权限模型，看运行时 WRITE（Android 10 那条路上
+   * scoped storage 仍可能拦——**不预设结论**，由实际尝试的结果说话）。
+   */
+  private fun publicDocsWritable(): Boolean = try {
+    if (android.os.Build.VERSION.SDK_INT >= 30) {
+      Environment.isExternalStorageManager()
+    } else {
+      context.checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE) ==
+        android.content.pm.PackageManager.PERMISSION_GRANTED
+    }
+  } catch (_: Throwable) {
+    false
+  }
+
+  /**
+   * 供给公共导出目录（根 + `.nomedia` + `exports/` + README）并**如实记账**（0.14.1 用户反馈）。
+   *
+   * 两条与旧实现的关键差别：
+   *  1. **结果可观测**：旧实现失败只 `Log.w`，用户侧完全看不到「目录没建出来」这件事；
+   *     现在写一行私有落盘（`status|trigger|epochMs|detail`）并落一条 LogCollector 记录。
+   *  2. **可重试**：结果里除 `OK` 外都会让 [PublicRepoProvision.needsRetry] 为真，
+   *     于是授权返回后的 `onResume` 会再试一次——旧实现挂在 `startEngine()` 的早退点后面，
+   *     引擎活着就永远不再尝试（这正是「授权了但 dshdata 一直没出现」的机制）。
+   *
+   * 成功判据用**后置条件**（`exports/` 真的在场），不只看 `mkdirs()` 的返回值——
+   * 后者对「已存在」返回 false，只看它会把可写目录误判成失败。
+   *
+   * @param trigger 触发来源（onCreate / onResume / engineStart），写进落盘行供诊断。
+   */
+  internal fun provisionPublicRepo(trigger: String): PublicRepoStatus {
+    val dshData = dshDataDir
+    var status: PublicRepoStatus
+    var detail: String
     try {
-      dshData.mkdirs()
+      if (!dshData.isDirectory && !dshData.mkdirs() && !dshData.isDirectory) {
+        throw java.io.IOException("mkdirs failed: " + dshData.absolutePath)
+      }
       File(dshData, ".nomedia").writeText("")
-      File(dshData, "exports").mkdirs()
+      val exports = File(dshData, "exports")
+      if (!exports.isDirectory && !exports.mkdirs() && !exports.isDirectory) {
+        throw java.io.IOException("mkdirs failed: " + exports.absolutePath)
+      }
       // 0.13.1 W3/W4：目录布局说明（每次启动刷新，内容随版本演进）。
       File(dshData, "README.txt").writeText(
         "dsh-mobile 共享数据目录（Documents/dshdata）说明\n" +
@@ -756,9 +817,31 @@ class EngineManager(private val context: Context, private val pickToken: String?
           "改配置的正确途径：设置界面各项开关；或 导出配置 -> 文件管理器编辑 -> 导入配置；\n" +
           "进阶：设置 > 开发者选项 > 打开控制台（快照内 bash，可直接 vi settings.yaml）。\n",
       )
+      status = if (exports.isDirectory) PublicRepoStatus.OK else PublicRepoStatus.FAILED
+      detail = if (status == PublicRepoStatus.OK) dshData.absolutePath else "exports/ 后置条件不成立"
     } catch (t: Throwable) {
-      Log.w(TAG, "public export repo setup failed", t)
+      status = PublicRepoProvision.classifyFailure(publicDocsWritable())
+      detail = t.javaClass.simpleName + ": " + (t.message ?: "")
     }
+    try {
+      publicRepoStatusFile().writeText(
+        PublicRepoProvision.encode(status, trigger, detail, System.currentTimeMillis()),
+      )
+    } catch (t: Throwable) {
+      Log.w(TAG, "public repo status write failed", t)
+    }
+    if (status == PublicRepoStatus.OK) {
+      Log.i(TAG, "public export repo ready -> " + dshData.absolutePath)
+    } else {
+      // 落一条**用户可见面**的记录（LogCollector 会进 boot-diag/日志面），而不是只进 logcat——
+      // 「目录没建出来」是用户能看见的事实，不该只留一行谁也不会去看的 Log.w。
+      Log.w(TAG, "public export repo provision " + status.wire + " trigger=" + trigger + " detail=" + detail)
+      LogCollector.log(
+        TAG,
+        "public export repo provision failed (" + status.wire + ") trigger=" + trigger + " detail=" + detail,
+      )
+    }
+    return status
   }
 
   private fun isSymlink(file: File): Boolean = Files.isSymbolicLink(file.toPath())
@@ -926,7 +1009,10 @@ class EngineManager(private val context: Context, private val pickToken: String?
       // 0.14.0 #214：退役行 disabled 残留自愈（前置于引擎读 profile；幂等一次性，见函数注释）。
       repairProfilePatch()
       // 0.13.1 W3/W4：共享目录 README 每次启动刷新（此前只在迁移路径调用，正常启动不落盘）。
-      ensurePublicExportRepo(dshDataDir)
+      // 注意：本行**只覆盖「引擎真的启动」这一条路径**——startEngine 有两个早退会整段跳过它
+      // （快照刷新中 / 引擎已在跑）。故 provisionPublicRepo 另由 MainActivity 的 onCreate/onResume
+      // 触发，那里才是「授权之后能自愈」的入口（0.14.1 用户反馈）。
+      provisionPublicRepo(PublicRepoProvision.TRIGGER_ENGINE_START)
       applyRuntimePatches()
       // --no-open: the engine must never try to open a desktop browser on Android
       // (the WebView IS the UI). Without it, rc.2's spawn xdg-open on a missing

@@ -104,7 +104,7 @@ sequenceDiagram
 |---|---|---|---|---|---|---|---|---|
 | K01 | 启动与引导面 | 点开 App 到引擎页面可见的进程入口、引导页与 WebView 宿主 | LAUNCHER 图标、VIEW/SEND 来件、ACTION_UPDATE | 引导与启动 | 引擎进程与快照面、鉴权探活、诊断落盘 | 系统启动器与分享面板、BootReceiver、悬浮球跳转 | MainActivity.kt,EngineStartFlow.kt,GuidePageRenderer.kt | 高 |
 | K02 | 引擎生命周期与保活 | 起 node 引擎、5s 探活、看门狗重启熔断与日志落盘 | EngineStartFlow.start、EngineService 5s tick | 引导与启动 | K01,K03 | MainActivity、BootReceiver、EngineStartFlow | EngineManager.kt,EngineService.kt,WatchdogV2.kt,LogCollector.kt | 高 |
-| K03 | 快照事务与更新链 | 内嵌快照暂存交换事务与回滚（插件故障走**清单式外科拔除**，不整份回滚），兼在线更新与清单合并 | 启动流判指纹不新鲜 / 引导页检查更新 / WebView 下载 | 快照与更新 | 引导启动流、引擎探活、构建快照资产 | EngineStartFlow.runFlow、EngineService 看门狗、引导页按钮、MainActivity 的 WebView 回调 | SnapshotTransaction.kt,SnapshotFs.kt,SnapshotRefreshPolicy.kt,UpdateManager.kt,PluginMounts.kt | 高 |
+| K03 | 快照事务与更新链 | 内嵌快照暂存交换事务与回滚（插件故障走**清单式外科拔除**，不整份回滚），兼在线更新与清单合并 | 启动流判指纹不新鲜 / 引导页检查更新 / WebView 下载 | 快照与更新 | 引导启动流、引擎探活、构建快照资产 | EngineStartFlow.runFlow、EngineService 看门狗、引导页按钮、MainActivity 的 WebView 回调 | SnapshotTransaction.kt,SnapshotFs.kt,SnapshotRefreshPolicy.kt,PublicRepoProvision.kt,UpdateManager.kt,PluginMounts.kt | 高 |
 | K04 | 桥与控制协议面 | 页面 JS 桥面、引擎鉴权与控制队列承载 | 页面调 androidBridge；EngineService 起控制承载 | 稳态控制 | 引导与启动（EngineService/MainActivity）、无障碍与虚拟屏宿主、快照与更新（UndoGate） | MainActivity 装桥；EngineService.onCreate 起 ControlCarrier；看门狗 tick 调 UndoGate | app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt,app/src/main/java/com/dsharnessmobile/shell/ControlPoller.kt,app/src/main/java/com/dsharnessmobile/shell/EngineAuth.kt,app/src/main/java/com/dsharnessmobile/shell/ControlProtocolV2.kt | 高 |
 | K05 | 无障碍控制面 | 按需取语义树并对设备执行点击输入滚动截屏 | 控制队列取活 + 无障碍服务回调 | 稳态控制 | K04 控制协议、K06 特权执行 | ControlCarrier 控制队列取活、onServiceConnected、ADB 键盘广播 | DeviceControlService.kt,GlobalActionCatalog.kt,AdbKeyboardService.kt,AdbKeyboardReceiver.kt | 高 |
 | K06 | 特权执行、屏幕范围与本地文件面 | Shizuku 特权 shell 通道、屏幕范围门与本地文件出入口 | 引擎 sh* op / 设置页范围写面 / 外部分享与打开 intent | 稳态控制 | 控制队列承载、引擎 bridge 插件、虚拟屏注册表、无障碍控制面 | 引擎 androidPrivilege 服务面与页面桥 | ShellOps.kt,ScreenScope.kt,ShizukuTransport.kt,ShizukuBindState.kt,ShizukuUserService.kt,ShizukuProbe.kt,ShizukuSupport.kt,ProcIo.kt,FileIncoming.kt,PathOpen.kt,ConfigTransfer.kt | 高 |
@@ -420,6 +420,7 @@ sequenceDiagram
 | K03 | 交互面 MainActivity | DownloadSaver 由 WebView 下载/外链回调拉起，回执经 window.__dshExportResult 回灌页面 | app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:89 |
 | K03 | EngineAuth | DownloadSaver 下载引擎同源 URL 时附加鉴权并做一次 401 自愈重试 | app/src/main/java/com/dsharnessmobile/shell/DownloadSaver.kt:101 |
 | K03 | 开发选项与诊断 | boot-fail.log、update-status.txt 与 diagnostics 镜像目录是本块失败终态的落盘点 | app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt:193 |
+| K03 | 公共导出目录供给 | Documents/dshdata 的创建与**结果记账**（`status|trigger|epochMs|detail` 落在私有目录）；触发点经 onCreate/onResume 与「引擎是否在跑」解耦，且除 OK 外每轮都重试——旧实现只从 startEngine()/shellEnv() 进入，引擎活着早退就永远不再供给（0.14.1 用户反馈：Documents 下一直没有 dshdata）。存储 chip 的判据取该结果，只有 OK 才显示「已就绪」；授权路线按 SDK 分流（API<30 无 All Files Access，改请求运行时 READ/WRITE） | app/src/main/java/com/dsharnessmobile/shell/PublicRepoProvision.kt:1、EngineManager.kt:790、MainActivity.kt:354 |
 | K04 | 引导与启动 | MainActivity/EngineService 是桥与控制承载的唯一安装与起停点（EngineAuth.initContext 必须先于装桥） | app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:160 |
 | K04 | 交互面 | 主 WebView 的 addJavascriptInterface 是桥方法唯一暴露点，页面侧类型面在 dsh-client-ui-responsive/src/client/android-bridge.ts | app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:719 |
 | K04 | 无障碍控制面 | ControlCarrier.handle 的兜底分支把语义/输入类 op 交给 DeviceControlService，a11y 缺席时返回结构化拒绝 | app/src/main/java/com/dsharnessmobile/shell/ControlCarrier.kt:110 |
@@ -2444,6 +2445,7 @@ app/src/main/java/com/dsharnessmobile/shell/LogCollector.kt
 app/src/main/java/com/dsharnessmobile/shell/SnapshotTransaction.kt
 app/src/main/java/com/dsharnessmobile/shell/SnapshotFs.kt
 app/src/main/java/com/dsharnessmobile/shell/SnapshotRefreshPolicy.kt
+app/src/main/java/com/dsharnessmobile/shell/PublicRepoProvision.kt
 app/src/main/java/com/dsharnessmobile/shell/SnapshotExtractor.kt
 app/src/main/java/com/dsharnessmobile/shell/SnapshotUserData.kt
 app/src/main/java/com/dsharnessmobile/shell/SnapshotFileMode.kt

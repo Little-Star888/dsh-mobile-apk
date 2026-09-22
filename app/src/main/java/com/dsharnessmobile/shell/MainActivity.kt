@@ -202,6 +202,11 @@ class MainActivity : ComponentActivity() {
     guideView = guideRenderer.buildGuideView()
     root.addView(guideView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
     setContentView(root)
+    // 0.14.1 用户反馈：公共导出目录（Documents/dshdata）的供给必须在**不依赖引擎状态**的地方触发。
+    // 旧实现只从 startEngine()/shellEnv() 进入，而 startEngine() 在「引擎已可连或进程还活着」时
+    // 早退、onResume 的探活发现引擎活着也不再走启动流程 → 授权之后没有任何东西会再跑一次建目录，
+    // 用户看到的就是「Documents 下一直没有 dshdata」。
+    provisionPublicRepoAndRefreshChip(PublicRepoProvision.TRIGGER_ON_CREATE)
     browserHost = BrowserHost(this, root, webView)
     vdisplayHost = VdisplayHost(root, webView)
     vdisplayFloat = VdisplayFloat(this)
@@ -309,6 +314,9 @@ class MainActivity : ComponentActivity() {
     // 仅当 WebView 未展示（引导页/首次启动）时才探测并重路由；相册/文件选择器
     // 返回时 WebView 已可见，探测超时会误触发 showWeb→reload，导致 JS 状态丢失。
     guideRenderer.refreshGuideMeta()
+    // 授权返回后的**自愈点**（0.14.1 用户反馈）：从「所有文件访问」页回来时引擎通常还在跑，
+    // 于是启动流程不会重跑、建目录也不会重试——这里补一次，只在还没成功过时才做。
+    provisionPublicRepoAndRefreshChip(PublicRepoProvision.TRIGGER_ON_RESUME)
     // FX-210.5：探活不得在主线程（onResume 每次回前台都跑；cookie 取不到 + 3080 半死时
     // 单次同步 HTTP 为秒级）。后台探活 + 主线程分流，失败原因结构化落盘。
     if (!userClosedEngine && webView.visibility != View.VISIBLE) {
@@ -325,6 +333,28 @@ class MainActivity : ComponentActivity() {
     dirPickerController.settlePendingOnResume()
     // 0.13.8 批 H：从「安装未知应用」授权页返回——已授权则续继 APK 更新包的安装。
     guideRenderer.settlePendingInstall()
+  }
+
+  /**
+   * 公共导出目录供给 + 刷新存储 chip（0.14.1 用户反馈）。
+   *
+   * 两条与旧实现的关键差别：
+   *  1. **触发点与引擎解耦**：旧实现挂在 `startEngine()` 的早退点后面（引擎活着就整段跳过），
+   *     这里由 Activity 生命周期触发，`onResume` 因而成为「授权返回后自愈」的闭环。
+   *  2. **只在还没成功过时才做**（[PublicRepoProvision.needsRetry]）：成功即幂等跳过，
+   *     不因为「每次回前台」而反复做文件系统操作。
+   *
+   * 文件系统操作放后台线程（失败路径可能带 IO 异常），完成后回主线程刷 chip。
+   */
+  private fun provisionPublicRepoAndRefreshChip(trigger: String) {
+    if (!PublicRepoProvision.needsRetry(engineManager.publicRepoStatus())) return
+    Thread(
+      {
+        engineManager.provisionPublicRepo(trigger)
+        runOnUiThread { guideRenderer.refreshGuideMeta() }
+      },
+      "dsh-public-repo",
+    ).start()
   }
 
   /**

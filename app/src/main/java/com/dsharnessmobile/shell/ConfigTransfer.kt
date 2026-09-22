@@ -242,6 +242,31 @@ internal class DirectoryPickerController(private val activity: MainActivity) {
     )
   }
 
+  /**
+   * 存储授权入口（**按 SDK 分流**，0.14.1 用户反馈）。
+   *
+   * 旧实现一律走 [openAllFilesAccessSettings]，而它第一行就是 `if (SDK_INT < 30) return`——
+   * API<30 上「所有文件访问」这套权限模型根本不存在，于是用户按「去授权存储」**毫无反应**：
+   * 不弹任何页面、不给任何反馈。那条路上唯一能拿到公共目录写权限的途径是运行时 READ/WRITE
+   * （本类已有的 `storagePermLauncher` 就是为此注册的）。
+   */
+  fun requestStorageGrant() {
+    when (PublicRepoProvision.grantRoute(android.os.Build.VERSION.SDK_INT)) {
+      PublicRepoProvision.GrantRoute.ALL_FILES_ACCESS_SCREEN -> openAllFilesAccessSettings()
+      PublicRepoProvision.GrantRoute.RUNTIME_STORAGE_PERMISSION -> {
+        // 复用 SAF 路径的运行时权限 launcher：无在途选择时它的回调只清状态、不会再开选择器，
+        // 故不干扰 pick 状态机；有在途选择时不动它（那次选择自己会按授权结果结算）。
+        if (pendingPickCallback != null) return
+        storagePermLauncher.launch(
+          arrayOf(
+            android.Manifest.permission.READ_EXTERNAL_STORAGE,
+            android.Manifest.permission.WRITE_EXTERNAL_STORAGE,
+          ),
+        )
+      }
+    }
+  }
+
   /** Open the system All Files Access screen for this app. */
   fun openAllFilesAccessSettings() {
     if (android.os.Build.VERSION.SDK_INT < 30) return

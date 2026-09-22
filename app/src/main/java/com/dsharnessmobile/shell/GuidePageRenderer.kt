@@ -52,7 +52,7 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
         },
         onOpenConsole = { activity.startActivity(Intent(activity, ConsoleActivity::class.java)) },
         onCheckUpdate = { onUpdateButton() },
-        onGrantStorage = { activity.dirPickerController.openAllFilesAccessSettings() },
+        onGrantStorage = { activity.dirPickerController.requestStorageGrant() },
         onCopyLog = { copyGuideLog() },
       ),
     )
@@ -168,15 +168,28 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
     } else {
       activity.getString(R.string.ds_runtime_pending)
     }
-    val storageOk = Build.VERSION.SDK_INT < 30 || Environment.isExternalStorageManager()
-    chrome.storageChip.text = if (storageOk) {
-      activity.getString(R.string.ds_storage_granted)
-    } else {
-      activity.getString(R.string.ds_storage_needed)
+    // 0.14.1 用户反馈：chip 判据从「SDK 版本 或 isExternalStorageManager」改为
+    // **公共目录供给的真实结果**（EngineManager 落盘的状态）。
+    // 旧判据写的是 `SDK_INT < 30 || isExternalStorageManager()` → API<30 一律显示「存储已授权」，
+    // 而那条路上既没有 All Files Access 这个权限模型、运行时 WRITE 也没在任何启动路径上请求过，
+    // 于是**界面说正常、Documents/dshdata 却建不出来**，用户既看不到问题也没有授权入口。
+    // 「尚未探测」同样不得显示为已就绪（坑 161 同族：状态与事实必须对齐）。
+    when (PublicRepoProvision.presentation(activity.engineManager.publicRepoStatus())) {
+      PublicRepoPresentation.READY -> {
+        chrome.storageChip.text = activity.getString(R.string.ds_storage_granted)
+        chrome.storageChip.setTextColor(activity.getColor(R.color.ds_text_secondary))
+      }
+      PublicRepoPresentation.NEEDS_GRANT -> {
+        chrome.storageChip.text = activity.getString(R.string.ds_storage_needed)
+        chrome.storageChip.setTextColor(activity.getColor(R.color.ds_accent))
+      }
+      PublicRepoPresentation.WRITE_FAILED -> {
+        // 授权看起来够却写不进去：不能只说「去授权」（用户授权了也没用），要说出是写入失败。
+        // 具体原因落在那行供给记录里（EngineManager.publicRepoLastAttempt），并可复制反馈。
+        chrome.storageChip.text = activity.getString(R.string.ds_storage_write_failed)
+        chrome.storageChip.setTextColor(activity.getColor(R.color.ds_danger))
+      }
     }
-    chrome.storageChip.setTextColor(
-      activity.getColor(if (storageOk) R.color.ds_text_secondary else R.color.ds_accent),
-    )
   }
 
   /** 测试界面「检查更新」按钮：手动检查 APK 自更新（用户拍板：不自动检查）。
