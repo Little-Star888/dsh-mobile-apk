@@ -14,10 +14,12 @@ import android.view.animation.AlphaAnimation
  * 0.14.1 块I（状态描边 ring）：ring 与 glow **合成在同一个 haloView 的 background**（LayerDrawable 两层），
  * 不是第二个窗口——这样 ① 脉冲动画（挂在 View 上）天然同相位，无需第二段动画代码；② 不触碰
  * FLAG_NOT_TOUCHABLE 触摸语义与 F8 z 序；③ 不新增窗口（窗口数恒为 3）。
- * ring 的颜色**不另立色表**：setHaloColors 里与 glow 共用同一个 Halo 形参，改色入口仍只有
- * newHaloDrawable / setHalo 两处（源码契约测试 CallSiteContractTest 的 I-A2/I-A3 组锁死）。
+ * ring 的颜色**不另立色表**：两层都只读 [resolveColors] 在这一次调用里返回的同一个 (color, fade)，
+ * 改色入口仍只有 newHaloDrawable / setHalo 两处（源码契约测试 CallSiteContractTest 的 I-A2/I-A3 组锁死）。
  */
 class OverlayHalo(private val svc: OverlayService) {
+
+  private val theme = OverlayTheme(svc)
 
   companion object {
     /** LayerDrawable 层索引。用索引而非 res id：本工程无 ids.xml，不为两层 drawable 新建资源面。 */
@@ -40,6 +42,31 @@ class OverlayHalo(private val svc: OverlayService) {
   private val haloRingPx by lazy { (2 * svc.resources.displayMetrics.density).toInt() }
   private val haloRingInsetPx by lazy { (4.5 * svc.resources.displayMetrics.density).toInt() }
 
+  // ── 空闲态按主题取色（P5-3，本批新增）───────────────────────────────────
+  //
+  // 缺陷：空闲色只有一档半透明白 0x60FFFFFF，压在**白色页面**上与背景同色（对比度 1.00:1）——
+  // 观感是「空闲时球边没有光环」，而悬浮球本身也是纯白球，浅色页上整组只剩那只黑鲸鱼。
+  // 修法只能**压暗**；但压暗到白底可见的灰在深色页上只剩 1.2:1，**一个值通吃不了**
+  // ⇒ 空闲底色按主题取。**两个档位都登记在 OverlayTheme 的色板里**（那是「悬浮球配色唯一来源」，
+  // CallSiteContractTest 的 I-A3 组要求本文件不得出现枚举外的颜色字面量），本文件不新增色值。
+  //
+  // 取值与实测对比度见 OverlayTheme.ThemeColors.haloIdle 的注释；深色档与改动前逐字节相同
+  // ⇒ 深色主题零回归。
+
+  /** 当前生效的状态（供换肤时重刷——haloView 的 drawable 不随 uiMode 更新）。 */
+  @Volatile
+  private var lastHalo: Halo = Halo.IDLE
+
+  /**
+   * 状态 → 本次调用要写进两层的 (color, fade)。**全仓唯一的「状态配色」产生点**：
+   * glow 与 ring 都只读它的返回值，故「两层同源」是结构性的（不是靠两处字面量碰巧相等）。
+   * 空闲底色从主题色板取（见上方注释），另外三态仍取 `Halo` 自身（它们与页面底色无关）。
+   */
+  private fun resolveColors(halo: Halo): Pair<Int, Int> {
+    val c = theme.themeColors()
+    return haloColorsFor(halo, c.haloIdle, c.haloIdleFade)
+  }
+
   /** 光环窗口（NOT_TOUCHABLE 纯视觉）中心始终对齐球窗口中心。 */
   fun syncHalo() {
     val hp = svc.haloParams ?: return
@@ -52,10 +79,11 @@ class OverlayHalo(private val svc: OverlayService) {
   /**
    * 光环 drawable = 两层合成（LayerDrawable）：
    * layer 0 = glow（径向渐变，透明 → 峰值≈球缘 → 透明；半径 24dp 恒不出屏被裁）；
-   * layer 1 = ring（**硬边** OVAL 描边，颜色与 glow 同源自 Halo.color）。
+   * layer 1 = ring（**硬边** OVAL 描边，颜色与 glow 取自 [resolveColors] 的同一次返回值）。
    * 初值经 setHaloColors 写入，与运行期改色走**同一个函数**（防止两条改色路径漂移）。
    */
   fun newHaloDrawable(halo: Halo): LayerDrawable {
+    val (color, fade) = resolveColors(halo)
     val glow = GradientDrawable().apply {
       shape = GradientDrawable.OVAL
       gradientType = GradientDrawable.RADIAL_GRADIENT
@@ -64,20 +92,20 @@ class OverlayHalo(private val svc: OverlayService) {
     val ring = GradientDrawable().apply {
       shape = GradientDrawable.OVAL
       setColor(Color.TRANSPARENT)
-      setStroke(haloRingPx, halo.color)
+      setStroke(haloRingPx, color)
     }
     return LayerDrawable(arrayOf(glow, ring)).apply {
       setLayerInset(LAYER_RING, haloRingInsetPx, haloRingInsetPx, haloRingInsetPx, haloRingInsetPx)
-      setHaloColors(this, halo)
+      setHaloColors(this, color, fade)
     }
   }
 
   /**
-   * 同时写入两层：glow 的渐变 stop + ring 的描边色。**Halo 是唯一色源**——ring 直接复读
-   * `halo.color`（字面同一存储，不存在漂移的可能），不得在此另立第二张色表。
+   * 同时写入两层：glow 的渐变 stop + ring 的描边色。两层的颜色来自**同一次** [resolveColors]
+   * 调用（调用方传入），因此不存在「ring 用 A 色、glow 用 B 色」的可能。
    * setColors 二参形态（自定义渐变 stop 位置）仅 API 29+；26-28 退三等分 stop。
    */
-  private fun setHaloColors(layers: LayerDrawable, halo: Halo) {
+  private fun setHaloColors(layers: LayerDrawable, color: Int, fade: Int) {
     val glow = layers.getDrawable(LAYER_GLOW) as? GradientDrawable
     if (glow == null) {
       diagnose("glow layer is not a GradientDrawable")
@@ -94,14 +122,14 @@ class OverlayHalo(private val svc: OverlayService) {
       // 可见环更宽更亮。半径保持 24dp 不变——超过球心到屏幕边的 25dp 会在贴边时被裁
       // （旧「吸边后光环偏心」根因，见 haloGlowPx 注释）。
       glow.setColors(
-        intArrayOf(transparent, halo.color, halo.fade, transparent),
+        intArrayOf(transparent, color, fade, transparent),
         floatArrayOf(0f, 0.45f, 0.74f, 1f),
       )
     } else {
-      glow.setColors(intArrayOf(transparent, halo.color, transparent))
+      glow.setColors(intArrayOf(transparent, color, transparent))
     }
-    // ring 与 glow 在同一次调用内改色、共用同一个 halo 形参 = A3「同源」的结构性保证。
-    ring.setStroke(haloRingPx, halo.color)
+    // ring 与 glow 在同一次调用内、用同一个 color 改色 = 「同源」的结构性保证。
+    ring.setStroke(haloRingPx, color)
   }
 
   /** 改色/取层的失败痕迹（0.14.1 块I：取代旧 `?: return@post` 式静默失败——坑 61 判据）。 */
@@ -110,6 +138,7 @@ class OverlayHalo(private val svc: OverlayService) {
   }
 
   fun setHalo(halo: Halo) {
+    lastHalo = halo
     svc.main.post {
       val hv = svc.haloView ?: return@post
       // 0.14.1 块I：旧实现是 `val g = hv.background as? GradientDrawable ?: return@post`。
@@ -120,7 +149,8 @@ class OverlayHalo(private val svc: OverlayService) {
         diagnose("halo background is not a LayerDrawable (" + (hv.background?.javaClass?.simpleName ?: "null") + ")")
         return@post
       }
-      setHaloColors(layers, halo)
+      val (color, fade) = resolveColors(halo)
+      setHaloColors(layers, color, fade)
       // 脉动：WORKING = 缓呼吸（spring 风格）；PENDING = 更快更深的琥珀脉（M8，0.13.8 G3 余项，
       // 待答是「要人动手」的状态，脉动节奏刻意比工作态更急）。IDLE 静止。
       // 统一受 DsUi.animationsEnabled 降级（系统关动画/省电模式 → 全部静止，不耗帧）。
@@ -136,6 +166,14 @@ class OverlayHalo(private val svc: OverlayService) {
       if (pulse && DsUi.animationsEnabled(svc)) hv.startAnimation(anim) else hv.alpha = 1f
     }
   }
+
+  /**
+   * 换肤（uiMode 变化）：按当前状态重刷一次取色。
+   * 为什么必须显式调：haloView 的 background 是**手工构造**的 drawable，不是主题资源，
+   * 系统换深浅色不会碰它；空闲态又按主题取不同色（见 resolveColors），不重刷就会「切到深色后
+   * 空闲光环还是浅色主题的灰」。走 setHalo(lastHalo) 而非另写一段改色代码——改色入口恒为一处。
+   */
+  fun refreshTheme() = setHalo(lastHalo)
 
   /** 光环状态派生（唯一权威）。探活 tick 与事件渲染必须共用——探活若自带判定会绕过
    *  PENDING（2026-09-05 实测回归：待答琥珀光环每 10s 被探活盖回白色，「展开面板才见黄」）。
@@ -166,3 +204,20 @@ enum class Halo(val color: Int, val fade: Int) {
   PENDING(0xCDEBBE3C.toInt(), 0x7BEBBE3C.toInt()),
   ERROR(0xA0E04848.toInt(), 0x60E04848.toInt()),
 }
+
+// ── 空闲底色的解析（P5-3；顶层纯函数，JVM 可直接测）──────────────────────────
+//
+// 空闲态压在**页面**上，而页面底色随主题走：旧实现只有一档半透明白，白底页上与背景同色
+// （1.00:1 = 不可见）；压暗到白底可见的灰在深色页上又只剩 1.2:1。所以空闲底色必须按主题取，
+// 两个档位登记在 OverlayTheme 的色板里（本文件**不**新增颜色字面量——I-A3 的反证表要求
+// 8 个 ARGB 字面量全部落在 Halo 枚举块内，那是「不得另立第二张色表」的防线，不能拆）。
+
+/**
+ * 状态 + 空闲底色 → 实际写入 glow/ring 两层的 (color, fade)。
+ *
+ * **这是唯一的状态配色解析点**：`OverlayHalo.resolveColors` 只是把主题色板里的空闲底色传进来，
+ * 两层 drawable 都只读它的返回值，因此「两层同色」是结构性的。非 IDLE 一律**原样返回
+ * `halo.color/fade`**——那三态与主题无关，与改动前逐字节相同。
+ */
+internal fun haloColorsFor(halo: Halo, idleColor: Int, idleFade: Int): Pair<Int, Int> =
+  if (halo == Halo.IDLE) idleColor to idleFade else halo.color to halo.fade

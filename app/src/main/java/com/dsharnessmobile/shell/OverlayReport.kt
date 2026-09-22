@@ -65,7 +65,12 @@ class OverlayReport(private val svc: OverlayService) {
       text = "✕"
       textSize = 14f
       setTextColor(c.clockText)
-      setPadding((10 * dp).toInt(), (2 * dp).toInt(), (10 * dp).toInt(), (2 * dp).toInt())
+      gravity = Gravity.CENTER
+      // P5-2：可点元素热区 ≥ MIN_TOUCH_TARGET_DP（44dp）。原实现只有 10dp 内边距 + 一行 14sp 字
+      // ≈ 26dp 高，手指按不准；并补 contentDescription——无文字的「✕」在无障碍里此前是空白控件。
+      minWidth = (MIN_TOUCH_TARGET_DP * dp).toInt()
+      minHeight = (MIN_TOUCH_TARGET_DP * dp).toInt()
+      contentDescription = "关闭工作汇报"
       isClickable = true
       setOnClickListener { hideReport() }
     }
@@ -77,8 +82,10 @@ class OverlayReport(private val svc: OverlayService) {
       addView(close)
     }
 
-    // 正文：逐行 TextView（首行 head+summary、次行时长/工具数、末行产出清单）。
-    // 正文全文（可滚动区）插在首行之后：先说「这是什么汇报」，再说内容，最后给度量与产出。
+    // 正文与元信息的**顺序**（P5-4 / S2-4）：首行（结论 + 摘要）→ 元信息（用时 / 工具数 / 产出）
+    // → 分隔线 + 全文。
+    // 旧实现把全文插在首行与元信息**之间**，于是「用时 · 工具 ×N · 产出」被 8 KiB 正文顶出首屏
+    // ——那三项恰是「一眼看结论」要的度量，却要滚到底才看得到，等于没给。
     val body = LinearLayout(svc).apply { orientation = LinearLayout.VERTICAL }
     val full = reportBodyText(entry)
     for ((i, line) in lines.withIndex()) {
@@ -89,21 +96,23 @@ class OverlayReport(private val svc: OverlayService) {
         if (i == 0) setTypeface(null, android.graphics.Typeface.NORMAL)
         setPadding((14 * dp).toInt(), (3 * dp).toInt(), (14 * dp).toInt(), (3 * dp).toInt())
       })
-      if (i == 0 && full.isNotEmpty()) {
-        // 分隔线 + 全文。**单个** TextView 承载整段（不是一个 TextView 一行）：8 KiB 正文
-        // 按换行拆成上百个 View 会在每次打开时重建上百个视图，而这里只需要「能滚动地读」。
-        body.addView(View(svc).apply {
-          background = GradientDrawable().apply { setColor(c.unitStroke) }
-        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, (1 * dp).toInt()).apply {
-          topMargin = (6 * dp).toInt()
-        })
-        body.addView(TextView(svc).apply {
-          text = full
-          textSize = 12f
-          setTextColor(c.inputText)
-          setPadding((14 * dp).toInt(), (6 * dp).toInt(), (14 * dp).toInt(), (6 * dp).toInt())
-        })
-      }
+    }
+    // 全文块（元信息之后）。S2-6：正文==摘要时**不渲染**——否则同一句话会连渲染两遍
+    // （旧条目没有 body 字段时 reportBodyText 回落 summary，而 summary 已在首行出现过）。
+    if (!reportBodyRedundant(entry, full)) {
+      body.addView(View(svc).apply {
+        background = GradientDrawable().apply { setColor(c.unitStroke) }
+      }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, (1 * dp).toInt()).apply {
+        topMargin = (6 * dp).toInt()
+      })
+      // **单个** TextView 承载整段（不是一个 TextView 一行）：8 KiB 正文按换行拆成上百个 View
+      // 会在每次打开时重建上百个视图，而这里只需要「能滚动地读」。
+      body.addView(TextView(svc).apply {
+        text = full
+        textSize = 12f
+        setTextColor(c.inputText)
+        setPadding((14 * dp).toInt(), (6 * dp).toInt(), (14 * dp).toInt(), (6 * dp).toInt())
+      })
     }
 
     // 可滚动容器（先例 OverlayPanel.openPickerWindow 的 ScrollView）。
@@ -119,14 +128,20 @@ class OverlayReport(private val svc: OverlayService) {
     // 旧实现是一根纯装饰的横线（注释自述「不做手势，避免与栏内可滚动抢事件」），即需求里的
     // 「上拉/下拉栏」从未落地。现在把手势**只挂在手柄行上**：栏内正文区仍归 ScrollView，
     // 两者不重叠，故不再有抢事件的问题。
-    // 触摸目标 28dp 高（视觉药丸仍 4dp）：低于这个值手指按不准。
+    // 触摸目标 ≥ MIN_TOUCH_TARGET_DP（P5-2）：旧实现整行只有 18dp 高（4dp 药丸 + 6/8dp 内边距），
+    // 注释却自称 28dp——手指按不准，「上拉/下拉」这条需求在设备上等于不可用。视觉药丸仍是
+    // 4dp×36dp（观感不变），多出来的高度全部落在**这一行**（手势只挂它，见 attachDragGesture），
+    // 故不侵占正文滚动区。内边距由纯函数算（见 handleRowPaddingPx 的测试）。
     val handle = View(svc).apply {
       background = GradientDrawable().apply { cornerRadius = (2 * dp).toInt().toFloat(); setColor(c.unitStroke) }
     }
+    val handlePad = handleRowPaddingPx(MIN_TOUCH_TARGET_DP, 4, dp)
     val handleRowView = LinearLayout(svc).apply {
       orientation = LinearLayout.HORIZONTAL
       gravity = Gravity.CENTER
-      setPadding(0, (6 * dp).toInt(), 0, (8 * dp).toInt())
+      setPadding(0, handlePad, 0, handlePad)
+      contentDescription = "上下拖动调整汇报栏高度"
+      isClickable = true
       addView(handle, LinearLayout.LayoutParams((36 * dp).toInt(), (4 * dp).toInt()))
     }
 
@@ -252,7 +267,11 @@ class OverlayReport(private val svc: OverlayService) {
       android.view.WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
       // 与 pickerWindow 同款：栏外触摸照常穿透 + 点栏外即关（ACTION_OUTSIDE）。
       // **不**加 FLAG_NOT_FOCUSABLE 语义到 unit 面板路径——本窗口独立，不涉及面板 IME。
-      android.view.WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+      // S2-5（本批补）：**必须**加 FLAG_NOT_FOCUSABLE——栏内没有任何文本输入，而此前没有这个
+      // flag 时窗口一出现就抢走输入焦点，正在打字的键盘被弹掉（用户视角：「看一眼汇报，输入法没了」）。
+      // NOT_FOCUSABLE 与 WATCH_OUTSIDE_TOUCH 是标准搭配（不可聚焦的弹层靠它收「点栏外」）。
+      android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+        android.view.WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
         android.view.WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
       PixelFormat.TRANSLUCENT,
     ).apply {
@@ -321,6 +340,27 @@ internal fun reportBodyText(entry: NotifyEntry?): String {
 }
 
 /**
+ * 正文块是否**多余**（S2-6）。true = 不渲染正文块。
+ *
+ * 缺陷现场：有摘要、无正文（`body` 字段缺失的旧条目）时，[reportBodyText] 按设计回落 summary，
+ * 而 summary 又已经被 `reportLines` 渲染进**首行**（`head + " · " + summary`）——于是同一句话
+ * 在栏内连渲染两遍，中间还夹一条分隔线，看起来像「内容重复出错了」。
+ *
+ * 判据只认「与首行已显示文本**逐字相同**」这两种形态：等于 summary（首行的后半段），
+ * 或等于整条首行。不做子串/相似度近似——那会把「摘要里恰好包含正文」误判成重复而**丢掉内容**，
+ * 比重复显示更严重。空正文一律判多余（没有块可渲染）。
+ */
+internal fun reportBodyRedundant(entry: NotifyEntry?, full: String): Boolean {
+  val f = full.trim()
+  if (f.isEmpty()) return true
+  if (entry == null) return false
+  val head = entry.outcomeLabel.ifBlank { entry.outcomeLabel() }.ifBlank { "工作汇报" }
+  val summary = entry.summary.ifBlank { entry.text }.trim()
+  if (summary.isEmpty()) return false
+  return f == summary || f == (head + " · " + summary).trim()
+}
+
+/**
  * 报告栏打开时的初始高度（纯函数，JVM 可测）。
  *
  * 语义：**内容多高就多高**，夹在 [minHeight] 与 [maxHeight] 之间。
@@ -380,9 +420,38 @@ internal fun reportLines(entry: NotifyEntry?): List<String> {
  */
 internal enum class StatusGestureAction { NONE, JUMP_TO_APP }
 
+/**
+ * 可点元素的最小热区（dp）。批 5 口径：不低于触摸目标下限 44dp。
+ *
+ * 本仓多处可点元素曾是 18–36dp（回报栏手柄 18dp、发送/停止圆钮 36dp、回报栏 ✕ 约 26dp），
+ * 设备上的表现就是「按不准 / 点了没反应」。**视觉尺寸可以更小**（药丸 4dp、圆钮 36dp），
+ * 但命中区必须 ≥ 本值：做法是外层容器撑到下限、内层保持观感
+ * （见 OverlayPanel.roundButton 与 buildReportBar 的手柄行/关闭键）。
+ */
+internal const val MIN_TOUCH_TARGET_DP = 44
+
+/**
+ * 手柄行的上下内边距（px，纯函数 JVM 可测）：让「药丸 + 上下内边距」凑够最小热区。
+ * 越界防护：药丸比热区还高时返回 0（不得出现负内边距 → 负 padding 会被系统当异常值处理）。
+ */
+internal fun handleRowPaddingPx(minTouchDp: Int, pillDp: Int, density: Float): Int =
+  (((minTouchDp - pillDp).coerceAtLeast(0) / 2f) * density).toInt()
+
 /** 三击计数：距上次 UP 在窗口内则累加，否则重置为 1（窗口运行时读取，不编造数字）。 */
 internal fun nextTapCount(now: Long, lastUpAt: Long, tapWindowMs: Long, current: Int): Int =
   if (now - lastUpAt <= tapWindowMs) current + 1 else 1
+
+/**
+ * 三击手势的容错窗口（S2-2，纯函数 JVM 可测）。
+ *
+ * 缺陷现场：旧实现直接把 `getDoubleTapTimeout()`（约 300ms）当作**三击**的间隔窗口，
+ * 于是「每一下都必须在上一下之后 300ms 内接上」——人手按不出（双击尚可，三连击几乎必然
+ * 断在第二、三下之间），设备表现就是「三击回应用点了没反应」。
+ *
+ * 取值口径：三击是**有意的和弦**（用户要把整个应用切到前台），不是随手双击，故按双击容错的
+ * 2 倍给窗口；基数仍**运行时读**系统值推导（不编造数字），系统调整基准值时这里跟着变。
+ */
+internal fun tripleTapWindowMs(doubleTapTimeoutMs: Long): Long = doubleTapTimeoutMs * 2
 
 /**
  * UP 时刻的裁决：仅当「未拖动（未超 touchSlop）且长按未触发且累计点击达 3」才跳转。

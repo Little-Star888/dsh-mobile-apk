@@ -143,6 +143,9 @@ class OverlayService : Service() {
   override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
     super.onConfigurationChanged(newConfig)
     if (expanded) panel.applyThemeColors()
+    // P5-3：空闲态光环按主题取色，而 haloView 的 drawable 是手工构造的（不随 uiMode 自动更新）
+    // ——不在此重刷就会出现「切到深色后空闲光环仍是浅色主题的灰」。
+    halo.refreshTheme()
     // 旋转后旧的 x/y 可能超出新屏幕（竖屏拖到 y≈1400，转横屏 1600×900 后 y>900 → 球出屏消失）。
     val p = rootParams ?: return
     clampBallPos(p)
@@ -535,7 +538,11 @@ class OverlayService : Service() {
           // 块H-A1：完成态分支在 updateBallOnly 的分支链里**优先于** else 常态分支（详档 §5.1），
           // 而本处是绕过分支链的直接赋值——两者必须同口径，否则完成文案会被每 10s 的探活
           // tick 覆写成「引擎离线」。故有完成文案时交由分支链负责（详档 §6.3 回归面）。
-          if (completionLabel().isEmpty()) {
+          // S2-14（本批修）：**待答态同样要排除**。旧判据只看完成文案，于是球处在
+          // 「等待你的回答…」（question/approval 待处理）时，只要引擎此刻探活失败，
+          // 这句最要紧的话就被 tick 覆写成「引擎离线」——用户正要作答的提示被抹掉。
+          // 判据统一：有更具体的话要说（完成态 / 待答态）时，本处一律让位给分支链。
+          if (completionLabel().isEmpty() && pendingKind.isEmpty()) {
             panel.statusText?.let { ShimmerTextView::class.java.cast(it).setShimmering(false); it.setTextColor(0xFFE04848.toInt()); it.text = "引擎离线" }
           }
         }
@@ -724,7 +731,10 @@ class OverlayService : Service() {
       }
       startActivity(intent)
     } catch (e: Exception) {
+      // S2-2：失败不得只写日志（用户按了三下，什么都没发生）。面板此刻必然是展开态
+      // （该手势挂在展开面板的状态行上），故 flashStatus 一定可见。
       LogCollector.log("dsh-overlay", "jump to app failed: " + (e.message ?: e.javaClass.simpleName))
+      flashStatus("跳转失败，请手动切到 DSH")
     }
   }
 
