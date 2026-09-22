@@ -104,10 +104,10 @@ sequenceDiagram
 |---|---|---|---|---|---|---|---|---|
 | K01 | 启动与引导面 | 点开 App 到引擎页面可见的进程入口、引导页与 WebView 宿主 | LAUNCHER 图标、VIEW/SEND 来件、ACTION_UPDATE | 引导与启动 | 引擎进程与快照面、鉴权探活、诊断落盘 | 系统启动器与分享面板、BootReceiver、悬浮球跳转 | MainActivity.kt,EngineStartFlow.kt,GuidePageRenderer.kt | 高 |
 | K02 | 引擎生命周期与保活 | 起 node 引擎、5s 探活、看门狗重启熔断与日志落盘 | EngineStartFlow.start、EngineService 5s tick | 引导与启动 | K01,K03 | MainActivity、BootReceiver、EngineStartFlow | EngineManager.kt,EngineService.kt,WatchdogV2.kt,LogCollector.kt | 高 |
-| K03 | 快照事务与更新链 | 内嵌快照暂存交换事务与回滚（插件故障走**清单式外科拔除**，不整份回滚），兼在线更新与清单合并 | 启动流判指纹不新鲜 / 引导页检查更新 / WebView 下载 | 快照与更新 | 引导启动流、引擎探活、构建快照资产 | EngineStartFlow.runFlow、EngineService 看门狗、引导页按钮、MainActivity 的 WebView 回调 | SnapshotTransaction.kt,SnapshotFs.kt,UpdateManager.kt,PluginMounts.kt | 高 |
+| K03 | 快照事务与更新链 | 内嵌快照暂存交换事务与回滚（插件故障走**清单式外科拔除**，不整份回滚），兼在线更新与清单合并 | 启动流判指纹不新鲜 / 引导页检查更新 / WebView 下载 | 快照与更新 | 引导启动流、引擎探活、构建快照资产 | EngineStartFlow.runFlow、EngineService 看门狗、引导页按钮、MainActivity 的 WebView 回调 | SnapshotTransaction.kt,SnapshotFs.kt,SnapshotRefreshPolicy.kt,UpdateManager.kt,PluginMounts.kt | 高 |
 | K04 | 桥与控制协议面 | 页面 JS 桥面、引擎鉴权与控制队列承载 | 页面调 androidBridge；EngineService 起控制承载 | 稳态控制 | 引导与启动（EngineService/MainActivity）、无障碍与虚拟屏宿主、快照与更新（UndoGate） | MainActivity 装桥；EngineService.onCreate 起 ControlCarrier；看门狗 tick 调 UndoGate | app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt,app/src/main/java/com/dsharnessmobile/shell/ControlPoller.kt,app/src/main/java/com/dsharnessmobile/shell/EngineAuth.kt,app/src/main/java/com/dsharnessmobile/shell/ControlProtocolV2.kt | 高 |
 | K05 | 无障碍控制面 | 按需取语义树并对设备执行点击输入滚动截屏 | 控制队列取活 + 无障碍服务回调 | 稳态控制 | K04 控制协议、K06 特权执行 | ControlCarrier 控制队列取活、onServiceConnected、ADB 键盘广播 | DeviceControlService.kt,GlobalActionCatalog.kt,AdbKeyboardService.kt,AdbKeyboardReceiver.kt | 高 |
-| K06 | 特权执行、屏幕范围与本地文件面 | Shizuku 特权 shell 通道、屏幕范围门与本地文件出入口 | 引擎 sh* op / 设置页范围写面 / 外部分享与打开 intent | 稳态控制 | 控制队列承载、引擎 bridge 插件、虚拟屏注册表、无障碍控制面 | 引擎 androidPrivilege 服务面与页面桥 | ShellOps.kt,ScreenScope.kt,ShizukuTransport.kt,ShizukuUserService.kt,ShizukuProbe.kt,ShizukuSupport.kt,ProcIo.kt,FileIncoming.kt,PathOpen.kt,ConfigTransfer.kt | 高 |
+| K06 | 特权执行、屏幕范围与本地文件面 | Shizuku 特权 shell 通道、屏幕范围门与本地文件出入口 | 引擎 sh* op / 设置页范围写面 / 外部分享与打开 intent | 稳态控制 | 控制队列承载、引擎 bridge 插件、虚拟屏注册表、无障碍控制面 | 引擎 androidPrivilege 服务面与页面桥 | ShellOps.kt,ScreenScope.kt,ShizukuTransport.kt,ShizukuBindState.kt,ShizukuUserService.kt,ShizukuProbe.kt,ShizukuSupport.kt,ProcIo.kt,FileIncoming.kt,PathOpen.kt,ConfigTransfer.kt | 高 |
 | K07 | 虚拟屏宿主 | Shizuku 建屏与 viewer Surface 交接的生命周期编排 | 模型 vd 工具 / 侧栏桥面 / Activity 生命周期 | 交互面 | Shizuku 特权通道、K05 无障碍控制面、K08 浏览器宿主 | MainActivity、DeviceControlService 与 ControlCarrier、侧栏面板 | VdisplayController.kt,VdisplayHost.kt,VdisplayOps.kt | 高 |
 | K08 | 浏览器宿主 | 隔离浏览器：无桥 WebView、准入过滤、几何与保活 | 模型 browser* op（控制队列）/ 面板 browserHost* 桥 | 交互面 | S01,P03,控制队列 | MainActivity 构造，op 与面板下推拉起 | BrowserHost.kt,BrowserHostNavigationPolicy.kt,BrowserOverlayPolicy.kt | 高 |
 | K09 | 悬浮球与面板 | 悬浮球三窗口与展开面板：状态、待答、应答、完成态 | 设置页开关或 onResume 补启；点球展开；WS 帧与 live 文件事件 | 交互面 | K01,K10,引擎网关 | K01 宿主 Activity 与桥开关；EngineService 划掉后台时停它 | OverlayService.kt,OverlayPanel.kt | 高 |
@@ -871,7 +871,7 @@ flowchart TD
   - `app/src/main/java/com/dsharnessmobile/shell/SnapshotTransaction.kt:345` — 写 SWAPPED 提交哨兵（回滚/前滚的唯一判据）
   - `app/src/main/java/com/dsharnessmobile/shell/SnapshotTransaction.kt:688` — `recover` 回滚失败保留 marker（D-3）
   - `app/src/main/java/com/dsharnessmobile/shell/SnapshotTransaction.kt:787` — `rollbackEntry` 删不净则把 live 改名挪开再放回 displaced
-  - `app/src/main/java/com/dsharnessmobile/shell/SnapshotFs.kt:61` — `newDirectoryStream` 枚举（P0-B：避开 API 34 的 `Stream.toList`）
+  - `app/src/main/java/com/dsharnessmobile/shell/SnapshotFs.kt`（`deletePath`）— 逐项容错 + `newDirectoryStream` 枚举（P0-B：避开 API 34 的 `Stream.toList`）；0.14.1 D1 起容错面为 `Exception` + `LinkageError`（重抛 `VirtualMachineError`），判定在顶层 `isTolerableDeletionFailure`
   - `app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt:196` — 刷新失败路径：回滚结果未判 + 无条件清 marker（D-3 逃逸点）
   - `app/src/main/java/com/dsharnessmobile/shell/UpdateManager.kt:34` — 未配置可信发布源即拒绝（S-10 fail-closed）
   - `app/src/main/java/com/dsharnessmobile/shell/FactoryProfilePatch.kt:79` — 工厂 disabled 语义纠正入口
@@ -1132,6 +1132,7 @@ flowchart TD
   - `scope == VIRTUAL_ONLY` 时真实屏读写命令必须拒；SF 反查不可达/超时/解析空 → 空集 → 拒（fail-closed，宁可误拒）。
   - 目标屏参数按**原样十进制串**比对，禁止数值化（SF token 超 Long 值域，见坑 147）；两个 id 空间（displayId、SF token）都要核对。
   - `onServiceConnected/onServiceDisconnected` 后 `bindLatch` 必须置 null（`ShizukuTransport.kt:59`、`:70`；否则复用已放行 latch → 恒「第一次必失败」）。
+  - 绑定闩必须有看门狗（0.14.1 D7）：`ShizukuBindState` 的 `reapIfStale`（阈值 `BIND_WATCHDOG_MS=20s`），执行点在 `status()` 与 `ensureBound()` 入口；否则一次不回调的 bind 会让 `binding` 永久为 true 且 `kickBind` 从此不再发起任何尝试。
   - 协议 `protocolVersion() < 2` 一律结构化拒绝，不得静默降级。
   - pull/push 本地落点必须在 `filesDir` 内（canonical 比对），远端必须绝对路径；来件落盘前写后写后各做一次归属断言。
   - 边界：来件单文件 200 MB、远端单文件 512 MB、内联输出 16 KiB、`shExec` 超时 1s..120s。
@@ -2442,6 +2443,7 @@ app/src/main/java/com/dsharnessmobile/shell/WatchdogV2.kt
 app/src/main/java/com/dsharnessmobile/shell/LogCollector.kt
 app/src/main/java/com/dsharnessmobile/shell/SnapshotTransaction.kt
 app/src/main/java/com/dsharnessmobile/shell/SnapshotFs.kt
+app/src/main/java/com/dsharnessmobile/shell/SnapshotRefreshPolicy.kt
 app/src/main/java/com/dsharnessmobile/shell/SnapshotExtractor.kt
 app/src/main/java/com/dsharnessmobile/shell/SnapshotUserData.kt
 app/src/main/java/com/dsharnessmobile/shell/SnapshotFileMode.kt
@@ -2467,6 +2469,7 @@ app/src/main/java/com/dsharnessmobile/shell/AdbKeyboardService.kt
 app/src/main/java/com/dsharnessmobile/shell/AdbKeyboardReceiver.kt
 app/src/main/java/com/dsharnessmobile/shell/ShellOps.kt
 app/src/main/java/com/dsharnessmobile/shell/ScreenScope.kt
+app/src/main/java/com/dsharnessmobile/shell/ShizukuBindState.kt
 app/src/main/java/com/dsharnessmobile/shell/ShizukuTransport.kt
 app/src/main/java/com/dsharnessmobile/shell/ShizukuUserService.kt
 app/src/main/java/com/dsharnessmobile/shell/ShizukuProbe.kt
