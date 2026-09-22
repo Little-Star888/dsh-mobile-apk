@@ -138,6 +138,29 @@ export function summarize(text: unknown, max = 120): string {
   return s.length <= max ? s : s.slice(0, max - 1) + '…'
 }
 
+/**
+ * 汇报正文（可滚动区）的上限：8 KiB。
+ *
+ * 为什么需要正文而不只是摘要（0.14.1 D6，设备实报「长按查看详情…无法滚动查看输出」）：
+ * 报告栏此前只有 120 字摘要，而摘要经单行化 + 硬截断后**恒不超高**——「栏内可滚动」这条验收
+ * 判据在 120 字上限下恒真而无意义（内容从来不会超标），于是「读不到完整输出」从设计上即不可达。
+ * 换句话说：不是滚动坏了，是**没有可滚的内容**。
+ *
+ * 有界是必须的：`.notify.ndjson` 的轮转上限是 512 KiB（壳侧 NOTIFY_MAX），单轮无界落盘会让
+ * 几十轮就把信道撑爆、把历史汇报挤掉。8 KiB 对「一轮的最终答复」足够，超出部分显式截断。
+ */
+export const REPORT_BODY_MAX = 8 * 1024
+
+/** 正文截断标记。有界截断**必须显式**——不得让用户把截断处当成全文结尾。 */
+export const REPORT_BODY_TRUNCATED = '\n…（正文过长，此处截断）'
+
+/** 正文（有界、保留换行）。空文本返回空串。 */
+export function boundReportBody(text: unknown, max = REPORT_BODY_MAX): string {
+  const s = String(text ?? '').trim()
+  if (s === '') return ''
+  return s.length <= max ? s : s.slice(0, max) + REPORT_BODY_TRUNCATED
+}
+
 /** 用时文案（毫秒 → 「1m23s」/「8.4s」）。 */
 export function formatDuration(ms: number): string {
   if (!Number.isFinite(ms) || ms < 0) return ''
@@ -209,7 +232,10 @@ export interface ReportEntry {
   outcomeLabel: string
   sessionId: string
   title: string
+  /** 单行摘要（通知展开正文 / 悬浮窗工具行 chip 的口径，120 字上限）。 */
   summary: string
+  /** 该轮可见正文全文（有界 8 KiB，保留换行）；报告栏可滚动区的内容来源。空 = 该轮没有可见正文。 */
+  body: string
   durationMs: number
   toolCount: number
   turn: number
@@ -234,6 +260,7 @@ export class SessionNotifyState {
   private readonly turnStart = new Map<string, number>()
   private readonly turnTools = new Map<string, number>()
   private readonly summaries = new Map<string, string>()
+  private readonly bodies = new Map<string, string>()
   private readonly presented = new Map<string, string[]>()
   private readonly todoAt = new Map<string, number>()
   private readonly todoSig = new Map<string, string>()
@@ -260,6 +287,7 @@ export class SessionNotifyState {
     this.turnStart.set(id, now)
     this.turnTools.set(id, 0)
     this.summaries.delete(id)
+    this.bodies.delete(id)
     this.presented.delete(id)
     void turn
   }
@@ -271,12 +299,19 @@ export class SessionNotifyState {
     this.turnTools.set(id, (this.turnTools.get(id) ?? 0) + 1)
   }
 
-  /** `assistant/message`：本轮最后一段文本（汇报摘要来源）。 */
+  /**
+   * `assistant/message`：本轮最后一段文本。
+   *
+   * 同时记两份口径：`summary`（单行 120 字，通知展开正文与工具行 chip 用）与
+   * `body`（有界 8 KiB、保留换行，报告栏可滚动区用）。二者同源但用途不同——
+   * 报告栏此前只拿得到 summary，于是「可滚动」是空的（见 [REPORT_BODY_MAX]）。
+   */
   setSummary(sessionId: unknown, text: unknown): void {
     const id = String(sessionId ?? '')
     const s = summarize(text)
     if (id === '' || s === '') return
     this.summaries.set(id, s)
+    this.bodies.set(id, boundReportBody(text))
   }
 
   /** `deliverables/presented`：产出文件名（只留 basename，避免锁屏泄露绝对路径）。 */
@@ -321,6 +356,7 @@ export class SessionNotifyState {
       sessionId: id,
       title: this.titleFor(id),
       summary: this.summaries.get(id) ?? '',
+      body: this.bodies.get(id) ?? '',
       durationMs,
       toolCount: this.turnTools.get(id) ?? 0,
       turn: Number(input.turn ?? 0) || 0,

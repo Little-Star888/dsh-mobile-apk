@@ -10,6 +10,7 @@ import { apply } from '../lib/index.js'
 import {
   SessionNotifyState,
   TURN_END_KINDS,
+  boundReportBody,
   formatDuration,
   reportOutcomeLabel,
   sessionTag,
@@ -20,6 +21,8 @@ import {
   turnEndKind,
   turnEndOk,
   visibleText,
+  REPORT_BODY_MAX,
+  REPORT_BODY_TRUNCATED,
 } from '../lib/notify-projection.js'
 
 const NOW = 1_800_000_000_000
@@ -381,4 +384,67 @@ test('D5 源码门禁：不得再出现「按字段取值拼 content」的写法
     'D5：不得再按字段取值拼 content（思考块与正文块共用 text 字段名，必须按 type 过滤）',
   )
   assert.match(code, /visibleText\(content\)/, 'D5：两条 assistant/message 路径都必须走 visibleText')
+})
+
+// ── 0.14.1 D6：报告栏可滚动正文（摘要之外必须真的有可滚的内容）────────────────────
+//
+// 设备实报「长按查看详情…无法在不改变窗口大小的情况下滚动查看输出」。代码事实：
+//   ① 报告栏此前只渲染 head+summary / 用时·工具 / 产出 三行；
+//   ② summary 经单行化 + `summarize(text, 120)` 硬截断 → **恒不超高** → 滚动区间恒为 0。
+// 即「栏内可滚动」这条验收判据在 120 字上限下恒真而无意义：不是滚动坏了，是没有可滚的内容。
+// 修法是把该轮可见正文有界地一并落进 report 条目（8 KiB + 显式截断标记）。
+// 下面同时钉住「有界」这一半——无界落盘会把 512 KiB 的信道几十轮就撑爆、把历史汇报挤掉。
+
+test('D6：summary 截到 120 字，body 保留全文（二者同源不同用途）', () => {
+  const s = new SessionNotifyState()
+  s.startTurn('s1', 1, NOW)
+  const long = '正文段落。'.repeat(60)      // 300 字，远超 120
+  s.setSummary('s1', long)
+  const r = s.endTurn({ sessionId: 's1', turn: 1, reason: { kind: 'completed' }, now: NOW + 10 })
+  assert.equal(r.summary.length, 120, '摘要仍按既有口径硬截断')
+  assert.equal(r.body.length, long.length, '正文必须保留全文（这是「可滚动」的前提）')
+  assert.equal(r.body, long)
+  assert.equal(r.body.startsWith(r.summary.slice(0, 20)), true, '两者同源：正文以摘要开头')
+})
+
+test('D6：正文必须有界（8 KiB）+ 显式截断标记，不得静默截断', () => {
+  const s = new SessionNotifyState()
+  s.startTurn('s1', 1, NOW)
+  s.setSummary('s1', 'x'.repeat(REPORT_BODY_MAX * 2))
+  const r = s.endTurn({ sessionId: 's1', turn: 1, reason: { kind: 'completed' }, now: NOW + 10 })
+  assert.equal(r.body.length, REPORT_BODY_MAX + REPORT_BODY_TRUNCATED.length, '正文长度必须是上限 + 标记')
+  assert.equal(r.body.endsWith(REPORT_BODY_TRUNCATED), true, '截断必须显式，用户不得把截断处当全文结尾')
+  assert.equal(REPORT_BODY_MAX <= 16 * 1024, true, '单轮正文上限必须远小于信道轮转上限（512 KiB）')
+})
+
+test('D6：正文不得跨轮残留（新一轮开始即清空）', () => {
+  const s = new SessionNotifyState()
+  s.startTurn('s1', 1, NOW)
+  s.setSummary('s1', '第一轮正文')
+  s.endTurn({ sessionId: 's1', turn: 1, reason: { kind: 'completed' }, now: NOW + 10 })
+  s.startTurn('s1', 2, NOW + 20)
+  const r = s.endTurn({ sessionId: 's1', turn: 2, reason: { kind: 'completed' }, now: NOW + 30 })
+  assert.equal(r.body, '', '新一轮没有正文时不得把上一轮的正文带出来')
+  assert.equal(r.summary, '')
+})
+
+test('D6：只产出思考块时正文为空（与 D5 的过滤一致，不得把思考当正文落盘）', () => {
+  const report = oneTurn([{ type: 'reasoning', text: THINKING_TEXT }]).notify.find((e) => e.kind === 'report')
+  assert.equal(report.body, '')
+  assert.equal(JSON.stringify(report).includes('绝不该出现'), false, '思考文本不得进入任何落盘字段')
+})
+
+test('D6 行为面：report 行必须带 body 且等于可见正文全文', () => {
+  const report = oneTurn([
+    { type: 'reasoning', text: THINKING_TEXT },
+    { type: 'text', text: VISIBLE_TEXT },
+  ]).notify.find((e) => e.kind === 'report')
+  assert.equal(report.body, VISIBLE_TEXT, '.notify.ndjson 的 report 须携带正文供壳侧滚动区渲染')
+})
+
+test('D6 兼容分支：boundReportBody 对空值/非字符串安全', () => {
+  assert.equal(boundReportBody(undefined), '')
+  assert.equal(boundReportBody(''), '')
+  assert.equal(boundReportBody('   '), '')
+  assert.equal(boundReportBody('保留\n换行'), '保留\n换行', '正文必须保留换行（报告栏按原样多行渲染）')
 })

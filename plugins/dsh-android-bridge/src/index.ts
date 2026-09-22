@@ -60,6 +60,8 @@ import {
   turnEndOk,
   TURN_END_KINDS,
   visibleText,
+  boundReportBody,
+  REPORT_BODY_MAX,
 } from './notify-projection.js'
 
 export {
@@ -81,6 +83,7 @@ export {
   turnEndOk,
   TURN_END_KINDS,
   visibleText,
+  boundReportBody,
   toLosslessJson,
   findUndefinedPaths,
   authorizeMobileRoute,
@@ -1688,6 +1691,9 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
               sessionId: report.sessionId,
               title: report.title,
               summary: report.summary,
+              // 0.14.1 D6：报告栏的可滚动正文（有界 8 KiB、保留换行）。只有 summary 时
+              // 「栏内可滚动」是空承诺——摘要恒不超高，滚动区间恒为 0。
+              body: report.body,
               durationMs: report.durationMs,
               durationLabel: formatDuration(report.durationMs),
               toolCount: report.toolCount,

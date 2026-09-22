@@ -29,6 +29,12 @@ import android.widget.TextView
 class OverlayReport(private val svc: OverlayService) {
 
   private var window: View? = null
+  /** 栏内可滚动区（weight=1，随拖拽伸缩）。buildReportBar 设置，showReport 用来量内容自然高度。 */
+  private var scrollView: ScrollView? = null
+  /** 底部拖拽手柄行（手势只挂在这里，见 buildReportBar 的注释）。 */
+  private var handleRow: View? = null
+  /** 用户是否主动拖过高度：拖过之后就不再用「attach 后复测」覆盖他的选择。 */
+  private var userResized = false
   // 主题协作类（与 OverlayPanel 同款：构造注入服务引用，不在构造期解引用服务状态）。
   private val theme = OverlayTheme(svc)
 
@@ -72,7 +78,9 @@ class OverlayReport(private val svc: OverlayService) {
     }
 
     // 正文：逐行 TextView（首行 head+summary、次行时长/工具数、末行产出清单）。
+    // 正文全文（可滚动区）插在首行之后：先说「这是什么汇报」，再说内容，最后给度量与产出。
     val body = LinearLayout(svc).apply { orientation = LinearLayout.VERTICAL }
+    val full = reportBodyText(entry)
     for ((i, line) in lines.withIndex()) {
       body.addView(TextView(svc).apply {
         text = line
@@ -81,20 +89,41 @@ class OverlayReport(private val svc: OverlayService) {
         if (i == 0) setTypeface(null, android.graphics.Typeface.NORMAL)
         setPadding((14 * dp).toInt(), (3 * dp).toInt(), (14 * dp).toInt(), (3 * dp).toInt())
       })
+      if (i == 0 && full.isNotEmpty()) {
+        // 分隔线 + 全文。**单个** TextView 承载整段（不是一个 TextView 一行）：8 KiB 正文
+        // 按换行拆成上百个 View 会在每次打开时重建上百个视图，而这里只需要「能滚动地读」。
+        body.addView(View(svc).apply {
+          background = GradientDrawable().apply { setColor(c.unitStroke) }
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, (1 * dp).toInt()).apply {
+          topMargin = (6 * dp).toInt()
+        })
+        body.addView(TextView(svc).apply {
+          text = full
+          textSize = 12f
+          setTextColor(c.inputText)
+          setPadding((14 * dp).toInt(), (6 * dp).toInt(), (14 * dp).toInt(), (6 * dp).toInt())
+        })
+      }
     }
 
     // 可滚动容器（先例 OverlayPanel.openPickerWindow 的 ScrollView）。
+    // isFillViewport=false：内容比视口矮时**不**把它拉伸到满高（否则滚动手势会落在空白上、
+    // 看起来像「能滚但没反应」）。
     val scroll = ScrollView(svc).apply {
       overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
       isFillViewport = false
       addView(body, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
     }
 
-    // 底部拖拽手柄（视觉提示「可上拉/下拉」；不做手势，避免与「栏内可滚动」抢事件）。
+    // 底部拖拽手柄（0.14.1 D6）：**真手势**——上拉变高、下拉变矮，夹在 minH..maxH 之间。
+    // 旧实现是一根纯装饰的横线（注释自述「不做手势，避免与栏内可滚动抢事件」），即需求里的
+    // 「上拉/下拉栏」从未落地。现在把手势**只挂在手柄行上**：栏内正文区仍归 ScrollView，
+    // 两者不重叠，故不再有抢事件的问题。
+    // 触摸目标 28dp 高（视觉药丸仍 4dp）：低于这个值手指按不准。
     val handle = View(svc).apply {
       background = GradientDrawable().apply { cornerRadius = (2 * dp).toInt().toFloat(); setColor(c.unitStroke) }
     }
-    val handleRow = LinearLayout(svc).apply {
+    val handleRowView = LinearLayout(svc).apply {
       orientation = LinearLayout.HORIZONTAL
       gravity = Gravity.CENTER
       setPadding(0, (6 * dp).toInt(), 0, (8 * dp).toInt())
@@ -110,7 +139,85 @@ class OverlayReport(private val svc: OverlayService) {
       elevation = 8 * dp
       addView(header, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
       addView(scroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
-      addView(handleRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+      addView(handleRowView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+    }.also {
+      scrollView = scroll
+      handleRow = handleRowView
+    }
+  }
+
+  /**
+   * 栏内内容的自然高度（含标题与手柄）。
+   *
+   * 为什么不直接量栏体：ScrollView 在栏内是 `weight=1`（要随拖拽伸缩），而 weight 子项在
+   * `wrap_content` 的父里贡献 **0 高度**——直接量只会得到「标题 + 手柄」那么高，于是栏永远等于
+   * 下限，初始高度不随内容变化。故先把 ScrollView 临时按 `wrap_content` 量一次，再还原。
+   */
+  private fun measureNaturalHeight(bar: View, width: Int, maxHeight: Int): Int {
+    val scroll = scrollView ?: return 0
+    val lp = scroll.layoutParams as? LinearLayout.LayoutParams ?: return 0
+    val weight = lp.weight
+    val height = lp.height
+    lp.weight = 0f
+    lp.height = ViewGroup.LayoutParams.WRAP_CONTENT
+    try {
+      bar.measure(
+        View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+        View.MeasureSpec.makeMeasureSpec(maxHeight, View.MeasureSpec.AT_MOST),
+      )
+      return bar.measuredHeight
+    } finally {
+      lp.weight = weight
+      lp.height = height
+    }
+  }
+
+  /** 把新的栏高写回窗口（失败不静默：坑 149 判据——无日志的静默失败是一道发现不了缺陷的防线）。 */
+  private fun applyHeight(bar: View, lp: android.view.WindowManager.LayoutParams, height: Int) {
+    if (height == lp.height) return
+    lp.height = height
+    try {
+      svc.wm.updateViewLayout(bar, lp)
+    } catch (e: Exception) {
+      LogCollector.log("dsh-overlay-report", "report bar resize failed: " + (e.message ?: e.javaClass.simpleName))
+    }
+  }
+
+  /**
+   * 底部手柄的拖拽手势（0.14.1 D6：需求原文要的「上拉/下拉栏」此前从未落地——手柄是纯装饰）。
+   *
+   * 手势**只挂在这一行**：栏内正文区仍归 ScrollView，两者区域不重叠，因此不再有
+   * 「手势与栏内滚动抢事件」的问题（旧实现正是以这个理由放弃了手势）。
+   */
+  private fun attachDragGesture(bar: View, lp: android.view.WindowManager.LayoutParams, minH: Int, maxH: Int) {
+    val row = handleRow ?: return
+    row.isClickable = true
+    var downY = 0f
+    var startHeight = 0
+    var dragging = false
+    row.setOnTouchListener { _, e ->
+      when (e.actionMasked) {
+        MotionEvent.ACTION_DOWN -> {
+          downY = e.rawY
+          startHeight = lp.height
+          dragging = true
+          true
+        }
+        MotionEvent.ACTION_MOVE -> {
+          if (!dragging) return@setOnTouchListener true
+          val wanted = reportBarHeightAfterDrag(startHeight, (downY - e.rawY).toInt(), minH, maxH)
+          if (wanted != lp.height) {
+            userResized = true
+            applyHeight(bar, lp, wanted)
+          }
+          true
+        }
+        MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+          dragging = false
+          true
+        }
+        else -> false
+      }
     }
   }
 
@@ -120,6 +227,7 @@ class OverlayReport(private val svc: OverlayService) {
    */
   fun showReport(): Boolean {
     if (window != null) return true
+    userResized = false
     val dp = svc.resources.displayMetrics.density
     val sw = svc.resources.displayMetrics.widthPixels
     val sh = svc.resources.displayMetrics.heightPixels
@@ -132,8 +240,12 @@ class OverlayReport(private val svc: OverlayService) {
       return false
     }
     val w = (sw - 2 * (16 * dp).toInt()).coerceAtMost((440 * dp).toInt()).coerceAtLeast((200 * dp).toInt())
-    // 高度：屏高 40% 为上限（详档 §4.1 的抽屉形态；具体比例属未确证项，实机走查时按需调整）。
-    val maxH = (sh * 0.40f).toInt()
+    // 高度上下限（0.14.1 D6）：
+    //   上限 = 屏高 40%（抽屉形态，具体比例属未确证项，实机走查时按需调整）；
+    //   下限 = 140dp（标题 + 摘要行 + 手柄；低于此值手柄都放不下，也就没有「上拉」的起点）。
+    // 初始高度**按内容取**（短汇报不强占 40% 屏高）——见 reportBarInitialHeight。
+    val maxH = (sh * 0.40f).toInt().coerceAtLeast(1)
+    val minH = (140 * dp).toInt().coerceAtMost(maxH)
     val lp = android.view.WindowManager.LayoutParams(
       w,
       ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -148,11 +260,8 @@ class OverlayReport(private val svc: OverlayService) {
       x = (sw - w) / 2
       y = 0
     }
-    bar.measure(
-      View.MeasureSpec.makeMeasureSpec(w, View.MeasureSpec.AT_MOST),
-      View.MeasureSpec.makeMeasureSpec(maxH, View.MeasureSpec.AT_MOST),
-    )
-    lp.height = bar.measuredHeight.coerceIn(1, maxH.coerceAtLeast(1))
+    lp.height = reportBarInitialHeight(measureNaturalHeight(bar, w, maxH), minH, maxH)
+    attachDragGesture(bar, lp, minH, maxH)
     bar.setOnTouchListener { _, e ->
       if (e.action == MotionEvent.ACTION_OUTSIDE) hideReport()
       false
@@ -160,6 +269,14 @@ class OverlayReport(private val svc: OverlayService) {
     return try {
       svc.wm.addView(bar, lp)
       window = bar
+      // attach 后复测一次（0.14.1 D6，针对「窗口高度在 attach 前冻结」这一支的解释）：
+      // 内容在 attach 后可能因字体度量/换行/滚动条出现而重排，此时 ScrollView 的视口与窗口高度
+      // 会不一致，表现为「能滚但滚不动」。这里在第一次布局后按同一套上下限纠正一次；
+      // 用户已经拖过（userResized）就不覆盖他的选择。
+      bar.post {
+        if (window !== bar || userResized) return@post
+        applyHeight(bar, lp, reportBarInitialHeight(measureNaturalHeight(bar, w, maxH), minH, maxH))
+      }
       true
     } catch (e: Exception) {
       LogCollector.log("dsh-overlay-report", "report bar addView failed: " + (e.message ?: e.javaClass.simpleName))
@@ -171,6 +288,8 @@ class OverlayReport(private val svc: OverlayService) {
   fun hideReport() {
     val w = window ?: return
     window = null
+    scrollView = null
+    handleRow = null
     try { if (w.parent != null) svc.wm.removeView(w) } catch (_: Exception) {}
   }
 
@@ -185,7 +304,51 @@ class OverlayReport(private val svc: OverlayService) {
 }
 
 /**
- * 报告栏正文行（**顶层纯函数**，不解引用服务/Context → JVM 单测直接覆盖，不需要 Robolectric）。
+ * 报告栏正文全文（**可滚动区的内容**，0.14.1 D6）。
+ *
+ * 为什么需要它：报告栏此前只渲染三行（head·summary / 用时·工具 / 产出），而 summary 经单行化 +
+ * 120 字硬截断后**恒不超高**——「栏内可滚动」这条验收判据在 120 字上限下恒真而无意义。设备实报
+ * 「无法在不改变窗口大小的情况下滚动查看输出」，实质是**没有可滚的内容**，不是滚动坏了。
+ *
+ * 取 `body`（插件侧有界 8 KiB 的可见正文，见 notify-projection 的 REPORT_BODY_MAX）。
+ * **兜底**：旧条目没有 body 字段时回落 summary，再回落 text——报告栏不得因此空掉。
+ */
+internal fun reportBodyText(entry: NotifyEntry?): String {
+  if (entry == null) return ""
+  val body = entry.body.trim()
+  if (body.isNotEmpty()) return body
+  return entry.summary.ifBlank { entry.text }.trim()
+}
+
+/**
+ * 报告栏打开时的初始高度（纯函数，JVM 可测）。
+ *
+ * 语义：**内容多高就多高**，夹在 [minHeight] 与 [maxHeight] 之间。
+ * 旧实现是 `measure(AT_MOST maxH)` 后直接取 `measuredHeight`：只有上限、没有下限，于是一个空汇报
+ * 会得到一个连拖拽手柄都放不下的条；而没有下限也就没有「上拉/下拉」的起点。
+ */
+internal fun reportBarInitialHeight(contentHeight: Int, minHeight: Int, maxHeight: Int): Int {
+  val floor = minHeight.coerceAtLeast(1)
+  val cap = maxHeight.coerceAtLeast(floor)
+  return contentHeight.coerceIn(floor, cap)
+}
+
+/**
+ * 拖拽手柄后的高度（纯函数，JVM 可测）。
+ *
+ * @param startHeight 手势**开始时刻**的窗口高度（不是内容高度：拖拽是在当前高度上做增量调整）。
+ * @param dragUp 正数 = 手指向上拖（栏变高），负数 = 向下拖（栏变矮）。
+ * 两向都夹在 [minHeight]/[maxHeight] 内。越界只夹取、不改变拖拽原点，因此手指回拉即可回原位
+ * （不会出现「拖到头以后回拉没反应」）。
+ */
+internal fun reportBarHeightAfterDrag(startHeight: Int, dragUp: Int, minHeight: Int, maxHeight: Int): Int {
+  val floor = minHeight.coerceAtLeast(1)
+  val cap = maxHeight.coerceAtLeast(floor)
+  return (startHeight + dragUp).coerceIn(floor, cap)
+}
+
+/**
+ * 报告栏**元信息**三行（**顶层纯函数**，不解引用服务/Context → JVM 单测直接覆盖，不需要 Robolectric）。
  *
  * 复用 NotifyCenter.reportLine/reportBigText 的既有文案口径（后者是私有函数，故此处镜像口径，
  * 不新造字段语义）：
@@ -195,6 +358,9 @@ class OverlayReport(private val svc: OverlayService) {
  *
  * **条目为 null（本进程还没见过 report）不返回空表**——给占位行，保证长按后窗口仍能打开、
  * 用户不会得到「长按没反应」的假象（详档 §6.2 A2 反证）。
+ *
+ * **完整正文刻意不在这里**：它是独立的可滚动区（[reportBodyText]）。三行是「汇报的元信息」，
+ * 正文是「汇报内容」，语义不同；混进本表会让既有口径 `lines[0] == head · summary` 无法再表达。
  */
 internal fun reportLines(entry: NotifyEntry?): List<String> {
   if (entry == null) return listOf("暂无汇报内容", "完成一轮对话后这里会显示汇报")

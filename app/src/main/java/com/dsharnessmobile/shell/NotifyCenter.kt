@@ -1085,6 +1085,11 @@ data class NotifyEntry(
   val outcome: String = "",
   val outcomeLabel: String = "",
   val summary: String = "",
+  /**
+   * 该轮可见正文全文（有界 8 KiB，保留换行；0.14.1 D6）。报告栏可滚动区的内容来源。
+   * 空串 = 该轮没有可见正文或条目来自旧版引擎（此时报告栏回落 summary，见 reportBodyText）。
+   */
+  val body: String = "",
   val durationMs: Long = 0,
   val durationLabel: String = "",
   val toolCount: Int = 0,
