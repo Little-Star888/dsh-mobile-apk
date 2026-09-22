@@ -472,7 +472,14 @@ class EngineManager(private val context: Context, private val pickToken: String?
       // preset.yml / agent.cordis.yml 只在缺失时播种，保留用户可能的改动。
       val skillDir = File(dir, "skills/phone-control").apply { mkdirs() }
       val skillFile = File(skillDir, "SKILL.md")
-      if (skillFile.readText().trim() != PHONE_CONTROL_SKILL.trim()) {
+      // 坑 170：干净安装时 SKILL.md 尚不存在，而 File.readText() 在文件缺席时**抛
+      // FileNotFoundException**（不是返回空串）。该异常被本函数外层的 catch(Throwable)
+      // 吞掉 ⇒ 函数当场返回，它后面的 customSkillDirs 注入 / agent.cordis.yml 拷贝 /
+      // preset.yml 写入一步都跑不到；而函数末尾的幂等早退判据正是 preset.yml，
+      // 于是每次启动都从这一行重炸、永不自愈（预设恒显「加载失败」）。
+      // 先判在场再读：缺席视同「需要刷新」。
+      val existingSkill = if (skillFile.isFile) skillFile.readText() else null
+      if (existingSkill?.trim() != PHONE_CONTROL_SKILL.trim()) {
         skillFile.writeText(PHONE_CONTROL_SKILL)
         Log.i(TAG, "phone-control SKILL refreshed")
       }
