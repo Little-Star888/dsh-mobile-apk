@@ -47,9 +47,37 @@ class PublicRepoProvisionTest {
       )
     }
     assertEquals(
-      "「尚未探测」按未就绪处理（坑 161 同族：状态与事实必须对齐，不得把未探测渲染成已就绪）",
-      PublicRepoPresentation.NEEDS_GRANT,
+      "「尚未探测」必须有自己的口径（S1-9）：既不是就绪、也不是「去授权」——已授权用户被劝再授权一次，"
+        + "点了之后什么都不会变，是另一种把状态说错的方向",
+      PublicRepoPresentation.PENDING,
       PublicRepoProvision.presentation(PublicRepoStatus.UNKNOWN),
+    )
+    assertFalse(
+      "PENDING 不得与 NEEDS_GRANT 合流",
+      PublicRepoProvision.presentation(PublicRepoStatus.UNKNOWN) == PublicRepoPresentation.NEEDS_GRANT,
+    )
+  }
+
+  /**
+   * S1-8：存储 chip 的点击动作必须跟着状态走。
+   *
+   * 反证形态：把 WRITE_FAILED 改回 REQUEST_GRANT（旧行为）即判红——旧实现无论什么状态点击
+   * 都走「请求授权」，而写入失败时授权本来就够，点它一定没有任何效果：用户手上唯一那个
+   * 可点的东西是无效的。
+   */
+  @Test
+  fun storageChipActionFollowsTheState() {
+    assertEquals(StorageChipAction.NONE, storageChipAction(PublicRepoPresentation.READY))
+    assertEquals(
+      "未探测时唯一能改变现状的动作是再探一次",
+      StorageChipAction.PROBE_AGAIN,
+      storageChipAction(PublicRepoPresentation.PENDING),
+    )
+    assertEquals(StorageChipAction.REQUEST_GRANT, storageChipAction(PublicRepoPresentation.NEEDS_GRANT))
+    assertEquals(
+      "写入失败时授权已经够了——该给的是失败详情（拿去反馈/排查），不是再弹一次授权页",
+      StorageChipAction.COPY_FAILURE_DETAIL,
+      storageChipAction(PublicRepoPresentation.WRITE_FAILED),
     )
   }
 

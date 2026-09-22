@@ -394,7 +394,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
         } else {
           activity.runOnUiThread {
             if (!isCurrentEngineFlow(generation)) return@runOnUiThread
-            activity.applyGuidePhase(GuidePhase.Error, "自动回撤不可用", result.summary.take(120))
+            activity.applyGuidePhase(GuidePhase.Error, "自动回撤不可用", undoUnavailableHint(result.summary))
           }
         }
       } catch (t: Throwable) {
@@ -506,10 +506,17 @@ internal class EngineStartFlow(private val activity: MainActivity) {
             onProgress = { done, _ ->
               activity.runOnUiThread {
                 if (!isCurrentEngineFlow(generation)) return@runOnUiThread
-                // done 是解压后字节数，total 是压缩包字节数，口径不一致；只显示已解压量。
-                val mb = done / 1024 / 1024
+                // S1-4：进度**确定化 + 量纲统一**。旧实现只显示「已写入 N MB」且进度条恒为不确定态，
+                // 而状态副文案写的是「约 700MB」——两个数字对不上，用户无法判断还要多久。
+                // 现在 done 与 RUNTIME_UNCOMPRESSED_APPROX_BYTES 同量纲，进度条与文案一起走。
+                val pct = runtimeProgressPercent(done)
+                activity.guideRenderer.setDeterminateProgress(done, RUNTIME_UNCOMPRESSED_APPROX_BYTES)
                 activity.guideRenderer.progressText.visibility = View.VISIBLE
-                activity.guideRenderer.progressText.text = "已写入 " + mb + " MB"
+                val mb = done / 1024 / 1024
+                val totalMb = RUNTIME_UNCOMPRESSED_APPROX_BYTES / 1024 / 1024
+                activity.guideRenderer.progressText.text =
+                  if (pct >= 0) "已写入 " + mb + " MB / 约 " + totalMb + " MB（" + pct + "%）"
+                  else "已写入 " + mb + " MB"
                 if (activity.guideRenderer.lastGuidePhase != GuidePhase.Extracting) {
                   activity.applyGuidePhase(GuidePhase.Extracting, "正在解压运行时")
                 }
@@ -541,7 +548,15 @@ internal class EngineStartFlow(private val activity: MainActivity) {
               // 0.13.1 W3：解压失败此前零落盘（engine.log 尚不存在、仅 logcat），镜像现场到共享目录。
               // review C5：文案按**实际落点**回填（共享不可写时回落私有目录，不再写死 Documents 路径）。
               val dir = activity.engineManager.mirrorDiagnosticsToShared("snapshot-refresh-failed")
-              activity.applyGuidePhase(GuidePhase.Error, "运行时更新失败（" + diagnosticsLocationHint(dir) + "）")
+              // S1-5：**诊断包路径不进标题**。旧实现把 `diagnosticsLocationHint(dir)`
+              // （「诊断包已存至 /storage/emulated/0/Documents/dshdata/diagnostics/...」）拼进
+              // 18sp 的标题里，在窄屏上把标题撑成三行，而真正该一眼看到的是「失败了」。
+              // 现在标题只说事实，路径挪到 13sp 的副文案里（可换行，且不抢视觉重心）。
+              activity.applyGuidePhase(
+                GuidePhase.Error,
+                "运行时更新失败",
+                diagnosticsLocationHint(dir) + "。可复制该路径或打开控制台查看 engine.log。",
+              )
               activity.showGuide()
             }
             return@Thread
@@ -636,7 +651,12 @@ internal class EngineStartFlow(private val activity: MainActivity) {
         val dir = activity.engineManager.mirrorDiagnosticsToShared("engine-died-during-boot")
         activity.runOnUiThread {
           if (!isCurrentEngineFlow(generation)) return@runOnUiThread
-          activity.applyGuidePhase(GuidePhase.Error, "引擎启动失败（" + diagnosticsLocationHint(dir) + "）")
+          // S1-5：同上——标题只说事实，诊断包路径进副文案。
+          activity.applyGuidePhase(
+            GuidePhase.Error,
+            "引擎启动失败",
+            diagnosticsLocationHint(dir) + "。可复制该路径或打开控制台查看 engine.log。",
+          )
           activity.showGuide()
         }
         onEngineStartTimeout(generation)

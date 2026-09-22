@@ -42,8 +42,39 @@ internal enum class PublicRepoStatus(val wire: String) {
   }
 }
 
-/** 引导页 / 设置面对公共目录的三种展示口径。 */
-internal enum class PublicRepoPresentation { READY, NEEDS_GRANT, WRITE_FAILED }
+/** 引导页 / 设置面对公共目录的四种展示口径。 */
+internal enum class PublicRepoPresentation {
+  /**
+   * 还没探测过（冷启动早期 / 落盘畸形 / 落盘尚不存在）。
+   *
+   * S1-9：**既不能说「已就绪」，也不能劝用户去授权**。旧实现把它并进 NEEDS_GRANT，
+   * 于是**已经授过权的用户**一进首屏就看到「去授权存储」——他点了之后什么也不会变
+   * （授权本来就够），只能怀疑是不是自己点错了。事实是「我们还没探过」。
+   */
+  PENDING,
+  READY,
+  NEEDS_GRANT,
+  WRITE_FAILED,
+}
+
+/**
+ * 存储 chip 的点击动作（S1-8/S1-9；纯函数，JVM 可测）。
+ *
+ * 为什么把它抽出来：旧实现**无论什么状态**点击都走「请求授权」，而唯独 WRITE_FAILED
+ * （授权看着够却写不进去）点它一定没有任何效果——用户手上唯一那个可点的东西是无效的。
+ * 修法不是去掉点击，而是让动作跟着状态走：
+ *  - 未探测 → 立刻再探一次（这是唯一能改变现状的动作）；
+ *  - 需要授权 → 走授权（API 分流在 dirPickerController 里）；
+ *  - 写入失败 → 把**失败详情**复制出来（授权已经够了，用户需要的是拿去反馈/自行排查的原文）。
+ */
+internal enum class StorageChipAction { NONE, PROBE_AGAIN, REQUEST_GRANT, COPY_FAILURE_DETAIL }
+
+internal fun storageChipAction(presentation: PublicRepoPresentation): StorageChipAction = when (presentation) {
+  PublicRepoPresentation.PENDING -> StorageChipAction.PROBE_AGAIN
+  PublicRepoPresentation.READY -> StorageChipAction.NONE
+  PublicRepoPresentation.NEEDS_GRANT -> StorageChipAction.REQUEST_GRANT
+  PublicRepoPresentation.WRITE_FAILED -> StorageChipAction.COPY_FAILURE_DETAIL
+}
 
 internal object PublicRepoProvision {
 
@@ -99,12 +130,15 @@ internal object PublicRepoProvision {
    * 展示口径。**只有 [PublicRepoStatus.OK] 可以映射到 [PublicRepoPresentation.READY]**——
    * 把「尚未探测」（[PublicRepoStatus.UNKNOWN]）或失败渲染成「已就绪」正是本缺陷的文案面
    * （与坑 161「把尚未探测渲染成未就绪」同族，方向相反）。
+   *
+   * S1-9 起 UNKNOWN 走**独立的** [PublicRepoPresentation.PENDING]：它同样不得显示「已就绪」，
+   * 但也不得显示「去授权」——把「还没探过」说成「没授权」是另一种把状态说错的方向。
    */
   fun presentation(status: PublicRepoStatus): PublicRepoPresentation = when (status) {
     PublicRepoStatus.OK -> PublicRepoPresentation.READY
     PublicRepoStatus.NOT_AUTHORIZED -> PublicRepoPresentation.NEEDS_GRANT
     PublicRepoStatus.FAILED -> PublicRepoPresentation.WRITE_FAILED
-    PublicRepoStatus.UNKNOWN -> PublicRepoPresentation.NEEDS_GRANT
+    PublicRepoStatus.UNKNOWN -> PublicRepoPresentation.PENDING
   }
 
   /** 授权动作该走哪条路。 */

@@ -220,18 +220,28 @@ object UpdateChecker {
   fun canInstall(context: Context): Boolean =
     if (android.os.Build.VERSION.SDK_INT >= 26) context.packageManager.canRequestPackageInstalls() else true
 
-  /** 拉起「安装未知应用」授权页（普通 startActivity；返回时 onResume 结算，与目录授权同一惯例）。 */
-  fun requestInstallPermission(activity: android.app.Activity) {
+  /**
+   * 拉起「安装未知应用」授权页（普通 startActivity；返回时 onResume 结算，与目录授权同一惯例）。
+   *
+   * S1-10：**返回是否真的拉起了**。旧实现两级 catch 都失败也不回报，而调用方已经把
+   * 「已打开授权页——开启后返回即自动安装」写进了界面：少数 OEM 上那句承诺是假的，
+   * 用户在那一页等一个永远不会出现的系统页面。判据改成「有路径成功 startActivity 才回 true」。
+   */
+  fun requestInstallPermission(activity: android.app.Activity): Boolean {
     val perApp = Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + activity.packageName))
     try {
       activity.startActivity(perApp)
-    } catch (_: Exception) {
-      // 少数 OEM 无按应用授权页：退化为全局页。
-      try {
-        activity.startActivity(Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES))
-      } catch (_: Exception) {
-        // 无任何入口：留在待装态，用户可再点按钮重试。
-      }
+      return true
+    } catch (e: Exception) {
+      LogCollector.log(TAG, "per-app install-sources page failed: " + (e.message ?: e.javaClass.simpleName))
+    }
+    // 少数 OEM 无按应用授权页：退化为全局页。
+    try {
+      activity.startActivity(Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES))
+      return true
+    } catch (e: Exception) {
+      LogCollector.log(TAG, "global install-sources page failed: " + (e.message ?: e.javaClass.simpleName))
+      return false
     }
   }
 

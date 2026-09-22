@@ -101,10 +101,32 @@ class MainActivity : ComponentActivity() {
   internal var userClosedEngine = false
 
   private val notificationPermission =
-    registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* test channel only */ }
+    registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+      // S1-11：结果如实回执——用户拒绝后下一次「该提醒而没提醒」的原因就是这一下。
+      if (!granted) {
+        Toast.makeText(
+          this,
+          getString(R.string.ds_notify_denied_note),
+          Toast.LENGTH_LONG,
+        ).show()
+      }
+    }
+
+  /** 本次会话是否已经为通知权限弹过一次（S1-11：不重复弹、且只在真需要时弹）。 */
+  private var notifPermissionAsked = false
 
   companion object {
     private const val TAG = "dsh-shell"
+
+    /**
+     * showTestNotification 用的通知渠道 ID。
+     *
+     * **ID 必须是 `dsh`**：它是历史构建已经建在系统里的渠道，改 ID 等于新建一个渠道并丢掉
+     * 用户对该渠道做过的一切设置（重要性/静音/角标）。S1-11 修的是**展示名**——旧实现把
+     * 名称也写成 `dsh`，于是系统通知设置里出现一条叫「dsh」的渠道，用户看不出它属于哪个
+     * 应用的哪类通知；现在名称/说明走 strings.xml（见 ds_notify_channel_name/desc）。
+     */
+    private const val NOTIF_CHANNEL_ID = "dsh"
 
     /**
      * §2.3（0.14.1 块C）：主 WebView 背景色（中性深灰）。未设时为默认白，白屏与「正常空页」
@@ -163,10 +185,12 @@ class MainActivity : ComponentActivity() {
     installCrashMarker()
     // 启动即 TTL 清扫临时工作区（issue #60 F5.1：7 天过期文件自动回收）
     try { FileIncoming.sweepExpired(this) } catch (_: Throwable) {}
-    // 通知权限首启注册（issue #80 反馈实锤 2026-08-24）：Android 13+ POST_NOTIFICATIONS
-    // 默认拒绝——不主动请求则引擎任务完成/授权请求等 NotifyCenter 通知全部静默丢弃。
-    // 授权回调沿用 showTestNotification 的 launch（后果一致：拒绝即静默降级）。
-    registerNotificationAsync()
+    // S1-11：**冷启动不再弹通知权限**。旧实现在 onCreate 里直接 launch：应用刚打开、用户还
+  // 不知道这是干什么的，系统弹窗先来了——没有前置说明，拒绝了也没有任何后果提示，而
+  // 后果其实很重（引擎提问/授权请求没有超时，通知被丢 = 任务永久挂起）。
+    // 现在的口径：**到真的要用通知时才请求**，并且先给一句「为什么」（见 ensureNotificationPermission），
+    // 一次会话最多弹一次。
+    noteNotificationPermissionState()
     val crashFile = File(filesDir, ".crashed")
     if (crashFile.exists()) {
       crashInfo = try { crashFile.readText() } catch (_: Exception) { null }
@@ -405,7 +429,7 @@ class MainActivity : ComponentActivity() {
    *
    * 文件系统操作放后台线程（失败路径可能带 IO 异常），完成后回主线程刷 chip。
    */
-  private fun provisionPublicRepoAndRefreshChip(trigger: String) {
+  internal fun provisionPublicRepoAndRefreshChip(trigger: String) {
     if (!PublicRepoProvision.needsRetry(engineManager.publicRepoStatus())) return
     Thread(
       {
@@ -1108,34 +1132,69 @@ class MainActivity : ComponentActivity() {
   /** 首启注册通知权限（issue #80 实锤 2026-08-24）：Android 13+ POST_NOTIFICATIONS 默认拒绝，
    *  不主动请求则引擎任务完成/授权请求等 NotifyCenter 通知全部静默丢弃。仅在未授予时请求一次
    *  （用户拒绝后不重复打扰；showTestNotification 仍会在用户主动触发时二次请求）。 */
-  private fun registerNotificationAsync() {
+  /**
+   * 冷启动只**记录**通知权限现状，不弹窗（S1-11）。
+   *
+   * 记录本身有用：通知设置页与自检面据此显示「未授予（任务完成不会提醒）」，用户能看到事实，
+   * 而不是在首屏被一个没有上下文的系统弹窗拦住。
+   */
+  private fun noteNotificationPermissionState() {
     if (Build.VERSION.SDK_INT < 33) return
-    if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-      try {
-        notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-      } catch (_: Throwable) {
-        // Activity 未就绪时忽略（下次启动再试）
-      }
+    val granted =
+      checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+    if (!granted) {
+      LogCollector.log(TAG, "notification permission not granted at cold start (no prompt; will ask at need)")
     }
   }
 
+  /**
+   * 需要发通知时才请求权限（S1-11），并**先说明为什么**（S1-12 的另一半）。
+   *
+   * @return 当前是否可用（已授予=可直接发；未授予=调用方必须自己把内容展示出来）。
+   */
+  private fun ensureNotificationPermission(rationale: String): Boolean {
+    if (Build.VERSION.SDK_INT < 33) return true
+    if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return true
+    if (!notifPermissionAsked) {
+      notifPermissionAsked = true
+      // 前置说明：这句话本身就是「为什么要授权」，不再让用户对着一个光秃秃的系统弹窗猜。
+      Toast.makeText(this, rationale, Toast.LENGTH_LONG).show()
+      try {
+        notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+      } catch (_: Throwable) {
+        // Activity 未就绪：忽略（下次真需要时再试）。
+      }
+    }
+    return false
+  }
+
   internal fun showTestNotification(title: String, text: String) {
-    if (Build.VERSION.SDK_INT >= 33 &&
-      checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-    ) {
-      notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+    // S1-12：**权限缺失不得吞掉内容**。旧实现 launch 之后就 return —— 内容消失得无影无踪，
+    // 而调用点都是「引擎重启中」「会话日志已导出」「导出失败」这类用户必须知道的事。
+    // 现在：内容先在应用内以 Toast 落地（这是真正的「不丢」），再顺带说明为什么需要通知权限。
+    if (!ensureNotificationPermission(getString(R.string.ds_notify_permission_rationale))) {
+      Toast.makeText(this, title + "：" + text, Toast.LENGTH_LONG).show()
       return
     }
     val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
     if (Build.VERSION.SDK_INT >= 26) {
-      manager.createNotificationChannel(NotificationChannel("dsh", "dsh", NotificationManager.IMPORTANCE_DEFAULT))
+      // S1-11：渠道名此前与 ID 同为 `dsh`，在系统通知设置里就显示成一个「dsh」——用户看不懂
+      // 这是哪个应用的哪一类通知。ID 保持 `dsh`（既有渠道不可改名换 ID，否则历史设置丢失），
+      // 只把**展示名与说明**写成人话（系统在重建渠道时会更新名称）。
+      manager.createNotificationChannel(
+        NotificationChannel(
+          NOTIF_CHANNEL_ID,
+          getString(R.string.ds_notify_channel_name),
+          NotificationManager.IMPORTANCE_DEFAULT,
+        ).apply { description = getString(R.string.ds_notify_channel_desc) },
+      )
     }
     val pending = android.app.PendingIntent.getActivity(
       this, 0, Intent(this, MainActivity::class.java), android.app.PendingIntent.FLAG_IMMUTABLE,
     )
     manager.notify(
       1,
-      NotificationCompat.Builder(this, "dsh")
+      NotificationCompat.Builder(this, NOTIF_CHANNEL_ID)
         .setSmallIcon(android.R.drawable.stat_notify_chat)
         .setContentTitle(title)
         .setContentText(text)

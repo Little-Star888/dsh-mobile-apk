@@ -36,6 +36,9 @@ class ConsoleActivity : ComponentActivity() {
   /** Last status text (re-pushed on onPageFinished; replays status lost before page load). */
   private var lastStatus: String? = null
 
+  /** S1-18：与 lastStatus 配对的状态，页面重放时同样按状态判就绪。 */
+  private var lastState: ConsoleSession.State = ConsoleSession.State.STARTING
+
   private val sessionListener = object : ConsoleSession.Listener {
     override fun onOutput(text: String) {
       handler.post {
@@ -43,20 +46,30 @@ class ConsoleActivity : ComponentActivity() {
       }
     }
 
-    override fun onStatus(text: String) {
+    override fun onStatus(state: ConsoleSession.State, text: String) {
       lastStatus = text
-      handler.post { pushStatus(text) }
+      lastState = state
+      handler.post { pushStatus(state, text) }
     }
 
     override fun onExit(code: Int) {
       lastStatus = "bash 已退出（code $code）"
-      handler.post { pushStatus(lastStatus!!) }
+      lastState = ConsoleSession.State.EXITED
+      handler.post { pushStatus(ConsoleSession.State.EXITED, lastStatus!!) }
     }
   }
 
-  /** Push status (main thread only). */
-  private fun pushStatus(text: String) {
-    webView.evaluateJavascript("window.__consoleStatus(" + jsString(text) + ")", null)
+  /**
+   * Push status (main thread only).
+   *
+   * S1-18：推的是**状态 + 文案**两个参数，页面按状态判就绪、按文案显示——不再让页面拿文案
+   * 做子串正则（措辞一变就静默错判）。
+   */
+  private fun pushStatus(state: ConsoleSession.State, text: String) {
+    webView.evaluateJavascript(
+      "window.__consoleState && window.__consoleState(" + jsString(state.wire) + "," + jsString(text) + ")",
+      null,
+    )
   }
 
   private fun pushInsets() {
@@ -98,7 +111,7 @@ class ConsoleActivity : ComponentActivity() {
       override fun onPageFinished(view: android.webkit.WebView, url: String) {
         super.onPageFinished(view, url)
         pageReady = true
-        lastStatus?.let { pushStatus(it) }
+        lastStatus?.let { pushStatus(lastState, it) }
         pushInsets()
       }
     }
