@@ -4,10 +4,15 @@
 // 假绿的根因防线（issue #204）：工具成功分支多返回一个未声明键，引擎侧整值校验
 // （dsh/packages/core/tools/src/index.ts 先 snapshotToolValue 再 validateJsonSchemaValue）直接拒绝，
 // 而「编译通过 + 人工看一眼」发现不了。本门禁与 check-protocol-v2.mjs 同构：
-//   1) lib/ 时效检查：任一 src/*.ts 比 lib/*.js 新即拒（旧产物判绿 = 假绿）；
-//   2) 用引擎**同一个函数** validateJsonSchemaValue 校验每个工具在各分支返回值的整值；
-//   3) 断言返回值递归无 undefined 成员（undefined 会被 lossless 物化丢弃，语义与声明不符）；
-//   4) 注册完整性用**源码级**比对：src 的 defineTool({name}) 名字集合 vs 运行时注册名集合，差集 = 0。
+//   1) lib/ 时效检查：任一 src/*.ts 比 lib/*.js 新只是**触发**，真伪由重建哈希裁决
+//      （`scripts/lib/product-freshness.mjs`，0.14.1 W1）——纯 mtime 会把 robocopy/检出/编辑器
+//      触碰误判成「产物过期」，实测 bridge 因此长期被 SKIP = 整插件不被校验；旧产物判绿 = 假绿；
+//   2) 宿主缺 peer 依赖时**如实 SKIP 并计数**（`--require` 下判红，与「引擎校验器缺席」同口径）。
+//      此前该情形是 **ERR_MODULE_NOT_FOUND 直接崩**，聚合链在 check-tool-output-schema 处中止、
+//      后面 20 多条门禁一条都没跑（0.14.1 W1 实锤）——防线被结构性绕过，正是本仓反复在修的形态；
+//   3) 用引擎**同一个函数** validateJsonSchemaValue 校验每个工具在各分支返回值的整值；
+//   4) 断言返回值递归无 undefined 成员（undefined 会被 lossless 物化丢弃，语义与声明不符）；
+//   5) 注册完整性用**源码级**比对：src 的 defineTool({name}) 名字集合 vs 运行时注册名集合，差集 = 0。
 //      ——**禁止**硬编码名单比对：那只能发现工具增删，而 D4 要防的是「defineTool 了但忘了进 return [...]」，
 //      注册集合不变时硬编码名单照样绿（独立复核指出的设计缺陷）。
 //
@@ -33,6 +38,7 @@ import { existsSync, statSync, readdirSync, readFileSync } from 'node:fs'
 import { join, dirname, relative } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawnSync } from 'node:child_process'
+import { stalenessTrigger, arbitrateFreshness } from './lib/product-freshness.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = dirname(HERE)
@@ -40,6 +46,19 @@ const argv = process.argv.slice(2)
 const argOf = (name) => { const i = argv.indexOf('--' + name); return i >= 0 ? argv[i + 1] : undefined }
 const rel = (p) => relative(ROOT, p).replace(/\\/g, '/')
 const fail = (msg) => { console.error('CHECK-TOOL-OUTPUT-SCHEMA FAILED：' + msg); process.exit(1) }
+const REQUIRE = argv.includes('--require')
+
+/**
+ * 从加载失败里取出**缺席的包名**（宿主环境缺口），非环境缺口返回 null。
+ *
+ * 只认 ESM 的 `ERR_MODULE_NOT_FOUND` + 「Cannot find package 'x'」形态：那是「宿主没装这个 peer
+ * 依赖」。文件不存在（Cannot find module）与语法错都不算——那些是产物/源码缺陷，必须判红。
+ */
+const missingPeerDep = (e) => {
+  if (!e || e.code !== 'ERR_MODULE_NOT_FOUND') return null
+  const m = /Cannot find package '([^']+)'/.exec(String(e.message ?? ''))
+  return m === null ? null : m[1]
+}
 
 /**
  * G2b'：堵死「schema 不声明 loadState 即自动免检」的洞（task-16 K-2 的根因）。
@@ -244,24 +263,21 @@ async function drivePlugin(pluginDir, mode) {
     local.push('构建产物缺席：' + rel(LIB) + '（先构建：cd ' + rel(pluginDir) + ' && npm install && npm run build）')
     return { local, tools: [], checked: 0 }
   }
-  const newest = (dir, ext) => {
-    let ms = 0; let file = ''
-    for (const name of readdirSync(dir)) {
-      const full = join(dir, name)
-      const st = statSync(full)
-      if (st.isDirectory() || !name.endsWith(ext)) continue
-      if (st.mtimeMs > ms) { ms = st.mtimeMs; file = name }
+  const trigger = stalenessTrigger(pluginDir)
+  if (trigger.trigger) {
+    // mtime 命中**只是触发**：真伪由重建哈希裁决（见 scripts/lib/product-freshness.mjs 的处方与边界）。
+    // 旧产物判绿 = 假绿，故「陈旧」必须判红；而 mtime 假阳性（robocopy/检出/编辑器触碰）不得让整插件
+    // 无声退出校验面——那是本门禁此前对 bridge 的实际行为。
+    const arb = arbitrateFreshness(pluginDir)
+    if (arb.verdict === 'fresh') {
+      console.log('NOTE  ' + rel(pluginDir) + '：src 比 lib 新但重建逐字节一致（mtime 假阳性，按新鲜继续校验）')
+    } else if (arb.verdict === 'stale') {
+      local.push('构建产物陈旧：' + arb.detail + '（src 已变而 lib 未重建——旧产物判绿即假绿；先跑 cd '
+        + rel(pluginDir) + ' && npm run build）')
+      return { local, tools: [], checked: 0 }
+    } else {
+      return { local, tools: [], checked: 0, skip: '构建产物过期（' + trigger.s.file + ' 比 lib/' + trigger.l.file + ' 新）且重建不可裁决：' + arb.detail + '——本插件本轮不判' }
     }
-    return { ms, file }
-  }
-  const newestTs = () => { let ms = 0; let file = ''; for (const f of allTs) { const t = statSync(f).mtimeMs; if (t > ms) { ms = t; file = f } } return { ms, file: rel(file) } }
-  const s = newestTs()
-  const l = newest(LIB_DIR, '.js')
-  if (s.ms > l.ms) {
-    // 旧产物会让判据在**过时代码**上跑（旧产物判绿 = 假绿）。但工作树里 src 新于 lib 通常是
-    // 别人正在编辑的瞬时态，硬判红会阻塞整条链。故**跳过该插件并如实报告**（不声称它通过），
-    // 而不是判绿——既不假绿，也不把瞬时态当缺陷。
-    return { local, tools: [], checked: 0, skip: '构建产物过期（' + s.file + ' 比 lib/' + l.file + ' 新）——本插件本轮不判' }
   }
 
   const isError = mode === 'error'
@@ -316,7 +332,24 @@ async function drivePlugin(pluginDir, mode) {
     effect: (fn) => { try { return fn?.() } catch { return undefined } },
     on: () => {},
   }
-  const moduleSpec = await import(pathToFileURL(LIB).href)
+  let moduleSpec
+  try {
+    moduleSpec = await import(pathToFileURL(LIB).href)
+  } catch (e) {
+    // 宿主缺 peer 依赖 ≠ 插件缺陷，但也**绝不能**让它以崩溃形态吃掉整条聚合链：本轮实锤
+    // （`plugins/dsh-android-linux-env` → `@dsh-android/dsh-shell-termux` → `@deepseek-ai/dsh-bash-local`
+    // 缺席）是未捕获的 ERR_MODULE_NOT_FOUND 直接终止进程，`--run` 在 29 条里第 6 条就死，
+    // 后面 23 条一条都没跑，而在此之前已发射的条目让人以为"门禁跑了"。
+    // 口径与「引擎校验器缺席」完全一致：无 `--require` 如实 SKIP 并计数；带 `--require`（本地/发布链）
+    // 判红——SKIP 不构成掩盖。
+    const missing = missingPeerDep(e)
+    if (missing !== null) {
+      return { local, tools: [], checked: 0, envGap: '宿主缺 peer 依赖：' + missing + '（' + rel(LIB) + '）' }
+    }
+    // 其余加载/求值错误是**产物缺陷**（语法错、顶层抛错），照旧判红。
+    local.push('插件产物加载失败（' + (e && e.code ? e.code + ' ' : '') + (e && e.message) + '）')
+    return { local, tools: [], checked: 0 }
+  }
   if (typeof moduleSpec.apply !== 'function') {
     // 无 apply 导出 = 该包不是插件入口（例如纯库/注入层）；如实 SKIP，不判红也不假装通过。
     return { local, tools: [], checked: 0, skip: 'lib 无 apply 导出（非插件入口）' }
@@ -483,6 +516,17 @@ const skipped = []
 for (const dir of pluginDirs) {
   const name = rel(dir)
   const r = await drivePlugin(dir, 'loaded')
+  if (r.envGap !== undefined) {
+    // 环境缺口：无 --require 如实 SKIP 并计数（CI 净检出必然命中，本机未装依赖也命中）；
+    // --require（本地链与发布链）下判红——不得以 SKIP 冒充绿。与「引擎校验器缺席」同口径。
+    if (REQUIRE) {
+      problems.push(name + '：' + r.envGap + ' —— --require 下环境缺口判红（先按 docs/AGENTS/build-and-env.md 装齐 peer 依赖）')
+      continue
+    }
+    skipped.push(name + ': ' + r.envGap)
+    console.log('SKIP(#' + skipped.length + ') ' + name + '（' + r.envGap + '）')
+    continue
+  }
   if (r.skip !== undefined) {
     // 非工具插件 / 产物过期：如实报告 SKIP，既不判红也不假装通过（SKIP 计数须可见）。
     // 【0.14.1 修正】此前本行发射的 SKIP 文案**无计数器**，违反 check-gate-skips 的
@@ -524,7 +568,7 @@ for (const dir of pluginDirs) {
 }
 
 console.log('运行时校验分支数: ' + totalChecked + '（覆盖插件 ' + covered + ' 个，SKIP ' + skipped.length + ' 个）')
-if (skipped.length > 0) for (const s of skipped) console.log('SKIP(#' + skipped.length + ') ' + s)
+if (skipped.length > 0) skipped.forEach((s, i) => console.log('SKIP(#' + (i + 1) + ') ' + s))
 console.log('SKIP=' + skipped.length)
 if (problems.length > 0) {
   console.error('CHECK-TOOL-OUTPUT-SCHEMA FAILED（' + problems.length + ' 项）：')
