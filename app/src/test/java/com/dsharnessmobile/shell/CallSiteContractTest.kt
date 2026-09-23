@@ -642,4 +642,31 @@ class BootDiagnosticsContractTest {
     assertTrue("§2.3/§2.4：四条诊断必须都走 writeBootDiag（实测 $funnelCalls 处，要求 ≥ 4）", funnelCalls >= 4)
     assertFalse("§2.3/§2.4：不得在 MainActivity 直写 boot-diag 文件", code.contains("boot-diag.log"))
   }
+
+  /**
+   * 坑 170：`seedPhoneControlPreset` 必须容忍「SKILL.md 尚不存在」——干净安装的常态。
+   *
+   * `File.readText()` 在文件缺席时抛 `FileNotFoundException`（不是返回空串），该异常被函数外层
+   * `catch (Throwable)` 吞掉 ⇒ 函数当场返回，`customSkillDirs` 注入 / `agent.cordis.yml` 拷贝 /
+   * `preset.yml` 写入一步都跑不到；而幂等早退判据正是 `preset.yml` ⇒ 每次启动从同一行重炸，
+   * 预设恒显「加载失败：composition file agent.cordis.yml is missing」。
+   *
+   * 该函数依赖 `Context`（`context.filesDir` / `context.assets`），纯 JVM 行为测试拿不到，
+   * 故按本类口径断言**真源表达式**；撤掉守卫即红。
+   */
+  @Test
+  fun phoneControlSeedingToleratesAnAbsentSkillFile() {
+    val body = memberBody(
+      codeOnly(source("EngineManager.kt")),
+      "private fun seedPhoneControlPreset(",
+    )
+    assertTrue(
+      "坑 170：读取 SKILL.md 前必须先判在场，缺席视同需要刷新",
+      body.contains("if (skillFile.isFile) skillFile.readText() else null"),
+    )
+    assertFalse(
+      "坑 170：不得再出现未判在场的裸读取（缺席即抛 ENOENT，会中断整个播种）",
+      body.contains("skillFile.readText().trim() != PHONE_CONTROL_SKILL"),
+    )
+  }
 }

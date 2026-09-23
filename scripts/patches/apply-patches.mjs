@@ -588,6 +588,103 @@ const IMPLS = {
   },
 
 
+  // ── fs-local-link-F8：文件写工具 createIfAbsent 的 link(2) 回退（2026-09-22 apk issue #246，scope=engine）──
+  // 根因：dsh-fs-observation-policy 对「未观察过/确认不存在」的路径判写意图 createIfAbsent，
+  // dsh-fs-local 的 writeFileAtomic 拿到该意图后**只能**用 link(2) 做 no-replace 发布，失败即抛，
+  // 该分支没有任何回退。Android 应用域恒拒 hardlink（EACCES，denial 被 dontaudit 静默）⇒ 真机上
+  // write 工具**建不了任何新文件**（覆盖已存在文件走 else 的 rename，正常）——表现为「只能改不能建」。
+  // 与坑位 #77 / F2 / F5 同一 sepolicy 限制，只是站点不同；本文件是它的第 4 个站点。
+  // 历史：0.13.3 曾以「上游 0.1.2-rc.1 已原生覆盖 rename 回退」为由退役 fs-local-index.js，
+  // 但该结论对当前的 createIfAbsent 站点不成立（0.1.5-rc.1 实测：全文仅此一处 link 调用，
+  // 且无任何 EACCES/EPERM/ENOTSUP 回退）——本补丁即补回该覆盖。
+  // 不变量：EACCES/EPERM/ENOTSUP 时改用 O_EXCL 占位 + rename 等价实现 no-replace
+  // （直接照抄 else 分支的裸 rename 会静默覆盖已存在目标，丢掉 link 的独占语义）。
+  'fs-local-link-F8': {
+    file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-fs-local/lib/index.js',
+    scope: 'engine',
+    check: (s) => s.includes('dsh-mobile exclusive create (F8)')
+      && s.includes('dsh-mobile link->rename fallback (F8)')
+      && s.includes('dshMobilePublishExclusive('),
+    apply: (s) => {
+      if (s.includes('dsh-mobile exclusive create (F8)')
+        && s.includes('dsh-mobile link->rename fallback (F8)')
+        && s.includes('dshMobilePublishExclusive(')) return s
+
+      // ① 站点：createIfAbsent 的 link 失败分支（原文失败即抛，无回退）。
+      const SITE_OLD = [
+        '\t\tif (createIfAbsent !== void 0) try {',
+        '\t\t\tawait linkFile(tempPath, absolutePath);',
+        '\t\t} catch (error) {',
+        '\t\t\tawait throwGuardedCreateFailure(error, absolutePath, createIfAbsent.displayPath, inspectPublicationTarget);',
+        '\t\t}',
+      ].join('\n')
+      const SITE_NEW = [
+        '\t\tif (createIfAbsent !== void 0) try {',
+        '\t\t\tawait linkFile(tempPath, absolutePath);',
+        '\t\t} catch (error) {',
+        '\t\t\t/* dsh-mobile link->rename fallback (F8): Android app-private dirs reject link(2) (EACCES). */',
+        '\t\t\tif (!(error instanceof Error && "code" in error && (error.code === "EACCES" || error.code === "EPERM" || error.code === "ENOTSUP"))) {',
+        '\t\t\t\tawait throwGuardedCreateFailure(error, absolutePath, createIfAbsent.displayPath, inspectPublicationTarget);',
+        '\t\t\t} else {',
+        '\t\t\t\tawait dshMobilePublishExclusive(tempPath, absolutePath, createIfAbsent.displayPath, inspectPublicationTarget, internals);',
+        '\t\t\t}',
+        '\t\t}',
+      ].join('\n')
+      if (!s.includes(SITE_OLD)) throw new Error('fs-local-link 锚点未命中：createIfAbsent link 失败分支')
+      s = s.replace(SITE_OLD, SITE_NEW)
+
+      // ② 等价实现：O_EXCL 占位 + rename（保住 no-replace 语义）。
+      const GUARD_TAIL = [
+        '\tthrow new FsError(`cannot write "${displayPath}": ${errorMessage(error)}`, "FS_IO_ERROR", { cause: error });',
+        '}',
+      ].join('\n')
+      const HELPER = [
+        '',
+        '/**',
+        ' * dsh-mobile exclusive create (F8): Android app-private directories reject link(2) with EACCES,',
+        ' * so the createIfAbsent publication cannot use the hard-link no-replace primitive at all.',
+        ' * Re-implement it with an O_EXCL placeholder plus a rename, which keeps the semantics the hard',
+        ' * link provided: the loser of a concurrent create gets EEXIST and reports the same',
+        ' * "cannot overwrite existing" refusal, and a failed rename releases the placeholder so a',
+        ' * zero-byte target never survives to make every later create lose the claim race.',
+        ' * @param tempPath - the fully written and synced staging file to publish.',
+        ' * @param absolutePath - destination that must not already exist.',
+        ' * @param displayPath - user-facing path used by the refusal messages.',
+        ' * @param inspectPublicationTarget - metadata probe used by the refusal path.',
+        ' * @param internals - test hook for pinning the open/rename/rm primitives.',
+        ' */',
+        'async function dshMobilePublishExclusive(tempPath, absolutePath, displayPath, inspectPublicationTarget, internals = {}) {',
+        '\tconst openFile = internals.openFile ?? open;',
+        '\tconst renameFile = internals.renameFile ?? rename;',
+        '\tconst removeFile = internals.removeFile ?? rm;',
+        '\tlet guard;',
+        '\ttry {',
+        '\t\tguard = await openFile(absolutePath, "wx");',
+        '\t} catch (error) {',
+        '\t\t/* EEXIST and every other failure keep the caller\'s original refusal path. */',
+        '\t\tawait throwGuardedCreateFailure(error, absolutePath, displayPath, inspectPublicationTarget);',
+        '\t}',
+        '\tawait guard.close();',
+        '\ttry {',
+        '\t\tawait renameFile(tempPath, absolutePath);',
+        '\t} catch (error) {',
+        '\t\t/* Release the placeholder: a leftover zero-byte target would win every later claim. */',
+        '\t\tawait removeFile(absolutePath, { force: true }).catch(() => {});',
+        '\t\tthrow error;',
+        '\t}',
+        '}',
+      ].join('\n')
+      const GUARD_TAIL_NEW = GUARD_TAIL + '\n' + HELPER
+      if (!s.includes(GUARD_TAIL)) throw new Error('fs-local-link 锚点未命中：throwGuardedCreateFailure 收尾')
+      s = s.replace(GUARD_TAIL, GUARD_TAIL_NEW)
+
+      if (!s.includes('dsh-mobile exclusive create (F8)') || !s.includes('dshMobilePublishExclusive(')) {
+        throw new Error('fs-local-link 复核失败——不写回')
+      }
+      return s
+    },
+  },
+
   // ── spj-migration-link-F5：会话迁移发布的 link(2) 回退（2026-09-11 apk issue #154，scope=engine）──
   // 根因：0.1.5 起会话格式推到 v3，旧会话（header version:0）首次打开必走 v0→v3 迁移，最后一步
   // publishCurrentExclusive() 用 link(2) 原子发布；Android 应用域 SELinux 拒绝 hardlink（EACCES，
