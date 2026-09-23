@@ -1,6 +1,6 @@
 # RUNTIME-PATCHES.md — assets/patched/ 运行时补丁登记
 
-> 职责：`app/src/main/assets/patched/` 逐文件的权威登记（0.13.7fx-1 起 **2 个在册**：attachment-local、session-persistence-jsonl）——消费方 `EngineManager.applyRuntimePatches()`（EngineManager.kt:636），逐文件目标快照路径/作用/来源线索与维护约定。在册字节数与注册行号 2026-09-14 当场 ls/grep 实测；退役批次见 §5。
+> 职责：`app/src/main/assets/patched/` 逐文件的权威登记（0.13.7fx-1 起 **2 个在册**，0.14.1 起 **3 个在册**：attachment-local、session-persistence-jsonl、fs-local）——消费方 `EngineManager.applyRuntimePatches()`（EngineManager.kt:636），逐文件目标快照路径/作用/来源线索与维护约定。在册字节数与注册行号 2026-09-14 当场 ls/grep 实测；退役批次见 §5。
 
 ## 1. 机制（EngineManager.kt）
 
@@ -20,8 +20,9 @@
 |---|---|---|---|
 | attachment-local-index.js（**47,321** 已从快照重出 2026-09-15） | dsh-attachment-local/lib/index.js（:639） | 生效 | 0.13.7 重出（引擎 0.1.5-rc.1）+ 0.14.0 review C1：**与构建期 `attach-durable-F2` 逐字节同源**（F2 已扩为三件套：祖先 fsync 守卫 + 两处 link(2)→rename 回退 + unlink ENOENT 容忍）；内含图片归一化 2048 降采样上限（`DEFAULT_NORMALIZED_IMAGE_MAX_DIMENSION = 2048`）。补丁判定走内容指纹而非内嵌标记 |
 | session-persistence-jsonl-index.js（**137,514** 已从快照重出 2026-09-15） | dsh-session-persistence-jsonl/lib/index.js（:641） | 生效 | 0.13.7 重出 + 0.13.8-b 追加 F5/F7（与构建期同源）：两处 link(2) 站点带 EACCES/EPERM/ENOTSUP → rename 回退，发布独占语义由模块级 `dshMobileClaimExclusive/ReleaseClaim` 恢复（O_EXCL 占位 + 失败回收）。**0.14.0 review C1 实锤**：v0.14.0-preview 资产曾是「内联占位 + helper 占位」双占位坏版本（恒 EEXIST 恒 false，旧会话迁移永久失败并留 0 字节毒文件）——修复 = F7 补丁增加 v1→v2 收敛分支 + 本资产从快照重出 + 门禁升级为逐字节比对。行为回归 `scripts/patches/tests/{spj-migration-link-f5,publish-exclusive-reclaim}.test.mjs`（后者支持 `--asset` 直测资产本体） |
+| fs-local-index.js（**41,407** 0.1.5-rc.1 重出 2026-09-22） | dsh-fs-local/lib/index.js（:767） | 生效 | **0.14.1 重新入册**（apk issue #246）：`writeFileAtomic` 的 `createIfAbsent` 发布站点是全包唯一的 `link(2)` 调用，且该分支失败即抛、无任何回退 → Android 应用域恒拒 hardlink ⇒ 真机上 `write` 工具建不了任何新文件（覆盖已存在文件走 `rename`，正常）。与构建期 `fs-local-link-F8` 逐字节同源。**本资产是 0.13.3 退役资产的重新入册**——当年退役理由「上游 0.1.2-rc.1 已原生覆盖 rename 回退」对 `createIfAbsent` 站点不成立（0.1.5-rc.1 实测：全文仅此一处 `link` 调用，`EACCES`/`EPERM`/`ENOTSUP` 无任何处理）。补丁判定走内容指纹而非内嵌标记。行为回归 `scripts/patches/tests/fs-local-link-f8.test.mjs`（支持 `--asset` 直测资产本体） |
 
-已退役资产（不在 `assets/patched/`，`applyAssetPatch` 注册行同步移除，勿再引用）：`primitives-index.js`、`fs-local-index.js`（0.13.3 批退役，d377abc——link(2) 回退族改由构建期补丁承担）；`web-frontend-index.html`（0.13.7fx-1 退役，§8）；`llm-deepseek-index.js`（rc.2 起遗留死资产，随重出批删除）。
+已退役资产（不在 `assets/patched/`，`applyAssetPatch` 注册行同步移除，勿再引用）：`primitives-index.js`、`fs-local-index.js`（0.13.3 批退役，d377abc——link(2) 回退族改由构建期补丁承担；**0.14.1 已重新入册，见 §2 的 fs-local-index.js 行与 §7.1 的 `fs-local-link-F8`**——退役时该回退并未真正落到构建期补丁，`createIfAbsent` 站点成了覆盖空洞）；`web-frontend-index.html`（0.13.7fx-1 退役，§8）；`llm-deepseek-index.js`（rc.2 起遗留死资产，随重出批删除）。
 
 ## 3. 维护约定（硬约束）
 
@@ -48,6 +49,7 @@
 | 2026-08-23 前端审核 CRITICAL#4 | 引擎升级换 bundle hash → patched 模板旧引用 404 白屏；加 hashAdaptive（:435-438、:471-490） |
 | v0.12.4（rc8）迁移批 | onImagePicked/describeImage/bundle-hardening/textzoom 四补丁删除（上游 rc.8 原生覆盖 + textzoom 功能取消）；textzoom 桥方法保留（:413-416） |
 | rc.1 → rc.2 链路 | rc.1 丢 rename 回退 → fs-local/session-persistence-jsonl 两补丁补回；rc.2 原生捆绑 vision-exp → llm-deepseek 补丁退役为遗留资产（:399-425） |
+| 0.14.1 文件写工具链路 | `write` 工具在 Android 上**建不了新文件**（`createIfAbsent` 的 `link(2)` 无回退，apk issue #246）→ fs-local 重新入册 + 构建期 `fs-local-link-F8`。教训：退役理由「上游已原生覆盖」必须**逐站点**核对，不能按文件整体判定——上游把回退加在替换路径上，而新增的独占创建路径又裸用了 `link(2)` |
 | 目标包缺席语义 | 上游裁包（如某版本依赖图变动）时跳过而非报错/硬写，避免死覆盖（:440-446） |
 
 ## 6. 与协调仓 scripts/patches/ 的分工边界
@@ -55,7 +57,7 @@
 **协调仓 `scripts/patches/`（apply-patches.mjs + registry.json + data/compat-map.json）是快照注入链的构建期补丁框架**，按 `scope` 分两路：
 - `scope: vendor` 打 vendor 固化插件（dshmarketplace-plugin A-D + **U2 exact-route browser-session 鉴权**、dsh-undo-savepoint E1-E8 + **U1 `/api/undo` connection/token 鉴权与 no-store**），在 `build-apk-013.ps1` 阶段施加；对应行为回归在 `scripts/patches/tests/{undo-route-auth,market-route-auth}.test.mjs`。
 - `scripts/check-api-route-auth.mjs` 与 `api-route-auth-policy.json` 不属于运行时 asset：它们扫描所有 mobile-owned WebServer registration source，要求 protected guard 或窄公开白名单，并在本地/云端/CI/发布链接线。file-incoming 的 queue、claim、content、complete、clean 五个 exact route 均属于 protected 面；content 只接受进程内 ticket，不能返回源绝对路径。
-- `scope: engine` 打引擎树内上游包（当前全量以 §7.1 表为准：attach-durable-F2 / flock-android-F3 / atomic-stale-lock-F4 / spj-migration-link-F5 / publish-exclusive-F7 / reference-drill-F6 / boot-pending-G1 / pi-toolcall-G2 / perf-patch-reload-N1 / perf-compile-cache-flush-N2 / combo-lazy-A4 / combo-cache-A3 / arkweb-resource-protocol-H1 / external-draft-conversation-seam-J1），在 `build-snapshot-013.mjs` 0f 步施加并逐个复查 marker。
+- `scope: engine` 打引擎树内上游包（当前全量以 §7.1 表为准：attach-durable-F2 / **fs-local-link-F8** / flock-android-F3 / atomic-stale-lock-F4 / spj-migration-link-F5 / publish-exclusive-F7 / reference-drill-F6 / boot-pending-G1 / pi-toolcall-G2 / perf-patch-reload-N1 / perf-compile-cache-flush-N2 / combo-lazy-A4 / combo-cache-A3 / arkweb-resource-protocol-H1 / external-draft-conversation-seam-J1），在 `build-snapshot-013.mjs` 0f 步施加并逐个复查 marker。
 
 **与本节 assets/patched/ 的分界**：同一份引擎文件的修复若能在构建期落地（随发行快照固化），优先走 `scope: engine`；运行时 asset 只承担「必须每次启动前覆盖」或「与引擎版本无关的壳侧定制」（见 §3-2）。已退役：pi-drift-F1（上游 0.1.5 原生 strict/deferred 校验）。**assets/patched/ 是设备端运行时补丁**——壳在每次引擎启动前对快照内上游引擎包做覆盖。两者层不同、目标不同、幂等机制不同（构建期 = registry 幂等标记；运行时 = 内容指纹），勿混用；构建期补丁登记见协调仓 scripts/patches/README.md 与 registry.json。
 
@@ -91,6 +93,7 @@
 | `attach-durable-F2` | `dsh-attachment-local/lib/index.js` | 与运行时 asset **同源**：附件祖先 fsync 对 Android 应用私有祖先（`/data/user/0`）EACCES 即止步。构建期补丁服务发布快照，运行时 asset 服务「快照刷新后重施加」——两者内容一致才不会互相回退 |
 | `flock-android-F3` | `node-addon-system/lib/flock.js` | 0.1.5 新增的会话写锁只有 darwin/linux 预编译 → Android 上 `ERR_FLOCK_UNSUPPORTED_PLATFORM` 让整树 boot 失败；按上游 browser-worker 先例 stub 为立即成功（单进程宿主）+ 一次性告警 |
 | `atomic-stale-lock-F4` | `dsh-atomic-write/lib/index.js` | 孤儿 `<file>.lock` 回收（pid 已消失 + 二次核验一致才删，每次获取最多一次）；行为回归 `node scripts/patches/tests/atomic-stale-lock.test.mjs` |
+| `fs-local-link-F8` | `dsh-fs-local/lib/index.js` | 文件写工具 `createIfAbsent` 发布的 `link(2)` 回退（apk issue #246）：Android 应用域恒拒 hardlink ⇒ `write` 工具建不了新文件。`EACCES`/`EPERM`/`ENOTSUP` 时改用 **O_EXCL 占位 + rename** 等价实现 no-replace（**不能裸用 rename**——那会静默覆盖并发创建者的文件，丢掉 `link` 的独占语义）：输家仍得 `EEXIST` 与同一 `cannot overwrite existing` 拒绝文案；`rename` 失败回收占位，防 0 字节残留让之后每次创建都输掉占位竞争。运行时 asset `fs-local-index.js` 与之**同源**。行为回归 `node scripts/patches/tests/fs-local-link-f8.test.mjs`（fixture = 0.1.5-rc.1 产物） |
 | `spj-migration-link-F5` | `dsh-session-persistence-jsonl/lib/index.js` | 会话迁移发布（publishCurrentExclusive，v0→v3 必经）与 materialize 两处 link(2) 在 Android SELinux 拒 hardlink（EACCES/EPERM/ENOTSUP）时改用模块顶层 rename（apk #154）；运行时 asset `session-persistence-jsonl-index.js` 与之**同源**。行为回归 `node scripts/patches/tests/spj-migration-link-f5.test.mjs`（fixture = 0.1.5-rc.1 产物） |
 | `publish-exclusive-F7` | `dsh-session-persistence-jsonl/lib/index.js` | 发布独占语义找回：F5 的 rename 回退会**静默替换**已存在目标 → O_EXCL 原子占位抽成模块级小函数，F5 两站共用（publish 站输家 return false；materialize 站输家抛 EEXIST），rename 失败一律 unlink 回收占位（防 0 字节残留让之后每次发布都输掉竞争）。依赖 F5，行为回归 `node scripts/patches/tests/publish-exclusive-reclaim.test.mjs`（apk #170 / FX-207.1+207.2） |
 | `boot-pending-G1` | `dsh-app-boot/lib/index.js` | 非官方包 pending 降级为告警并继续启动（第三方插件 inject 了 client-only 服务 → 永久 pending → 整树 boot 失败）；FAILED 与官方包 pending 仍致命（0.13.5 W1b / apk #126 P3） |

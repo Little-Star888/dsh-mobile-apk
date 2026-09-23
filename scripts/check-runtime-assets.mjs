@@ -11,7 +11,7 @@
 // 旧判据只比 registry marker——0.14.0-preview 的双占位坏资产（F7 v1：内联 open("wx") 后又调
 // helper 占位 → 恒 EEXIST 恒 false，旧会话迁移永久失败）同时含两个 marker，被整条门禁放行；
 // 逐字节比对没有这种回旋空间（marker 趋同但字节分叉 = 必红）。
-// 另对在册资产跑行为回归（F7 → publish-exclusive-reclaim.test.mjs --asset），锁「改完还能跑」。
+// 另对在册资产跑行为回归（F7 → publish-exclusive-reclaim.test.mjs --asset；F8 同名法），锁「改完还能跑」。
 //
 // FX-208.1（0.13.8-b 批 B2）：旧实现「快照缺席即 SKIP exit 0」把构建机状态变成了门禁结果。
 // 现支持 `--require`：构建链/发布链调用时，快照/资产/registry 任一缺席即**失败**（不得 SKIP）。
@@ -94,6 +94,7 @@ const sha256 = (buf) => createHash('sha256').update(buf).digest('hex')
 /** 在册资产的行为回归（review C1）：直接对资产正文本体跑，不重新施加补丁。 */
 const BEHAVIOR_TESTS = [
   { asset: 'session-persistence-jsonl-index.js', test: 'publish-exclusive-reclaim.test.mjs' },
+  { asset: 'fs-local-index.js', test: 'fs-local-link-f8.test.mjs' },
 ]
 
 let checked = 0
