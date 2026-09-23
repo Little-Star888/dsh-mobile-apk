@@ -1,13 +1,13 @@
 {
-  "baseline": 18490,
+  "baseline": 18528,
   "perPlugin": {
     "dsh-android-bridge": {
       "count": 4,
-      "bytes": 1459
+      "bytes": 1464
     },
     "dsh-android-manage": {
       "count": 14,
-      "bytes": 7864
+      "bytes": 7897
     },
     "dsh-android-browser": {
       "count": 19,
@@ -35,5 +35,13 @@
     "phone",
     "browser",
     "virtual-display"
+  ],
+  "visibleTools": [
+    "android_capabilities",
+    "android_env_recipe",
+    "android_file_incoming_status",
+    "android_toolchain_status",
+    "model_capability_apply",
+    "model_capability_probe"
   ]
 }
