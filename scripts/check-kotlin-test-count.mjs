@@ -23,7 +23,7 @@
 //   node scripts/check-kotlin-test-count.mjs            # 判据 A + B（结果须已存在且新鲜）
 //   node scripts/check-kotlin-test-count.mjs --update-baseline   # 基线升档（只允许升）
 //   node scripts/check-kotlin-test-count.mjs --self-test         # 反向对照（见下）
-//   node scripts/check-kotlin-test-count.mjs --allow-missing     # 无结果时 SKIP 而非判红
+//   node scripts/check-kotlin-test-count.mjs --allow-missing     # 仅「无结果」时 SKIP 而非判红（陈旧度仍走 gradle 仲裁）
 //                                                                # （供无 gradle 的环境；SKIP 计数且不计入绿）
 //
 // 退出码：0 = 通过（或显式 SKIP）；1 = 判红；2 = 用法/环境错误。
@@ -403,7 +403,10 @@ if (argv.includes('--self-test')) {
   // H-2：mtime 只是**触发**。一旦它说陈旧，先问 gradle（唯一权威的内容哈希判据）再决定红/绿。
   const staleByMtime = Object.values(results).some((r) => r.mtimeMs < srcMtimeMs)
   let adjudicated = null
-  if (staleByMtime && !SKIP_REASON) {
+  // --allow-missing 只放宽「无结果」（上面那条路径）；陈旧度仲裁不受它影响——
+  // 否则打包链（build-apk-013.ps1 带 --allow-missing 调本门禁）会在任何一次干净检出、
+  // 重新物化工作树之后判红，而真相本可由 gradle 内容哈希判明（0.14.1 发版链实测）。
+  if (staleByMtime) {
     adjudicated = arbitrateStaleness()
   }
   // 仲裁放行（内容等价或已刷新）时，用仲裁结果替代 mtime 判据：把 srcMtimeMs 归零即「不按 mtime 判红」。
