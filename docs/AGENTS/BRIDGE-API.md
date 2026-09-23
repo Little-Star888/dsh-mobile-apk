@@ -114,7 +114,7 @@ cd ..\plugins\dsh-android-<pkg> && npm run build
 | **EngineManager.kt** | 引擎总管：解压/指纹/环境/进程/补丁 | `shellEnv()`：PATH/LD_LIBRARY_PATH/HOME/DSH_HOME/TMPDIR/LD_PRELOAD(+termux-exec force)/TERMUX__PREFIX/SSL_CERT_FILE/DSH_ADB_*/DSH_ADB_FULLACCESS（=壳侧 fullAccess() 同源）/密钥注入；`refreshSnapshot` 指纹差异→备份→重解压→还原用户数据（白名单：sessions/storages/attachments/credentials/settings 等，**profiles 不回灌、跟随快照**）；**`snapshotRefreshing` companion 级闸门（0.13.2-fix 三批）**：刷新期 startEngine 直接跳过——看门狗自愈路径无此闸门时会拿「解压到一半的运行时」拉引擎（实例分属 MainActivity/EngineService，标志必须挂 companion，同 STARTING CAS 道理）；`killExistingEngine`（destroyForcibly+pkill bin.js）；90s 冷却窗探活绕过 |
 | **EngineService.kt** | 前台服务 + 看门狗 | watchdog 5s 探活 + UndoGate 触发 + 唤醒锁续期/释放 + onTaskRemoved 清理（F5 生命礼仪） |
 | **MainActivity.kt** | 主 WebView、隔离 BrowserHost、桥接线与意图处理 | `FileIncoming.processIncomingIntent`（VIEW/SEND→POST `/api/android/file-incoming`）；BrowserHost 按生命周期暂停/销毁；AndroidBridge 接线含 ScreenScope、BrowserHost、虚拟屏与 BackGate callbacks（`addJavascriptInterface(..., "dshBackBridge")`）|
-| **AndroidBridge.kt** | `window.androidBridge` 协议 v1（方法计数由 `check-bridge-symmetry.mjs` 从源码守） | 设置/路径/授权族（`getAdbState`/`setAdbPair`/`adbShell`/`openPathChooser`/`settingsPath`…）+ `get/setScreenScope`（用户设置唯一写面）+ `browserHostStatus/show/hide/reload/bounds/viewport/close/identity`（后两个此前漏记，0.14.1 审查 §3.5-M3 更正） + `vdisplayStatus/Create/Destroy/LaunchSettingsProbe/BackProbe/Bounds` + `a11yStatus/openA11ySettings/unlockRestrictedSettings` |
+| **AndroidBridge.kt** | `window.androidBridge` 协议 v1（方法计数由 `check-bridge-symmetry.mjs` 从源码守） | 设置/路径/授权族（`getAdbState`/`setAdbPair`/`adbShell`/`openPathChooser`/`settingsPath`…）+ `get/setScreenScope`（用户设置唯一写面）+ `browserHostStatus/show/hide/reload/bounds/viewport/close/identity`（后两个此前漏记，0.14.1 审查 §3.5-M3 更正） + `vdisplayStatus/Create/Destroy/LaunchSettingsProbe/BackProbe/Bounds` + `a11yStatus/openA11ySettings/unlockRestrictedSettings` + `shizukuStatus/openShizukuManager/openExternalLink`（0.14.1 Shizuku 引导面） |
 | **SnapshotExtractor.kt** | tar 解压（x-zip→filesDir、symlink、exec 属性戳印）+ **zip-slip 防护**（resolveEntry 拒绝 .. / 绝对路径 / 越界 symlink） | `extract()` |
 | **UpdateManager.kt** | 在线快照更新（第一版） | usr→usr-old 两步切换 + 指纹写 |
 | **WatchdogV2.kt** | 引擎看门狗（v2） | 连续失败熔断；boot 恢复用户同意状态 |
@@ -160,8 +160,40 @@ cd ..\plugins\dsh-android-<pkg> && npm run build
 
 - `a11yStatus()`：无障碍控制通道状态 JSON `{enabled,label,sdk,restrictedSettingsApplies,hint,tokenConfigured}`（壳侧 `DeviceControlService.statusJson`）。
 - `openA11ySettings()`：官方 Intent `Settings.ACTION_ACCESSIBILITY_SETTINGS` 跳系统无障碍页（失败回退 `ACTION_SETTINGS` + Toast 引导）。
-- `unlockRestrictedSettings()`：Android 13+ 一键解锁受限设置（`appops set <pkg> ACCESS_RESTRICTED_SETTINGS allow`，走壳侧 ADB 通道；未授权/未配对失败关闭，返回 `{ok,message}`）。
+- `unlockRestrictedSettings()`：Android 13+ 一键解锁受限设置（`appops set <pkg> ACCESS_RESTRICTED_SETTINGS allow`，**0.14.0 起走 Shizuku 特权 shell**——内置 adb 已退役，旧文写的「壳侧 ADB 通道」是遗留措辞；未授权/未就绪失败关闭，返回 `{ok,message}`）。
 - 引擎侧只读状态端点 `/api/android/privilege/status` 新增 `control:{a11yEnabled,queue,tokenConfigured}` 与工具 `android_privilege_status` 的 `gates`/`control` 字段。
+
+## 0.14.1 增量（Shizuku 引导面与外部链接通道，2026-09-22）
+
+> 背景：0.14.1 UI 审查发现设置页「手机控制」的 Shizuku 区块**读的是 `vdisplayStatus()`**——
+> 标题写「Shizuku 特权通道」，内容却是虚拟屏状态码与 displayId；而插件下发给模型的引导语是
+> 「到设置页「手机控制」安装、启动并授权 Shizuku」，那一页却一个入口都没有（死循环）。
+> 本节是补上入口之后的桥面增量。
+
+| 方向 | 方法 | 位置 | 说明 |
+|---|---|---|---|
+| 页面 → 壳 | `shizukuStatus()` | AndroidBridge → MainActivity → `ShizukuTransport.kickBind` + `status` | Shizuku 特权通道**真实状态** JSON：`ok/installed/running/granted/bound/binding/bindAttempts/bindAgeMs/lastError/code/guidance`。**读路径自带自愈**（已装+已运行+已授权而未绑定时发起一次后台绑定并立即返回，下一次 2s 轮询收敛；绝不阻塞 UI 轮询路径）。页面的「打开 Shizuku」是否可点由 `installed` 决定——这是「装没装」的唯一事实来源 |
+| 页面 → 壳 | `openShizukuManager()` | AndroidBridge → MainActivity → `ExternalLinks.openShizukuManager` | 拉起 Shizuku 管理器界面（`getLaunchIntentForPackage("moe.shizuku.privileged.api")`，不硬编码 Activity 名）。未安装 → `{"ok":false,"reason":"not-installed"}`；**不做任何隐式安装/授权**（授权只能由用户在 Shizuku 内完成） |
+| 页面 → 壳 | `openExternalLink(key)` | AndroidBridge → MainActivity → `ExternalLinks.open` | 外部链接的唯一出口。`key ∈ {shizuku-download, shizuku-tutorial}`，**URL 表在壳侧 `ExternalLinks.kt`，页面不传 URL**（页面内容按不可信处理，避免把「拉起任意 Intent」的能力交给页面）。两个 key 共用同一条通道。返回 `{ok, reason?}`，reason ∈ `unknown-key` / `insecure-url` / `no-handler` / 异常类名；登记值一律 https |
+| 同上（页面消费） | — | `dsh-client-ui-responsive/src/client/dev-section/phone-control.tsx` | 「下载 Shizuku」与「点击查看教程」→ `openExternalLink`；「打开 Shizuku」→ `openShizukuManager`（未安装时禁用）；受限设置解锁 → `unlockRestrictedSettings`（0.14.1 前该桥方法**零页面调用点**） |
+
+## 0.14.1 增量（通知落点与自检面——批 4，2026-09-22）
+
+> 背景：0.14.1 UI 审查发现整族通知是**单向公告板**——`contentIntent` 一直在写 `dsh.notify.*`
+> extras 而全仓没有读取者、`MainActivity` 连 `onNewIntent` 都没有；同时 `selfCheck` 与两个系统设置
+> 深链在页面侧零调用点（「系统已降级，应用无法调回」这句用户永远看不到）。另外
+> `cat.question` / `cat.approval` 被关掉时通知被**丢弃**，而引擎侧提问/审批**没有超时**
+> ⇒ 任务永久挂起（用户看到的是「AI 不动了」），已改为「静默投递」。
+
+| 方向 | 方法 | 位置 | 说明 |
+|---|---|---|---|
+| 壳 → 页面 | `window.__dshOpenSession(sessionId): boolean` | `dsh-client-ui-responsive/src/client/mobile/notify-landing.ts`（`apply` 里挂到 window） | 通知落点的**页面半**：切到目标会话。契约 = **同步返回 boolean**（true 已确认切换 / false 未切过去），壳侧 `MainActivity.deliverNotifyRoute` 依 evaluateJavascript 回执给可见提示。判据不做事后无验证的成功声明：未加载的会话先 `open()` 再回头确认 `scope()` |
+| 页面 → 壳 | `notifySelfCheck()` | AndroidBridge（默认实现读 `ShellAppContext`）→ `NotifyCenter.selfCheck` | 每渠道**系统实际状态**（enabled/importance/是否被降级）JSON。默认实现钉在真源上、不依赖 MainActivity 传参（漏接线这一失效形态从结构上消失） |
+| 页面 → 壳 | `openNotifyAppSettings()` | AndroidBridge → MainActivity → `NotifyCenter.appSettingsIntent` | 系统「本应用通知设置」深链；返回 boolean，false = 该 ROM 无此页（页面如实提示，不假装拉起过） |
+| 页面 → 壳 | `openNotifyChannelSettings(channelId)` | AndroidBridge → MainActivity → `NotifyCenter.channelSettingsIntent` | 渠道级深链；channelId 来自 `notifySelfCheck` 回执 |
+| 同上（页面消费） | — | `src/client/dev-section/notify-settings.tsx` | 「通知自检」+「系统通知设置」两枚入口 + 每渠道一行「系统实际状态 + 打开该渠道设置」；五类开关各配一句「关掉会怎样」（提问/授权两类写明「关闭 = 不弹窗，仍可作答」） |
+| 壳侧语义变更 | — | `NotifyCenter.Face.interactive` | 交互类（question/approval）类别关闭 ⇒ **降级为静默渠道**（不弹窗不响铃、仍投递、仍可作答），不再 `return DISABLED`；非交互类（report/todo/silent）才允许丢弃 |
+| 壳侧载荷修正 | `dsh.notify.*` extras | `NotifyCenter.EXTRA_KIND / EXTRA_TARGET_SESSION / EXTRA_TARGET_AGENT` | 旧实现把 `sessionId` 与 `agentId` **依次写进同一个 key**（后写覆盖先写）。现按键语义拆开，读取者 = `MainActivity.consumeNotifyRoute` / `onNewIntent` |
 
 ## 0.13.7 增量（追上游 dsh 0.1.5，2026-09-10）
 

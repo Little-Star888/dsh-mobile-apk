@@ -32,9 +32,11 @@ class OverlayPanel(private val svc: OverlayService) {
   // ── 展开态控件句柄 ────────────────────────────────────────────────
   internal var unitView: View? = null            // 展开合体圆角矩形（默认 GONE）
   internal var statusText: TextView? = null
+  private var reportEntryView: TextView? = null   // P5-1：状态行右侧的可见「查看汇报」入口
   private var toolChip: TextView? = null
   private var clockText: TextView? = null
-  private var closeView: ImageView? = null       // 展开态收起按钮（✕，会话选择行右端）
+  private var closeView: View? = null                // 收起按钮（✕，44dp 命中区；S2-18）
+  private var closeIcon: ImageView? = null           // 收起按钮的内层图标（20dp，换肤时改色用）
   private var dividerView: View? = null
   private var sendBtn: View? = null
   private var stopBtn: View? = null
@@ -50,6 +52,8 @@ class OverlayPanel(private val svc: OverlayService) {
   private var pickerRowView: LinearLayout? = null
   private var pickerShowAll = false
   private val pickerSessions = ArrayList<PickerSession>()
+  /** 最近一次 session/list 的失败说明（"" = 成功）。S2-9：失败不得画成「共 0 个会话」。 */
+  private var pickerLoadError = ""
 
   /** 治理后的会话条目（官方可见性口径过滤后）。 */
   internal class PickerSession(val id: String, val label: String, val running: Boolean, val relative: String)
@@ -72,6 +76,21 @@ class OverlayPanel(private val svc: OverlayService) {
   private val qSingle = HashMap<String, String>()               // 单选暂存：questionId → label
   private val qCustom = HashMap<String, String>()               // 自定义答案：questionId → text
   private var qPage = 0                                          // 多问分页（官方卡 1/N 风格）
+  /**
+   * 选项超过 6 项时「展开全部」的记忆（questionId 集合）。P0-8：此前 `coerceAtMost(6)` 直接丢弃
+   * 第 7 项起的候选，无任何提示——用户看不到剩余项，只能手打。现在默认仍只列 6 项（卡面高度有限），
+   * 但给出「还有 N 项（点此展开）」的可点入口，展开后全量列出。
+   */
+  private val qOptsExpanded = HashSet<String>()
+  /**
+   * 审批「批准一次」的二次确认态（P0-9）。
+   *
+   * 证书：批准的是一次**真实工具执行**（`reason` 里往往就是待执行命令），而此前两枚 12sp 小药丸
+   * 水平紧邻、单击即放行、无撤销。现在首次点击只进入「待确认」，第二次点击（10 秒内）才放行；
+   * 超时或点了「取消」即撤臂，避免陈旧待确认态把后来的一次单击变成放行。
+   */
+  private var approvalArmedId: String? = null
+  private var approvalArmedAtMs = 0L
   private var pendingKey = ""                                    // 当前卡指纹（kind:eventId），变化即清作答态
   private var renderedCardKey = ""                               // 卡片已渲染指纹（防 live 流重绘打断输入）
 
@@ -186,7 +205,9 @@ class OverlayPanel(private val svc: OverlayService) {
     val key = currentPending()?.let { "${it.first}:${(it.second as? PendingApproval)?.eventId ?: (it.second as? PendingQuestion)?.eventId ?: ""}" } ?: ""
     if (key != pendingKey) {
       pendingKey = key
-      multiSel.clear(); qSingle.clear(); qCustom.clear(); qPage = 0; renderedCardKey = ""
+      multiSel.clear(); qSingle.clear(); qCustom.clear(); qOptsExpanded.clear(); qPage = 0; renderedCardKey = ""
+      // 卡换了就撤臂：待确认态绝不跨卡片存活（否则后来的一次单击会变成放行）。
+      approvalArmedId = null
     }
     updateBallOnly()
   }
@@ -224,6 +245,11 @@ class OverlayPanel(private val svc: OverlayService) {
       textSize = 13f
       setTypeface(null, android.graphics.Typeface.BOLD)
       setTextColor(c.idleText)
+      // S2-1：长按/三击手势挂在**这一行文字**上，而文字本身只有约 20dp 高——手势热区此前
+      // 等于一行字，实测「按不准」。批 5 补了可见入口（「查看汇报」），这里把**手势本身**
+      // 的热区也顶到 44dp：手势语义未变，只是让它在手指尺度上成立。
+      minHeight = (MIN_TOUCH_TARGET_DP * dp).toInt()
+      gravity = Gravity.CENTER_VERTICAL
     }
     statusText = status
     attachStatusGesture(status)
@@ -252,37 +278,67 @@ class OverlayPanel(private val svc: OverlayService) {
     // 收起按钮（✕）：放顶行（会话选择行）右端。旧版收起箭头在状态行、与 Spinner 下拉
     // 三角同为三角且下拉展开后被列表盖住（视觉引导错误，用户实测）——✕ 与下拉三角可区分
     // 且位于下拉弹出层之上，永不被盖。
-    val close = ImageView(svc).apply {
-      setImageResource(R.drawable.dsh_ic_close)
-      setColorFilter(c.chevron)
+    // S2-18（批 5 设备验收时发现）：**触摸目标必须 ≥44dp**。旧实现是 20×20dp 的 ImageView
+    // （uiautomator 实测 `收起面板 40×40px = 20×20dp`），而它是面板上唯一的收起入口。
+    // 做法与批 5 同口径：外层 FrameLayout 撑到 44dp 命中区，内层 20dp 图标保持观感；
+    // 为不让选择行白长 20dp，行的上下内边距在下面按需收紧。
+    val close = FrameLayout(svc).apply {
       contentDescription = "收起面板"
       isClickable = true
       setOnClickListener { svc.hidePanel() }
+      addView(ImageView(svc).apply {
+        setImageResource(R.drawable.dsh_ic_close)
+        setColorFilter(c.chevron)
+      }, FrameLayout.LayoutParams((20 * dp).toInt(), (20 * dp).toInt(), Gravity.CENTER))
     }
     closeView = close
+    closeIcon = (close.getChildAt(0) as? ImageView)
 
     // 会话选择行（独立一行，向下箭头 Spinner）+ 右端 ✕ 收起
+    // S2-18：✕ 的命中区 44dp，行内边距按需收紧（旧行高 38dp → 44dp，只多 6dp）。
     val pickerRow = LinearLayout(svc).apply {
       orientation = LinearLayout.HORIZONTAL
       gravity = Gravity.CENTER_VERTICAL
-      setPadding((12 * dp).toInt(), (10 * dp).toInt(), (12 * dp).toInt(), (2 * dp).toInt())
+      setPadding((12 * dp).toInt(), (3 * dp).toInt(), (8 * dp).toInt(), (3 * dp).toInt())
       addView(pickerRowText, LinearLayout.LayoutParams(0, (26 * dp).toInt(), 1f))
-      addView(close, LinearLayout.LayoutParams((20 * dp).toInt(), (20 * dp).toInt()).apply { marginStart = (8 * dp).toInt() })
+      addView(close, LinearLayout.LayoutParams((MIN_TOUCH_TARGET_DP * dp).toInt(), (MIN_TOUCH_TARGET_DP * dp).toInt()).apply { marginStart = (8 * dp).toInt() })
     }
 
-    // 状态行：状态文字 + 工具×N + 时钟（收起按钮已移至顶行 ✕）
+    // 状态行：状态文字 + 汇报入口 + 工具×N + 时钟（收起按钮已移至顶行 ✕）
+    //
+    // P5-1（本批）：状态行右侧补一枚**可见**的「查看汇报」入口。此前开报告栏只有「长按状态行」
+    // 一条隐藏手势，模板文案也只会说「长按查看汇报」——没试过长按的用户根本不知道有这东西
+    // （审查档 §3.2 S2-1 的「热区仅一行文字高 + 无任何可见提示」）。长按**仍然有效**（不改手势语义，
+    // 见 §4「明确不做」），但发现路径不再只依赖隐藏手势。
+    val reportEntry = TextView(svc).apply {
+      tag = "overlay-report-entry"
+      text = "查看汇报"
+      textSize = 11f
+      setTextColor(c.chevron)
+      gravity = Gravity.CENTER
+      // 热区与批 5 同口径：可点元素不小于触摸目标下限（见 MIN_TOUCH_TARGET_DP）。
+      minHeight = (MIN_TOUCH_TARGET_DP * dp).toInt()
+      minWidth = (MIN_TOUCH_TARGET_DP * dp).toInt()
+      contentDescription = "查看工作汇报"
+      isClickable = true
+      setOnClickListener { svc.toggleReportBar() }
+      DsUi.bindPressScale(this)
+    }
+    reportEntryView = reportEntry
+
     val row1 = LinearLayout(svc).apply {
       orientation = LinearLayout.HORIZONTAL
       gravity = Gravity.CENTER_VERTICAL
       setPadding((12 * dp).toInt(), (4 * dp).toInt(), (12 * dp).toInt(), (10 * dp).toInt())
       addView(status, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-      addView(chip)
+      addView(reportEntry, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = (6 * dp).toInt() })
+      addView(chip, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = (6 * dp).toInt() })
       addView(clock, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = (8 * dp).toInt() })
     }
 
     // 输入行：输入框 + 蓝圆发送（白箭头 IconSendOutline16）+ 红圆停止（白方块 rx=3）
     val input = EditText(svc).apply {
-      hint = "发消息可插话…"
+      hint = inputHintFor(false, false)
       textSize = 13f
       isSingleLine = true
       inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
@@ -300,24 +356,26 @@ class OverlayPanel(private val svc: OverlayService) {
     }
     inputBox = input
 
-    val send = FrameLayout(svc).apply {
-      val inner = ImageView(svc).apply { setImageResource(R.drawable.dsh_ic_send) }
-      addView(inner, FrameLayout.LayoutParams((16 * dp).toInt(), (16 * dp).toInt(), Gravity.CENTER))
-      background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(0xFF4176E6.toInt()) }
-      isClickable = true
-      setOnClickListener { svc.requestSend() }
-      tag = "overlay-send"
-    }
+    // P5-2（本批）：两枚圆钮的**触摸目标 44dp**，视觉圆仍是 36dp（外层 FrameLayout 承载命中区，
+    // 内层保持原观感与圆径）。设备实测：36dp 的圆在悬浮窗里按偏就落空，且两者相邻，
+    // 误触到「停止」的代价高（中断整轮）。同时补 contentDescription——两枚钮都只有图形。
+    fun roundButton(tagName: String, iconRes: Int, iconDp: Int, circle: Int, label: String, onClick: () -> Unit): FrameLayout =
+      FrameLayout(svc).apply {
+        tag = tagName
+        isClickable = true
+        contentDescription = label
+        setOnClickListener { onClick() }
+        addView(FrameLayout(svc).apply {
+          background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(circle) }
+          addView(ImageView(svc).apply { setImageResource(iconRes) },
+            FrameLayout.LayoutParams((iconDp * dp).toInt(), (iconDp * dp).toInt(), Gravity.CENTER))
+        }, FrameLayout.LayoutParams((36 * dp).toInt(), (36 * dp).toInt(), Gravity.CENTER))
+      }
+
+    val send = roundButton("overlay-send", R.drawable.dsh_ic_send, 16, 0xFF4176E6.toInt(), "发送") { svc.requestSend() }
     sendBtn = send
 
-    val stop = FrameLayout(svc).apply {
-      val inner = ImageView(svc).apply { setImageResource(R.drawable.dsh_ic_stop) }
-      addView(inner, FrameLayout.LayoutParams((12 * dp).toInt(), (12 * dp).toInt(), Gravity.CENTER))
-      background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(0xFFE04848.toInt()) }
-      isClickable = true
-      setOnClickListener { svc.requestStop() }
-      tag = "overlay-stop"
-    }
+    val stop = roundButton("overlay-stop", R.drawable.dsh_ic_stop, 12, 0xFFE04848.toInt(), "停止当前任务") { svc.requestStop() }
     stopBtn = stop
 
     val row2 = LinearLayout(svc).apply {
@@ -325,8 +383,8 @@ class OverlayPanel(private val svc: OverlayService) {
       gravity = Gravity.CENTER_VERTICAL
       setPadding((8 * dp).toInt(), (8 * dp).toInt(), (8 * dp).toInt(), (8 * dp).toInt())
       addView(input, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-      addView(send, LinearLayout.LayoutParams((36 * dp).toInt(), (36 * dp).toInt()).apply { marginStart = (8 * dp).toInt() })
-      addView(stop, LinearLayout.LayoutParams((36 * dp).toInt(), (36 * dp).toInt()).apply { marginStart = (8 * dp).toInt() })
+      addView(send, LinearLayout.LayoutParams((MIN_TOUCH_TARGET_DP * dp).toInt(), (MIN_TOUCH_TARGET_DP * dp).toInt()).apply { marginStart = (4 * dp).toInt() })
+      addView(stop, LinearLayout.LayoutParams((MIN_TOUCH_TARGET_DP * dp).toInt(), (MIN_TOUCH_TARGET_DP * dp).toInt()).apply { marginStart = (4 * dp).toInt() })
     }
 
     val unit = LinearLayout(svc).apply {
@@ -367,7 +425,8 @@ class OverlayPanel(private val svc: OverlayService) {
         st.setTextColor(if (!svc.engineRunning) c.offText else c.idleText)
       }
     }
-    closeView?.setColorFilter(c.chevron)
+    closeIcon?.setColorFilter(c.chevron)
+    reportEntryView?.setTextColor(c.chevron)   // P5-1：汇报入口用主题强调色（换肤时必须同步）
     inputBox?.apply {
       setTextColor(c.inputText)
       setHintTextColor(c.inputHint)
@@ -383,27 +442,33 @@ class OverlayPanel(private val svc: OverlayService) {
 
   private fun displayPrefs() = svc.getSharedPreferences("overlay_display", Context.MODE_PRIVATE)
 
+  // S2-12（本批）：思考态默认文案由英文模板 `Deep diving...` 改为中文。
+  // 缺陷现场：状态行是**壳侧唯一的常驻运行提示**，却是全仓唯一一处英文正文（工具轮更糟：
+  // 直接显示原始工具名 + 参数）。中文受众看到的是「Deep diving... / android_vdisplay_input · …」。
+  // 扫光动效本身保留（ShimmerTextView 的形态不变），只换文字。
   private fun templateThinking(): String =
-    displayPrefs().getString("template_thinking", "Deep diving...") ?: "Deep diving..."
+    displayPrefs().getString("template_thinking", "正在思考…") ?: "正在思考…"
 
   private fun templateTool(): String =
-    displayPrefs().getString("template_tool", "{tool} · {summary}") ?: "{tool} · {summary}"
+    displayPrefs().getString("template_tool", "正在使用 {tool} · {summary}") ?: "正在使用 {tool} · {summary}"
 
   /** 块H-A1：完成态常驻文案（并入 overlay_display prefs，与上述两个模板同族，可覆写）。
-   *  默认整句「已完成，长按查看汇报」；语义标签非「已完成」时（失败/被阻塞/被中断…）
-   *  只替换标签部分、保留同一后缀提示——既保证失败态不显示「已完成」，又让提示语只有一处真源。 */
+   *  默认整句「已完成，可查看汇报」；语义标签非「已完成」时（失败/被阻塞/被中断…）
+   *  只替换标签部分、保留同一后缀提示——既保证失败态不显示「已完成」，又让提示语只有一处真源。
+   *  P5-1 起后缀不再写「长按」：状态行右侧已有**可见**的「查看汇报」入口（长按仍然有效，
+   *  但把「怎么开」写进文案只应该指向看得见的那条路）。 */
   private fun templateCompletion(): String =
-    displayPrefs().getString("template_completion", "已完成，长按查看汇报") ?: "已完成，长按查看汇报"
+    displayPrefs().getString("template_completion", "已完成，可查看汇报") ?: "已完成，可查看汇报"
 
-  /** 后缀提示（默认「长按查看汇报」）：由 template_completion 剥掉默认标签前缀得到。 */
+  /** 后缀提示（默认「可查看汇报」）：由 template_completion 剥掉默认标签前缀得到。 */
   private fun completionHint(): String =
-    templateCompletion().removePrefix("已完成，").ifBlank { "长按查看汇报" }
+    templateCompletion().removePrefix("已完成，").ifBlank { "可查看汇报" }
 
   // ── 块H 状态行手势（A2 长按开报告栏 / A3 三击跳转）──────────────────
   // 详档 §3.3：目标行原本**无任何触摸处理**（11 处 setOnClickListener 均不涉及 statusText），
   // 故不存在与既有行内手势抢的冲突。消歧用**单一 OnTouchListener 状态机**统一裁决
   // （不用 setOnLongClickListener + 自行数点击）：
-  //   DOWN  → 记起点与时刻；距上次 UP 在 doubleTapTimeout 内则 tapCount++，否则重置为 1；
+  //   DOWN  → 记起点与时刻；距上次 UP 在三击窗口（= 双击超时 ×2，见 tripleTapWindowMs）内则 tapCount++，否则重置为 1；
   //   MOVE  → 位移超 scaledTouchSlop 即标 moved，本次手势不再判长按/三击（防拖动误触）；
   //   计时到 longPressTimeout 且未 moved → 触发 A2（长按优先，一次手势只触发一个动作）；
   //   UP    → 未 moved 且未触发长按：tapCount==3 → 触发 A3；否则等窗口结束；
@@ -424,7 +489,9 @@ class OverlayPanel(private val svc: OverlayService) {
     val vc = android.view.ViewConfiguration.get(svc)
     val slop = vc.scaledTouchSlop                                          // 实例方法
     val longPressMs = android.view.ViewConfiguration.getLongPressTimeout().toLong()   // static
-    val tapWindowMs = android.view.ViewConfiguration.getDoubleTapTimeout().toLong()   // static
+    // S2-2：三击的容错窗**不能**直接取双击超时（约 300ms）——三连击几乎必然断在第二、三下之间，
+    // 设备上的表现就是「点了没反应」。见 tripleTapWindowMs 的取值口径。
+    val tapWindowMs = tripleTapWindowMs(android.view.ViewConfiguration.getDoubleTapTimeout().toLong())   // static
     var downX = 0f; var downY = 0f
     var moved = false
     var longFired = false
@@ -442,7 +509,7 @@ class OverlayPanel(private val svc: OverlayService) {
           moved = false; longFired = false
           // 面板被用户占用：长按期间取消自动收起（详档 §3.3 冲突面 2 的消歧）。
           svc.panelOccupied = true
-          // 三击计数：距上次 UP 在 doubleTapTimeout 内则累加，否则重置为 1。
+          // 三击计数：距上次 UP 在两个双击超时内则累加，否则重置为 1（见 tripleTapWindowMs）。
           statusTapCount = nextTapCount(System.currentTimeMillis(), statusLastUpAt, tapWindowMs, statusTapCount)
           cancelPending()
           val r = Runnable {
@@ -613,8 +680,33 @@ class OverlayPanel(private val svc: OverlayService) {
       }
       box.addView(body)
       val buttonRow = LinearLayout(svc).apply { orientation = LinearLayout.HORIZONTAL }
-      buttonRow.addView(pendingChip("批准一次", filled = true, red = false, dp) { respondApproval(a, "allowed-once") }, lpChip(dp))
-      buttonRow.addView(pendingChip("拒绝", filled = false, red = true, dp) { respondApproval(a, "rejected") }, lpChip(dp))
+      // P0-9：放行 = 一次真实工具执行（reason 里往往就是待执行命令），而全界面代价最大的一步
+      // 此前交互最轻（单击即放行、无撤销）。现在改成两步：首点进入待确认（药丸变红加粗 + 出现「取消」），
+      // 10 秒内再点同一按钮才真正放行。超出窗口即重新进入待确认（不让陈旧状态吞掉一次单击）。
+      val armed = approvalArmed(approvalArmedId, approvalArmedAtMs, a.eventId, System.currentTimeMillis())
+      buttonRow.addView(
+        pendingChip(if (armed) "确认批准（执行）" else "批准一次", filled = true, red = false, dp) {
+          if (!armed) {
+            approvalArmedId = a.eventId
+            approvalArmedAtMs = System.currentTimeMillis()
+            renderPendingCard(true)
+            return@pendingChip
+          }
+          approvalArmedId = null
+          respondApproval(a, "allowed-once")
+        },
+        lpChip(dp),
+      )
+      if (armed) {
+        buttonRow.addView(pendingChip("取消", filled = false, red = false, dp) {
+          approvalArmedId = null
+          renderPendingCard(true)
+        }, lpChip(dp))
+      }
+      buttonRow.addView(pendingChip("拒绝", filled = false, red = true, dp) {
+        approvalArmedId = null
+        respondApproval(a, "rejected")
+      }, lpChip(dp))
       box.addView(buttonRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
         setMargins(0, (6 * dp).toInt(), 0, 0)
       })
@@ -660,7 +752,13 @@ class OverlayPanel(private val svc: OverlayService) {
     // 选项行：[编号徽章] 标签(粗) + 描述(灰)，选中淡蓝底
     val opts = item.optJSONArray("options")
     if (opts != null) {
-      for (oi in 0 until opts.length().coerceAtMost(6)) {
+      // P0-8：第 7 项起此前被 `coerceAtMost(6)` **静默丢弃**（无提示、无展开），引擎给 7 个以上
+      // 选项时用户看不到剩余候选，只能被迫手打。现在默认列 6 项（卡面高度有限）+ 一行明示入口。
+      val optsTotal = opts.length()
+      val expanded = qOptsExpanded.contains(qid)
+      val optsShown = optionsShownCount(optsTotal, expanded)
+      val optsHidden = optionsHiddenCount(optsTotal, expanded)
+      for (oi in 0 until optsShown) {
         val o = opts.optJSONObject(oi) ?: continue
         val label = o.optString("label").ifBlank { "选项${oi + 1}" }
         val on = if (multi) multiSel[qid]?.contains(label) == true else qSingle[qid] == label
@@ -703,6 +801,19 @@ class OverlayPanel(private val svc: OverlayService) {
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = (8 * dp).toInt() })
         box.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
           setMargins(0, 0, 0, (4 * dp).toInt())
+        })
+      }
+      if (optsHidden > 0) {
+        // 明示「还有什么」，并给出展开入口（再一次点击回到折叠态，避免卡面失控）。
+        box.addView(TextView(svc).apply {
+          text = "还有 $optsHidden 项（点此展开全部 $optsTotal 项）"
+          textSize = 12f
+          setTextColor(0xFF4176E6.toInt())
+          setPadding((6 * dp).toInt(), (8 * dp).toInt(), (6 * dp).toInt(), (8 * dp).toInt())
+          minHeight = (44 * dp).toInt()
+          contentDescription = "展开剩余 $optsHidden 个选项"
+          isClickable = true
+          setOnClickListener { qOptsExpanded.add(qid); renderPendingCard(true) }
         })
       }
     }
@@ -760,13 +871,42 @@ class OverlayPanel(private val svc: OverlayService) {
       gravity = Gravity.CENTER_VERTICAL
     }
     if (n > 1) {
+      // P0-7：此前整个「‹ 1/N ›」是**一个** TextView，监听写成 (qPage + 1) % n —— 视觉上的「上一题」
+      // 实际跳下一题，末页还回卷到第 1 页（用户按了会做错事）。现在拆成两个独立可点区域：
+      // 左=上一题（首页禁用）、右=下一题（末页禁用），都不回卷；中间只作进度标签。
+      // 热区 ≥44dp（批 5 的同批口径：可点元素不得小于触摸目标下限）。
+      val pagerFont = 15f
       foot.addView(TextView(svc).apply {
-        text = "‹ ${qPage + 1}/$n ›"
+        text = "‹"
+        textSize = pagerFont
+        gravity = Gravity.CENTER
+        setTextColor(if (qPage > 0) textColor else subColor)
+        alpha = if (qPage > 0) 1f else 0.4f
+        minWidth = (44 * dp).toInt()
+        minHeight = (44 * dp).toInt()
+        contentDescription = "上一题"
+        isEnabled = qPage > 0
+        isClickable = qPage > 0
+        if (qPage > 0) setOnClickListener { qPage = pagerIndex(qPage, n, -1); renderPendingCard(true) }
+      })
+      foot.addView(TextView(svc).apply {
+        text = "${qPage + 1}/$n"
         textSize = 12f
         setTextColor(subColor)
-        setPadding((4 * dp).toInt(), (6 * dp).toInt(), (4 * dp).toInt(), (6 * dp).toInt())
-        isClickable = true
-        setOnClickListener { qPage = (qPage + 1) % n; renderPendingCard(true) }
+        gravity = Gravity.CENTER
+      })
+      foot.addView(TextView(svc).apply {
+        text = "›"
+        textSize = pagerFont
+        gravity = Gravity.CENTER
+        setTextColor(if (qPage < n - 1) textColor else subColor)
+        alpha = if (qPage < n - 1) 1f else 0.4f
+        minWidth = (44 * dp).toInt()
+        minHeight = (44 * dp).toInt()
+        contentDescription = "下一题"
+        isEnabled = qPage < n - 1
+        isClickable = qPage < n - 1
+        if (qPage < n - 1) setOnClickListener { qPage = pagerIndex(qPage, n, +1); renderPendingCard(true) }
       })
       foot.addView(View(svc), LinearLayout.LayoutParams(0, 1, 1f))
       if (qPage > 0) {
@@ -951,6 +1091,7 @@ class OverlayPanel(private val svc: OverlayService) {
     svc.pendingKind = currentPending()?.first ?: ""
     svc.setHalo(svc.deriveHalo())
     if (svc.expanded) {
+      refreshInputHint()   // S2-11：忙/闲与目标会话变化都要改提示语（空闲发的是新一轮，不是插话）
       statusText?.let {
         if (svc.pendingKind == "question") {
           (it as ShimmerTextView).setShimmering(false)
@@ -1000,7 +1141,16 @@ class OverlayPanel(private val svc: OverlayService) {
         else it.visibility = View.GONE
       }
       updateClock()
-      stopBtn?.alpha = if (svc.sessionBusy) 1f else 0.35f
+      // P0-6：此前只改 alpha（看起来禁用、实际可点），点了落到 requestStop 的第一支
+      // 「if (!sessionBusy) return」——静默返回，什么都不发生。现在视觉与行为一致：
+      // 空闲/引擎离线时**真的禁用**（isEnabled=false 且不可点），面板状态行同时显示「空闲」。
+      stopBtn?.let {
+        val canStop = svc.sessionBusy
+        it.alpha = if (canStop) 1f else 0.35f
+        it.isEnabled = canStop
+        it.isClickable = canStop
+        it.contentDescription = if (canStop) "停止当前任务" else "停止当前任务（当前没有运行中的任务）"
+      }
       renderPendingCard()
     }
   }
@@ -1011,14 +1161,16 @@ class OverlayPanel(private val svc: OverlayService) {
     val elapsed = System.currentTimeMillis() - svc.turnStartedAt
     if (elapsed < 15_000) { ct.visibility = View.GONE; return }
     ct.visibility = View.VISIBLE
-    val sec = elapsed / 1000
-    ct.text = if (sec >= 60) "${sec / 60}分%02d秒".format(sec % 60) else "${sec}s"
+    // P3-3：时钟与回报条/通知共用同一时长口径（旧实现是「45s」/「2分05秒」两套写法）。
+    ct.text = UserCopy.durationText(elapsed)
   }
 
   /** session/list -> target picker data (G2: official visibility filter + label fallback chain). */
   internal fun refreshSessionPicker() {
     svc.postRpc("session/list", JSONObject().put("_request", JSONObject())) { code, body ->
       pickerSessions.clear()
+      // S2-9：失败要如实（旧实现把非 200 静默当空列表 → 页脚写「共 0 个会话」，失败被画成合法空态）。
+      pickerLoadError = if (code == 200) "" else "会话列表读取失败（HTTP $code）"
       // 0.13.5: default target = the running session, else the most recent non-blank one.
       var runningId = ""
       var recentId = ""
@@ -1076,7 +1228,13 @@ class OverlayPanel(private val svc: OverlayService) {
     val row = sessionPicker ?: return
     val current = pickerSessions.firstOrNull { it.id == svc.activeSessionId }
     row.text = if (svc.activeSessionId.isEmpty()) "\uff0b \u65b0\u4f1a\u8bdd"
-    else (current?.label ?: svc.activeSessionId.take(16) + "\u2026") + "\uff08\u5f53\u524d\uff09"
+    else sessionRowText(current?.label)
+    refreshInputHint()
+  }
+
+  /** 输入框提示语随忙态/目标会话变化（S2-11：空闲态发的是新一轮/新会话，不是插话）。 */
+  private fun refreshInputHint() {
+    inputBox?.hint = inputHintFor(svc.sessionBusy, svc.activeSessionId.isNotEmpty())
   }
 
   /** Light refresh on auto-follow (G2: no refetch, no window rebuild — marks only). */
@@ -1131,13 +1289,31 @@ class OverlayPanel(private val svc: OverlayService) {
       addView(list)
     }
     container.addView(scroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
-    // Footer: expand-all entry (A-R3 governance: most recent 8 by default; search pending session/search wiring)
+    // Footer: 展开入口（A-R3 治理：默认最近 8 条）/ 读取失败时的重试入口（S2-9）
     val footer = TextView(svc).apply {
-      text = if (!pickerShowAll && pickerSessions.size > 8) "\u5168\u90e8\u4f1a\u8bdd\uff08" + pickerSessions.size + "\uff09" else "\u5171 " + pickerSessions.size + " \u4e2a\u4f1a\u8bdd"
+      val failed = pickerLoadError.isNotEmpty()
+      text = when {
+        failed -> pickerLoadError + "（点此重试）"
+        !pickerShowAll && pickerSessions.size > 8 -> "\u5168\u90e8\u4f1a\u8bdd\uff08" + pickerSessions.size + "\uff09"
+        else -> "\u5171 " + pickerSessions.size + " \u4e2a\u4f1a\u8bdd"
+      }
       textSize = 12f
-      setTextColor(if (isDarkTheme()) 0xFF9AA0A6.toInt() else 0xFF5F6368.toInt())
+      setTextColor(
+        if (failed) 0xFFE04848.toInt()
+        else if (isDarkTheme()) 0xFF9AA0A6.toInt() else 0xFF5F6368.toInt(),
+      )
       setPadding((12 * dp).toInt(), (8 * dp).toInt(), (12 * dp).toInt(), (8 * dp).toInt())
-      if (!pickerShowAll && pickerSessions.size > 8) {
+      if (failed) {
+        // S2-9：失败必须能重试。旧实现把 code != 200 静默当空列表，页脚于是写「共 0 个会话」
+        // ——把失败画成了合法空态，用户以为「本来就没有会话」，且没有任何重试路径。
+        contentDescription = "会话列表读取失败，点此重试"
+        minHeight = (44 * dp).toInt()
+        background = DsUi.ripple(DsUi.roundRect(Color.TRANSPARENT, 8 * dp), if (isDarkTheme()) 0x22FFFFFF.toInt() else 0x22000000.toInt())
+        setOnClickListener {
+          svc.flashStatus("正在重新读取会话…")
+          refreshSessionPicker()
+        }
+      } else if (!pickerShowAll && pickerSessions.size > 8) {
         background = DsUi.ripple(DsUi.roundRect(Color.TRANSPARENT, 8 * dp), if (isDarkTheme()) 0x22FFFFFF.toInt() else 0x22000000.toInt())
         setOnClickListener {
           pickerShowAll = true
@@ -1159,12 +1335,20 @@ class OverlayPanel(private val svc: OverlayService) {
     val loc = IntArray(2)
     row.getLocationOnScreen(loc)
     lp.gravity = android.view.Gravity.TOP or android.view.Gravity.START
-    lp.x = loc[0]
-    lp.y = loc[1] + row.height + (4 * dp).toInt()
     // Height cap at 45% of screen (tames unbounded lists; WRAP when short)
     container.measure(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-    val maxH = (svc.resources.displayMetrics.heightPixels * 0.45f).toInt()
+    val screenW = svc.resources.displayMetrics.widthPixels
+    val screenH = svc.resources.displayMetrics.heightPixels
+    val maxH = (screenH * 0.45f).toInt()
     lp.height = container.measuredHeight.coerceAtMost(maxH)
+    // S2-8（本批修）：x/y **必须钳制在屏内**。旧实现直接写 `loc[0]` / `loc[1] + row.height + 4dp`：
+    // 触发行的屏幕 y 在下半屏时，窗口底部（列表尾部 + 页脚「全部会话」）落到屏幕外，
+    // 而 overlay 窗口**不会**被用户滚进来——那些条目就是不可达。触发行的 x 靠右时同理。
+    // 钳制口径：先保左/上不越界，再保右/下不出屏（超长时以「底部可见」优先，因为可达性比对齐更重要）。
+    val gap = (8 * dp).toInt()
+    lp.x = loc[0].coerceIn(0, (screenW - lp.width - gap).coerceAtLeast(0))
+    lp.y = (loc[1] + row.height + (4 * dp).toInt())
+      .coerceIn(0, (screenH - lp.height - gap).coerceAtLeast(0))
     container.setOnTouchListener { _, e ->
       if (e.action == android.view.MotionEvent.ACTION_OUTSIDE) closePicker()
       false
@@ -1198,10 +1382,15 @@ class OverlayPanel(private val svc: OverlayService) {
           // Explicit pick = pin (0.13.5 semantics); empty pick = new session, unpin.
           svc.userPinnedSession = id.isNotEmpty()
           if (id.isEmpty()) svc.sessionBusy = false
+          // S2-10（本批修）：手选目标会话必须与「自动跟随」走**同一条**切换通知。
+          // 旧实现只改 activeSessionId，没调 onTargetSessionChanged，于是归属旧会话的完成位
+          // （「已完成」常驻文案）不被清除——面板展开着切会话，完成位与显示会脱节。
+          svc.onTargetSessionChanged(id)
           performHapticFeedback(android.view.HapticFeedbackConstants.CONFIRM) // M9 haptics
           closePicker()
           updatePickerRowText()
-          svc.flashStatus(if (id.isEmpty()) "\u5df2\u5207\u6362\u5230 \u65b0\u4f1a\u8bdd" else "\u5df2\u5207\u6362\u5230 " + text.take(20))
+          // P3-4：会话名超长时附省略号（旧实现 `take(20)` 硬截，用户看到一个像完整名字的片段）。
+          svc.flashStatus(if (id.isEmpty()) "\u5df2\u5207\u6362\u5230 \u65b0\u4f1a\u8bdd" else "\u5df2\u5207\u6362\u5230 " + UserCopy.truncateWithEllipsis(text, 20))
           svc.renderPanelOnly()
         }
       }
@@ -1220,3 +1409,89 @@ internal data class PendingApproval(val eventId: String, val agentId: String, va
 
 /** AI 提问待处理项（$events waterfall 帧投影，request.questions 原始 JSONArray）。 */
 internal data class PendingQuestion(val eventId: String, val agentId: String, val items: org.json.JSONArray, var submittedAt: Long = 0L)
+
+// ── 待答卡/审批卡的常量（顶层：纯判据函数与 UI 代码共用同一份真源）──────────────────
+
+/** 折叠态一次列出的选项数（卡面高度有限；超出的走「还有 N 项」入口，绝不静默丢弃）。 */
+internal const val OPTIONS_COLLAPSED_MAX = 6
+
+/** 会话标签解析不出来时给用户看的名（S2-7）：**不得**把内部 sessionId 截断上屏。 */
+internal const val SESSION_UNKNOWN_LABEL = "未命名会话"
+
+/**
+ * 输入框提示语（S2-11，纯函数 JVM 可测）。
+ *
+ * 缺陷现场：提示语恒为「发消息可插话…」，但**空闲时发送根本不是插话**——`requestSend` 会按忙态
+ * 选 mode=steer/queue，空闲时开的是新一轮；目标会话为空时还会先 `session/create` 新建会话。
+ * 用错词会让用户误判「这句话会被塞进正在跑的轮次」，或反过来以为空闲时不能发。
+ */
+internal fun inputHintFor(busy: Boolean, hasSession: Boolean): String = when {
+  busy -> "发消息可插话…"
+  hasSession -> "发消息开新一轮…"
+  else -> "发消息新建会话…"
+}
+
+/**
+ * 目标会话行文本（S2-7，纯函数 JVM 可测）。
+ *
+ * 缺陷现场：标签解析不出来时旧实现把**内部 sessionId 硬截 16 字符**直接上屏
+ * （`activeSessionId.take(16) + "…"`）——机器码不该出现在用户界面（审查档 §4.1），
+ * 且截断后既认不出也搜不到。现在一律落到「未命名会话（当前）」：用户至少知道
+ * 「这就是当前目标」，而不是面对一串 id。
+ */
+internal fun sessionRowText(label: String?): String =
+  (label?.takeIf { it.isNotBlank() } ?: SESSION_UNKNOWN_LABEL) + "（当前）"
+
+/** 审批二次确认的有效窗口：超窗即撤臂，避免陈旧待确认态把后来的一次单击变成放行。 */
+internal const val APPROVAL_ARM_MS = 10_000L
+
+// ── 待答卡/审批卡的纯判据（0.14.1 批 2；纯 JVM 单测，不需要 Robolectric）──────────────
+//
+// 为什么抽成顶层纯函数：这三条都是「用户点一下会发生什么」的判据，此前散在监听器里，
+// 于是一类缺陷（箭头方向错、候选被丢、放行无确认）**没有任何离线判据**，只能靠设备实报。
+// 抽出来之后，「改坏即判红」的单测可以钉住语义（见 OverlayPendingCardTest）。
+
+/**
+ * 翻页索引（**钳制，不回卷**）。
+ *
+ * P0-7 的语义纠正：旧实现把「‹ 1/N ›」整块做成一枚按钮，监听写成 `(qPage + 1) % n`
+ * ——点视觉上的「上一题」实际跳下一题，末页还会回卷到第 1 页（多问题卡片上这是**做错事**）。
+ * @param current - 当前页（0 基）。
+ * @param total - 总页数。
+ * @param delta - -1 上一题 / +1 下一题。
+ * @return 钳制在 [0, total-1] 的页号；越界点击保持原页（按钮本身在端点禁用，这里做二重保险）。
+ */
+internal fun pagerIndex(current: Int, total: Int, delta: Int): Int {
+  if (total <= 0) return 0
+  return (current + delta).coerceIn(0, total - 1)
+}
+
+/**
+ * 折叠态一次展示的选项数（P0-8）。
+ *
+ * 旧实现是 `coerceAtMost(6)` 直接**丢弃**第 7 项起的候选——用户看不到剩余项，只能手打。
+ * 现在折叠 ≠ 丢弃：折叠只决定「先列几项」，剩余项由「还有 N 项（点此展开）」入口补足。
+ */
+internal fun optionsShownCount(total: Int, expanded: Boolean): Int {
+  if (total <= 0) return 0
+  return if (expanded) total else total.coerceAtMost(OPTIONS_COLLAPSED_MAX)
+}
+
+/** 折叠态被隐藏的候选数（> 0 时必须给出可见入口）。 */
+internal fun optionsHiddenCount(total: Int, expanded: Boolean): Int =
+  (total - optionsShownCount(total, expanded)).coerceAtLeast(0)
+
+/**
+ * 审批「批准一次」是否处于**已确认待放行**态（P0-9）。
+ *
+ * 放行的是一次真实工具执行（reason 里往往就是待执行命令），而此前单击即放行。
+ * 判据要点：① 必须是**同一张卡**（armedId 相等）——换卡即撤臂，杜绝陈旧状态把后来的一次单击变成放行；
+ * ② 必须落在确认窗口内（超窗视为未确认）。
+ */
+internal fun approvalArmed(
+  armedId: String?,
+  armedAtMs: Long,
+  eventId: String,
+  nowMs: Long,
+  windowMs: Long = APPROVAL_ARM_MS,
+): Boolean = armedId != null && armedId == eventId && nowMs - armedAtMs in 0 until windowMs

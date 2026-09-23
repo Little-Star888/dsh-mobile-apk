@@ -39,8 +39,10 @@ import { TrajectoryPanelsObserver } from './trajectory-panels-observer.ts'
 import { ComposerPopupGuard } from './composer-popup-guard.ts'
 import { SESSION_LOG_DIALOG_HIDE_CSS } from './session-log-dialog.css.ts'
 import { SessionLogDialogObserver } from './session-log-dialog-observer.ts'
+import { openSessionForNotify, type SessionOpenFace } from './mobile/notify-landing.ts'
 import { DevSection } from './dev-section/DevSection.tsx'
 import { PhoneControlSection } from './dev-section/phone-control.tsx'
+import { NotifySettingsSection } from './dev-section/notify-settings.tsx'
 import { DEV_SECTION_CSS } from './dev-section/dev-section.css.ts'
 import { GeneralSettings } from './general-settings/GeneralSettings.tsx'
 import { ThemeBridge } from './theme-bridge.ts'
@@ -234,6 +236,15 @@ export function apply(ctx: ClientContext): void {
     // 开发者选项子区（2026-08-23）：ADB 授权面板等安卓调试设施挂进此槽——不开独立导航行。
     children: { 'settings.dev.item': { kind: 'list', scope: 'root' } },
   }, DevSection))
+
+  // 通知（0.14.1 批 3 / P3-5）：提醒方式与「关掉会怎样」是每个用户都要做的决定，
+  // 此前唯一入口埋在开发者选项里（对普通用户不可达）——提级为设置页一级分区。
+  ctx.slots.inject('settings.section', () => ctx.slots.register({
+    name: 'settings.section',
+    id: 'android-notify',
+    order: 97,
+    label: () => '通知',
+  }, NotifySettingsSection))
 
   // 手机控制（0.14.0 用户定例）：把屏幕/Shizuku/虚拟屏/浮窗/无障碍/强制销毁收进独立设置页。
   ctx.slots.inject('settings.section', () => ctx.slots.register({
@@ -492,4 +503,24 @@ export function apply(ctx: ClientContext): void {
       document.documentElement.removeAttribute('data-dsh-incoming-draft-consumer')
     }
   }, 'ui-responsive: blank-session external attachment drafts')
+
+  /**
+   * 壳侧 → 页面的**通知落点**通道（0.14.1 批 4 / P0-1）。
+   *
+   * 为什么需要它：通知点击此前只是把应用拉到前台（壳侧一直在写 `dsh.notify.*` extras 而全仓没有
+   * 读取者，`MainActivity` 连 `onNewIntent` 都没有）——整族通知是单向公告板。会话视图与切换能力
+   * 只在页面里，故落点必须由页面执行：壳侧把会话 id 送进来，这里调会话服务的 `open(id)`。
+   *
+   * 契约（壳侧 `MainActivity.deliverNotifyRoute` 依此判成败）：**同步返回 boolean**
+   *   true  = 已切到该会话；false = 没找到（会话可能已被删除），壳侧据此给用户可见提示。
+   * 不把异常抛出去（抛出去会在桥层被吞成 undefined，壳侧就分不清「失败」与「未实现」）。
+   */
+  ctx.effect(() => {
+    const open = (sessionId: unknown): boolean =>
+      openSessionForNotify(ctx.sessions as unknown as SessionOpenFace, sessionId)
+    ;(window as unknown as Record<string, unknown>).__dshOpenSession = open
+    return () => {
+      delete (window as unknown as Record<string, unknown>).__dshOpenSession
+    }
+  }, 'ui-responsive: notification landing (openSession)')
 }

@@ -152,10 +152,16 @@ internal object SnapshotTransaction {
     // （用户实测 920 MB）与 .snapshot-stage（176 MB）在 marker 断言「已提交」之后
     // 永远不会再被清理。用户真机实测的正是这一形态（华为 NOH-AN00 / Android 31）。
     //
-    // 为什么必须 try/finally 而不是靠 deletePath 的容错：deletePath 只 catch `Exception`，
-    // 而本轮真机打穿它的恰是 `NoSuchMethodError`（**Error**，API 34 才有的 Stream.toList）
-    // ——Error 直接越过 catch 让 finish 在 clearMarker 之前中止。清理失败可以下一轮重试，
-    // marker 残留却会让「下一轮」也永远走同一条路。
+    // 为什么必须 try/finally，而不是靠 deletePath 的容错：**marker 的清除不得依赖另一个组件的
+    // 容错策略**。这条策略已经错过一次——0.14.1 之前 deletePath 只 catch `Exception`，而真机打穿
+    // 它的恰是 `NoSuchMethodError`（API 34 才有的 Stream.toList；**Error** 而非 Exception），
+    // 于是一次「清理失败」被放大成 marker 永久残留。
+    // 0.14.1 D1 已把 deletePath 的容错面扩到 `Exception` + `LinkageError`（见 SnapshotFs），
+    // 但 try/finally 仍必须留着，理由有两条且都不依赖那次修复的成败：
+    //   ① 非容忍类 `Throwable`（OutOfMemoryError / StackOverflowError 等）**刻意**仍然原样抛出；
+    //   ② 结构上，marker 是恢复权威，它的清除应当是**无条件**的——任何「先在别处判定这次清理
+    //      算不算成功」的设计都会把同一个死角再造一遍。
+    // 清理失败可以下一轮重试，marker 残留却会让「下一轮」也永远走同一条路。
     try {
       delete(previousRoot(filesDir))
       delete(stageRoot(filesDir))

@@ -197,9 +197,19 @@ class NotificationContractTest {
     assertTrue("页面必须调用写出口", ui.contains("setNotifySetting?.("))
     assertTrue("写后必须读回判定（applied 不为 true 不得置位）", ui.contains("applied !== true"))
 
-    // 页面必须真的挂在开发者选项分区里（否则组件存在但没人渲染 = 另一种不可达）。
+    // 页面必须真的挂在**可达分区**里（否则组件存在但没人渲染 = 另一种不可达）。
+    // 0.14.1 批 3（P3-5）后挂载点从「开发者选项」**提级**为设置页一级分区「通知」——
+    // 断言随之改指新挂载点（旧断言把旧结构当契约，正是本轮要收的形态之一）：
+    //   ① index.ts 注册一级分区 android-notify，并指向本文件的区块组件；
+    //   ② 该区块组件渲染了 NotifySettingsRow（能力与入口同处一文件，结构上不可能只留其一）；
+    //   ③ 开发者选项**不再**内嵌同一组开关（同功能双实现是审查档 §5 的结构性根因）。
+    val index = uiSource("src/client/index.ts")
+    assertTrue("通知设置必须注册为设置页一级分区", index.contains("id: 'android-notify'"))
+    assertTrue("一级分区必须指向本文件的区块组件", index.contains("NotifySettingsSection"))
+    assertTrue("区块组件必须渲染通知设置行", ui.contains("<NotifySettingsRow />"))
     val section = uiSource("src/client/dev-section/DevSection.tsx")
-    assertTrue("通知设置行必须挂进开发者选项分区", section.contains("<NotifySettingsRow />"))
+    assertFalse("开发者选项不得再内嵌同一组开关（只留一行指路）", section.contains("<NotifySettingsRow"))
+    assertTrue("开发者选项必须留一行指路文案", section.contains("设置 → 通知"))
   }
 
   @Test
@@ -348,7 +358,10 @@ class NotificationContractTest {
     assertTrue("必须有墙钟预算常量", queue.contains("NOT_READY_BUDGET_MS"))
     assertTrue("必须有独立计数 waitAttempts", queue.contains("waitAttempts"))
     assertTrue("必须有统一处置入口", queue.contains("handleNotReady("))
-    assertTrue("到期必须落到可见失败态", queue.contains("postDeliveryFailure(context, d.kind, d.eventId"))
+    assertTrue("到期必须落到可见失败态", queue.contains("postDeliveryFailure("))
+    // 0.14.1 批 8（S3-12）：失败通知要带上「你答的是什么」，否则用户只知道「提交失败」，
+    // 不知道该重答哪一条。
+    assertTrue("失败态必须带作答上下文", queue.contains("detail = answerSummary("))
     assertTrue("必须保留实测冷启动上限常量（不许按 60s 卡死）", queue.contains("ENGINE_COLD_START_OBSERVED_MS"))
   }
 
@@ -359,10 +372,14 @@ class NotificationContractTest {
     val queue = codeOnly(shellSource("NotifyDecisionQueue.kt"))
     assertTrue("OK 分支必须本地结算", queue.contains("NotifyBridge.markSettled(context, d.eventId, d.kind)"))
     val bridge = codeOnly(shellSource("NotifyBridge.kt"))
-    assertTrue("markSettled 不得依赖 pending 表存在才撤通知", bridge.contains("val k = kind ?: p?.kind ?: \"question\""))
+    // 0.14.1 批 8（S3-10）：旧实现在无 pending 记录时回落成 "question" —— 一条**审批**的 cancel 帧
+    // 会去结算提问那条 ID，审批通知连同按钮留在通知栏上（点了没反应）。现在无记录时两个 face 都撤。
+    // 判据要精确到**回落表达式**：`"question"` 作为 kind 字面量在别处是合法的。
+    assertTrue("无 pending 记录时不得再回落成 question", !bridge.contains("?: \"question\""))
+    assertTrue("无 pending 记录时必须两个 face 都撤", bridge.contains("NotifyCenter.cancel(context, eventId)"))
     // DEF-NOTIFY-03b（平台契约）：直接回复过的通知被系统加 LIFETIME_EXTENDED_BY_DIRECT_REPLY，
     // cancel() 被忽略；必须先同 (tag,id) 重投一次再撤。
-    assertTrue("结算必须走 settleInteractive（重投后撤）", bridge.contains("NotifyCenter.settleInteractive(context, k, eventId)"))
+    assertTrue("结算必须走 settleInteractive（重投后撤）", bridge.contains("NotifyCenter.settleInteractive(context, k, eventId, remote)"))
     val centerTxt = codeOnly(shellSource("NotifyCenter.kt"))
     assertTrue("必须有 settleInteractive 载体", centerTxt.contains("fun settleInteractive("))
     assertTrue("必须先 notify 同 id 再 cancel", centerTxt.contains("settle re-post ok"))

@@ -50,7 +50,7 @@ flowchart TD
 ### 阶段 1：每次冷启动（秒级到三十秒）
 
 - `MainActivity` 用 `by lazy` 建协作类（`app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:86` 起）；`MainActivity.kt:719` 是**全仓唯一的 `addJavascriptInterface` 注入点**（页面桥）；
-- 引导页先上屏并自证进度（`GuidePageRenderer`），同时 `app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:405`（`start`）拉起前台服务：`app/src/main/java/com/dsharnessmobile/shell/EngineService.kt:48`（`onStartCommand`）→ `EngineService.kt:107`（`ensureEngine`）；
+- 引导页先上屏并自证进度（`GuidePageRenderer`），同时 `app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:408`（`start`）拉起前台服务：`app/src/main/java/com/dsharnessmobile/shell/EngineService.kt:48`（`onStartCommand`）→ `EngineService.kt:107`（`ensureEngine`）；
 - 看门狗在服务侧起 tick：`app/src/main/java/com/dsharnessmobile/shell/WatchdogV2.kt:109`（`planTick`，深度探活/退避/熔断）；
 - 失败退路：启动超时与重试（`EngineStartFlow.kt:378`/`:384`）→ 熔断（`WatchdogV2.kt:76` `tripped`）→ 急救回退（`UndoGate` 调 `assets/undo-emergency.mjs`）→ 回引导页（`EngineStartFlow.kt:318` `shutdownToGuide`）。
 
@@ -104,10 +104,10 @@ sequenceDiagram
 |---|---|---|---|---|---|---|---|---|
 | K01 | 启动与引导面 | 点开 App 到引擎页面可见的进程入口、引导页与 WebView 宿主 | LAUNCHER 图标、VIEW/SEND 来件、ACTION_UPDATE | 引导与启动 | 引擎进程与快照面、鉴权探活、诊断落盘 | 系统启动器与分享面板、BootReceiver、悬浮球跳转 | MainActivity.kt,EngineStartFlow.kt,GuidePageRenderer.kt | 高 |
 | K02 | 引擎生命周期与保活 | 起 node 引擎、5s 探活、看门狗重启熔断与日志落盘 | EngineStartFlow.start、EngineService 5s tick | 引导与启动 | K01,K03 | MainActivity、BootReceiver、EngineStartFlow | EngineManager.kt,EngineService.kt,WatchdogV2.kt,LogCollector.kt | 高 |
-| K03 | 快照事务与更新链 | 内嵌快照暂存交换事务与回滚（插件故障走**清单式外科拔除**，不整份回滚），兼在线更新与清单合并 | 启动流判指纹不新鲜 / 引导页检查更新 / WebView 下载 | 快照与更新 | 引导启动流、引擎探活、构建快照资产 | EngineStartFlow.runFlow、EngineService 看门狗、引导页按钮、MainActivity 的 WebView 回调 | SnapshotTransaction.kt,SnapshotFs.kt,UpdateManager.kt,PluginMounts.kt | 高 |
+| K03 | 快照事务与更新链 | 内嵌快照暂存交换事务与回滚（插件故障走**清单式外科拔除**，不整份回滚），兼在线更新与清单合并 | 启动流判指纹不新鲜 / 引导页检查更新 / WebView 下载 | 快照与更新 | 引导启动流、引擎探活、构建快照资产 | EngineStartFlow.runFlow、EngineService 看门狗、引导页按钮、MainActivity 的 WebView 回调 | SnapshotTransaction.kt,SnapshotFs.kt,SnapshotRefreshPolicy.kt,PublicRepoProvision.kt,UpdateManager.kt,PluginMounts.kt | 高 |
 | K04 | 桥与控制协议面 | 页面 JS 桥面、引擎鉴权与控制队列承载 | 页面调 androidBridge；EngineService 起控制承载 | 稳态控制 | 引导与启动（EngineService/MainActivity）、无障碍与虚拟屏宿主、快照与更新（UndoGate） | MainActivity 装桥；EngineService.onCreate 起 ControlCarrier；看门狗 tick 调 UndoGate | app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt,app/src/main/java/com/dsharnessmobile/shell/ControlPoller.kt,app/src/main/java/com/dsharnessmobile/shell/EngineAuth.kt,app/src/main/java/com/dsharnessmobile/shell/ControlProtocolV2.kt | 高 |
 | K05 | 无障碍控制面 | 按需取语义树并对设备执行点击输入滚动截屏 | 控制队列取活 + 无障碍服务回调 | 稳态控制 | K04 控制协议、K06 特权执行 | ControlCarrier 控制队列取活、onServiceConnected、ADB 键盘广播 | DeviceControlService.kt,GlobalActionCatalog.kt,AdbKeyboardService.kt,AdbKeyboardReceiver.kt | 高 |
-| K06 | 特权执行、屏幕范围与本地文件面 | Shizuku 特权 shell 通道、屏幕范围门与本地文件出入口 | 引擎 sh* op / 设置页范围写面 / 外部分享与打开 intent | 稳态控制 | 控制队列承载、引擎 bridge 插件、虚拟屏注册表、无障碍控制面 | 引擎 androidPrivilege 服务面与页面桥 | ShellOps.kt,ScreenScope.kt,ShizukuTransport.kt,ShizukuUserService.kt,ShizukuProbe.kt,ShizukuSupport.kt,ProcIo.kt,FileIncoming.kt,PathOpen.kt,ConfigTransfer.kt | 高 |
+| K06 | 特权执行、屏幕范围与本地文件面 | Shizuku 特权 shell 通道、屏幕范围门与本地文件出入口 | 引擎 sh* op / 设置页范围写面 / 外部分享与打开 intent | 稳态控制 | 控制队列承载、引擎 bridge 插件、虚拟屏注册表、无障碍控制面 | 引擎 androidPrivilege 服务面与页面桥 | ShellOps.kt,ScreenScope.kt,ShizukuTransport.kt,ShizukuBindState.kt,ShizukuUserService.kt,ShizukuProbe.kt,ShizukuSupport.kt,ProcIo.kt,FileIncoming.kt,PathOpen.kt,ExternalLinks.kt,ConfigTransfer.kt | 高 |
 | K07 | 虚拟屏宿主 | Shizuku 建屏与 viewer Surface 交接的生命周期编排 | 模型 vd 工具 / 侧栏桥面 / Activity 生命周期 | 交互面 | Shizuku 特权通道、K05 无障碍控制面、K08 浏览器宿主 | MainActivity、DeviceControlService 与 ControlCarrier、侧栏面板 | VdisplayController.kt,VdisplayHost.kt,VdisplayOps.kt | 高 |
 | K08 | 浏览器宿主 | 隔离浏览器：无桥 WebView、准入过滤、几何与保活 | 模型 browser* op（控制队列）/ 面板 browserHost* 桥 | 交互面 | S01,P03,控制队列 | MainActivity 构造，op 与面板下推拉起 | BrowserHost.kt,BrowserHostNavigationPolicy.kt,BrowserOverlayPolicy.kt | 高 |
 | K09 | 悬浮球与面板 | 悬浮球三窗口与展开面板：状态、待答、应答、完成态 | 设置页开关或 onResume 补启；点球展开；WS 帧与 live 文件事件 | 交互面 | K01,K10,引擎网关 | K01 宿主 Activity 与桥开关；EngineService 划掉后台时停它 | OverlayService.kt,OverlayPanel.kt | 高 |
@@ -131,7 +131,7 @@ sequenceDiagram
 
 | 级别 | 查点 | 问题（一句话） | 证据锚点 | 影响 | 状态 |
 |---|---|---|---|---|---|
-| 高 | K04 | `jsString` 的 U+2028/U+2029 转义是**恒等替换**（源码两侧都是裸字符） | `app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:420-427` | 旧 WebView 上注入脚本解析失败，工具回执误报 `stale-ref`，模型被引向错误方向 | **已修（本轮）**：抽成纯函数 `escapeLineSeparators`（方向 = 裸字符转义文本），单测改为不依赖 org.json 实现的形态断言，9 例全绿（`app/src/test/java/com/dsharnessmobile/shell/BrowserHostNavigationPolicyTest.kt:129`） |
+| 高 | K04 | `jsString` 的 U+2028/U+2029 转义是**恒等替换**（源码两侧都是裸字符） | `app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:423-430` | 旧 WebView 上注入脚本解析失败，工具回执误报 `stale-ref`，模型被引向错误方向 | **已修（本轮）**：抽成纯函数 `escapeLineSeparators`（方向 = 裸字符转义文本），单测改为不依赖 org.json 实现的形态断言，9 例全绿（`app/src/test/java/com/dsharnessmobile/shell/BrowserHostNavigationPolicyTest.kt:129`） |
 | 高 | K08 | `workspaces`/`currentWorkspace` 跨线程读写，且 `onMain` 只有 finally 没有 catch | `app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt:187-192`、`app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt:821`、`app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt:1661-1673` | 主线程 CME 一次即进程闪退（模型开页与侧栏展开同时发生）；`workspaces` 无上限无 TTL，每个新会话多一个常驻 WebView | 未修（评审 S-8/R1/R2） |
 | 高 | K08 | 浏览器 op 在控制队列线程上自旋等导航：错误页路径必等满 10s 且仍回 `ok` | `app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt:1087`、`app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt:1101-1107` | 一次 `browser_open` 占住整条设备控制队列 10s，无障碍与特权命令全排队 | 未修（S-7/F-6） |
 | 高 | K08 | 浏览器截图只写不删、`health` 恒 `ok`、失败原因串上一轮 `lastError` | `app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt:1565`、`app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt:1581`、`app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt:1589` | 长任务磁盘累积（全页 PNG）；截图失败原因误导 | 未修（S-6/F-7） |
@@ -168,7 +168,7 @@ sequenceDiagram
 
 - [K01] 1. 主 WebView 渲染进程死亡后没有任何重建路径（已确认：`onRenderProcessGone` 在 MainActivity.kt:605-619 落诊断后 `view.destroy()`，全类 WebView 创建点只有 :193）。而 `GuidePageRenderer.showWeb()`（GuidePageRenderer.kt:363-372）随后会把引导页藏起、把已销毁的 WebView 置 VISIBLE，并在 `enginePageFailed` 为真时 `reload()`。后果：引擎健康后用户看到的是深灰空页（`:198` 设的中性深色底），冻结看门狗（EngineStartFlow.kt:96-126）会对一个死 WebView 每 20-30s 复判「页面无响应」并 Toast；源码注释所称「交由既有引擎监控/引导页路径恢复」在代码里没有实现（无第二处 `WebView(this)`）。安全网只有 Activity 被系统重建。
 - [K01] 2. `MainActivity.onDestroy` 的 `webViewRef = null`（MainActivity.kt:422）没有身份校验，而同文件对 `BrowserHostHolder.host` 却写了 `===` 守卫（:441）。触发条件（未证实于本机）：MainActivity 未声明 `launchMode`、也没有 `onNewIntent`（manifest + 源码 grep 均无），系统分享面板的 VIEW/SEND 在已有实例（尤其 ConsoleActivity 在前台）时会以 standard 模式新建第二个实例——旧实例随即 onDestroy 把 `webViewRef` 清空，`DeviceControlService`（DeviceControlService.kt:852）此后恒报「页面不在场」。同源风险：两份启动流/监控/看门狗/回收定时器并存，`OverlayService.frameConsumer` 被后 Resume 者覆盖。
-- [K01] 3. `pickToken` 是进程级随机 UUID（EngineManager.kt:1552-1559，`ensurePickToken` 只在 companion 内存缓存），但 MainActivity.kt:78-79 的注释称它「MainActivity 重建/看护重启不更换，与引擎 env 的 DSH_PICK_TOKEN 始终一致」；引擎侧在插件加载时取一次 `process.env.DSH_PICK_TOKEN`（dsh-host-web-compat/lib/index.js:794-802）并 fail-closed 校验 `x-dsh-pick-token`。而 EngineStartFlow.kt:424-437 明确支持「引擎先跑、app 后启动」的早退路径 ⇒ app 进程被杀重建后新 token 与仍活着的引擎 env 不一致，页面 `getPickToken()` 递的是新值 ⇒ `/api/android/dir-pick/*` 与 `/api/android/open-path` 403（后果未在本机复现，标未证实；代码可证的是两处取值来源不同生命周期）。
+- [K01] 3. `pickToken` 是进程级随机 UUID（EngineManager.kt:1552-1559，`ensurePickToken` 只在 companion 内存缓存），但 MainActivity.kt:78-79 的注释称它「MainActivity 重建/看护重启不更换，与引擎 env 的 DSH_PICK_TOKEN 始终一致」；引擎侧在插件加载时取一次 `process.env.DSH_PICK_TOKEN`（dsh-host-web-compat/lib/index.js:794-802）并 fail-closed 校验 `x-dsh-pick-token`。而 EngineStartFlow.kt:427-440 明确支持「引擎先跑、app 后启动」的早退路径 ⇒ app 进程被杀重建后新 token 与仍活着的引擎 env 不一致，页面 `getPickToken()` 递的是新值 ⇒ `/api/android/dir-pick/*` 与 `/api/android/open-path` 403（后果未在本机复现，标未证实；代码可证的是两处取值来源不同生命周期）。
 - [K01] 4. `WebUiChrome` 只剩沉浸式一条活链路：`applyImmersive`/`immersivePrefs`（MainActivity.kt:191）有调用点，而 `copyTextNative`(:37)、`keepScreenOn`(:54)、`releaseWakeLock`(:72)、`pushSystemDark`(:94)、`cancelThemePush`(:120)、`setImmersivePersisted`(:27) 全仓零调用点（grep 确认），实际生效的是 MainActivity.kt:850/874/967 的私有同形副本与 onDestroy 的 `screenWakeLock` 释放。影响：本类注释与 ARCHITECTURE.md:15 都把它当作这四类 chrome 的执行面（漂移）；且两个 `screenWakeLock` 字段并存——将来把 `onKeepScreen`/`onSetImmersive` 接回本类，`MainActivity.onDestroy` 的释放不会覆盖新字段，回归老 Review 修过的「成对 acquire/release」泄漏形态。
 - [K01] 5. WebView 信任边界在本块的两处锚点（评审已点名，均只做登记不改）：进程级 `CookieManager` 注入引擎鉴权 cookie（MainActivity.kt:812-819，评审 S1/S3——同一 jar 对隔离 BrowserHost 可见，「隔离只是没有桥，不是存储隔离」）；非引擎 URL 一律 `downloadSaver.openInExternalBrowser`，无 scheme 白名单（MainActivity.kt:544-549，评审 5.13/H-11——`intent://`/`market://`/`tel:` 等任意 scheme 可经页面触发）。
 - [K01] 漂移：`dsh-mobile-apk/docs/AGENTS/ARCHITECTURE.md:12` 说 EngineStartFlow.kt 为 539 行（同表 :9 MainActivity 918、:10 GuidePageRenderer 404），源码实测为 773 / 1175 / 419 行（`wc -l`，见该表自称「2026-09-14 当场实测」）。
@@ -182,11 +182,11 @@ sequenceDiagram
 - [K02] 漂移：`docs/AGENTS/ARCHITECTURE.md:45` 说 WatchdogV2.kt 负责「boot 恢复用户同意状态」，源码该文件已无任何 Receiver（`ActivityManager`/`BroadcastReceiver`/`Intent`/`IntentFilter` 只剩零使用的 import，WatchdogV2.kt:3-8），BOOT_COMPLETED 处理在 `BootReceiver.kt:23-36`。
 - [K02] 漂移：`docs/AGENTS/ARCHITECTURE.md:76` 给 LogCollector.kt 记 332 行（2026-09-14 实测），现为 931 行；同表 EngineService.kt 记 201 行，现为 246 行。
 - [K03] 1. `app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt:196-198` —— 刷新失败 catch 里 `SnapshotTransaction.rollback(...)` 的返回值未判、紧接着无条件 `clearMarker`，与 `SnapshotTransaction.recover` 的 D-3 处理（SnapshotTransaction.kt:688-699「回滚失败不得无条件清 marker」）自相矛盾，也与同文件的 `applyRecovery`（:308-313 把失败明细写进 `pendingRecoveryFailure`）不对称。触发：swap 中途抛异常且回滚有任一条目失败（例如删不净的 live 子树），marker 被清、失败条目无人上报。后果链：下一次刷新若在写 SWAPPING 之前就抛异常（空间断言拒绝 §7.2-F-4、或 stage 派生的任何异常），catch 会走 `rollback(marker=STAGED)`，而 `collectDisplacedNames`(SnapshotTransaction.kt:798) 会把残留的 `.snapshot-previous` 当成回滚源逐条覆盖回 live —— 即旧的工厂树被静默“复活”盖在新树上；此后 `hasResidue && snapshotFresh()` 的回收门（:253）也可能把仍需的残渣删掉。建议按 `recover` 的口径改：`if (!result.ok) { 保留 marker + 上报告警 } else clearMarker()`。
-- [K03] 2. `app/src/main/java/com/dsharnessmobile/shell/SnapshotTransaction.kt:283-289` —— 空间断言覆盖面窄于审查 §7.2-F-4 / B12 的原始发现：断言跑在解压完成之后（stage 已付过 2.5 GB 量级空间），解压阶段本身仍无任何 StatFs 前置检查（`EngineManager.extractSnapshotTo` :434 直调解压），所以「解压中途 ENOSPC → 报运行时更新失败」的原症状还在；且 required 只由 live profiles 体积推导（`backupBytes + 25% + 64MB`），当 live profiles 明显小于 staged（回滚补偿删剩 / 半合并的现场，正是「失败→留残渣→空间紧→更易失败」的自我强化回路）时，`mergeTree` 补入文件的新分配不在预算内，`SnapshotFs.sizeOf`(:89) 还会把不可读条目按 0 静默低估。后果：断言放行后仍在合并中途 ENOSPC。另有一致性问题：`InsufficientSpaceException` 的可照做文案只进 `lastRefreshFailure`/boot-fail.log，用户界面拿到的是通用「运行时更新失败」（EngineStartFlow.kt:494），B12 要的「专门文案」只实现了一半。
+- [K03] 2. `app/src/main/java/com/dsharnessmobile/shell/SnapshotTransaction.kt:283-289` —— 空间断言覆盖面窄于审查 §7.2-F-4 / B12 的原始发现：断言跑在解压完成之后（stage 已付过 2.5 GB 量级空间），解压阶段本身仍无任何 StatFs 前置检查（`EngineManager.extractSnapshotTo` :434 直调解压），所以「解压中途 ENOSPC → 报运行时更新失败」的原症状还在；且 required 只由 live profiles 体积推导（`backupBytes + 25% + 64MB`），当 live profiles 明显小于 staged（回滚补偿删剩 / 半合并的现场，正是「失败→留残渣→空间紧→更易失败」的自我强化回路）时，`mergeTree` 补入文件的新分配不在预算内，`SnapshotFs.sizeOf`(:89) 还会把不可读条目按 0 静默低估。后果：断言放行后仍在合并中途 ENOSPC。另有一致性问题：`InsufficientSpaceException` 的可照做文案只进 `lastRefreshFailure`/boot-fail.log，用户界面拿到的是通用「运行时更新失败」（EngineStartFlow.kt:497），B12 要的「专门文案」只实现了一半。
 - [K03] 3. `app/src/main/java/com/dsharnessmobile/shell/UpdateManager.kt:96-98` 与 `app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt:81-86` —— 在线更新把 manifest 的 sha256 写进 `.snapshot-fingerprint`，而内嵌链的 `snapshotFresh()` 要求该文件等于 `assets/snapshot.sha256`；两个口径天然不等，于是下次进程启动必然判「不新鲜」→ 重解压内嵌快照，把刚完成的在线更新整体回滚（且 `.update-pending`/`usr-old` 不会被这条路径清掉，看门狗仍按旧时间戳推进确认/回退状态机，`rollbackToOld`(EngineManager.kt:1372) 可能在新树已就位后又把 `usr` 换回 `usr-old` —— 这一段的最终表现未在设备上证实）。影响面受 S-10 限定：默认 `DEFAULT_MANIFEST_URL` 为空，只有 `overrideManifestUrl` 打开时可达。
 - [K03] 4. `app/src/main/java/com/dsharnessmobile/shell/UpdateManager.kt:69-80` —— 在线更新的 `usr` 换位是非事务的两步 `renameTo`（`usr`→`usr-old`→新树入位），既不写 `.snapshot-transaction`，也不进 `SnapshotFs.move`；`.update-pending` 只在两步都成功后才写。若在两次 rename 之间被杀（OOM、厂商清理），live 无 `usr`，而 `recoverInterruptedRefresh` 只认 `.snapshot-stage`/`.snapshot-previous`，看门狗也因缺 `.update-pending` 不会调 `rollbackToOld` —— 唯一恢复路径是内嵌快照全量重解压（实测 8 分钟量级）。同一函数开头 `SnapshotFs.deletePath(old)`(:71) 还会在上一次更新尚未确认/回退时先删掉唯一回退源 `usr-old`。
 - [K03] 5. `app/src/main/java/com/dsharnessmobile/shell/SnapshotExtractor.kt:81` 与 `:142` —— 同一条目把 `entry.size` 累加进 `done` 两次（一次用于上限判定、一次用于进度），于是总量上限 `maxTotalBytes = 8 GiB` 实际在约 4 GiB 处触发，`onProgress` 上报的解压字节数约翻倍（解压条在解压到一半时即报满）。后果：S-10 想要的「快照真实体量 3–5 倍余量」实际只剩约 1.6 倍，偏大的合法快照会被判成「解压炸弹」中止（错误文案指向超限而真因是重复计数）。进度口径同时失真——EngineStartFlow 的「已写入 N MB」由它派生。
-- [K04] 1. 【已修·本轮，见 §3.1】 （已证实，机制层）`jsString` 的 U+2028/U+2029「修复」编译成恒等替换：`AndroidBridge.kt:420-422` 源码是 `.replace(<裸 U+2028 字符>, "<单个反斜杠>u2028")`，第二个实参在 Kotlin 里是同一个字符（`\uXXXX` 是转义，不是六个字符）——编译产物 `app/build/tmp/kotlin-classes/debug/com/dsharnessmobile/shell/AndroidBridgeKt.class` 常量池里只有裸 U+2028/U+2029 两条字符串常量（`\x01\x00\x03 E2 80 A8`），没有 `\u2028` 转义串，两个实参去重成同一条 ⇒ 该行不做任何转义。为什么单测还是绿的（现场反证）：JVM 单测类路径显式引入了另一份实现 `org.json:json:20240303`（`app/build.gradle.kts:136-137` 注释自陈「本地单测用真实 org.json，android.jar 桩在 JVM 里抛 Stub!」）；`BrowserHostNavigationPolicyTest.kt:129-141` 在恒等替换下仍判绿（`app/build/tmp/kotlin-classes/debugUnitTest/.../BrowserHostNavigationPolicyTest.class` 的常量池含断言用 `\u20` 字面量，`app/build/test-results/testDebugUnitTest/TEST-…BrowserHostNavigationPolicyTest.xml` 现场读到 tests=9 failures=0），只可能是这份 jar 的 `quote` 自己转义了 U+2028/U+2029（其 `JSONObject.class` 内含写 `\u` 的字符串字面量，与该区间转义实现相符）。设备运行时用的是 Android 框架 `org.json`，与单测类路径不是同一实现 ⇒ 这条绿的判据测不到设备行为，是假保证。设备侧是否真需要该转义（审查 §3.1-C3 / F-3 断言 `JSONObject.quote` 不转义该区间）本轮无本机复算手段，未证实。
+- [K04] 1. 【已修·本轮，见 §3.1】 （已证实，机制层）`jsString` 的 U+2028/U+2029「修复」编译成恒等替换：`AndroidBridge.kt:423-425` 源码是 `.replace(<裸 U+2028 字符>, "<单个反斜杠>u2028")`，第二个实参在 Kotlin 里是同一个字符（`\uXXXX` 是转义，不是六个字符）——编译产物 `app/build/tmp/kotlin-classes/debug/com/dsharnessmobile/shell/AndroidBridgeKt.class` 常量池里只有裸 U+2028/U+2029 两条字符串常量（`\x01\x00\x03 E2 80 A8`），没有 `\u2028` 转义串，两个实参去重成同一条 ⇒ 该行不做任何转义。为什么单测还是绿的（现场反证）：JVM 单测类路径显式引入了另一份实现 `org.json:json:20240303`（`app/build.gradle.kts:136-137` 注释自陈「本地单测用真实 org.json，android.jar 桩在 JVM 里抛 Stub!」）；`BrowserHostNavigationPolicyTest.kt:129-141` 在恒等替换下仍判绿（`app/build/tmp/kotlin-classes/debugUnitTest/.../BrowserHostNavigationPolicyTest.class` 的常量池含断言用 `\u20` 字面量，`app/build/test-results/testDebugUnitTest/TEST-…BrowserHostNavigationPolicyTest.xml` 现场读到 tests=9 failures=0），只可能是这份 jar 的 `quote` 自己转义了 U+2028/U+2029（其 `JSONObject.class` 内含写 `\u` 的字符串字面量，与该区间转义实现相符）。设备运行时用的是 Android 框架 `org.json`，与单测类路径不是同一实现 ⇒ 这条绿的判据测不到设备行为，是假保证。设备侧是否真需要该转义（审查 §3.1-C3 / F-3 断言 `JSONObject.quote` 不转义该区间）本轮无本机复算手段，未证实。
 - [K04] 2. （已证实）审计语义：真实结果被塞进 args，`result` 恒 `ok`，拒绝完全不落账：`ControlAudit.kt:34` 硬编码 `.put("result","ok")`，而调用方把真值放进参数里（`ShellOps.kt:588-597` 传 `"ok" to ok`）⇒ `audit.ndjson` 出现 `result:"ok"` 与 `args.ok:false` 自相矛盾；`ShellOps.kt:94` 的范围拒绝 `return` 早于 `audit(...)`（四族审计点只在 `:101/:110/:119/:127`），安全事件（`screen-out-of-scope`）零留痕。事后复盘不可信（审查 §5.3）。
 - [K04] 3. （已证实，潜伏）跨语言「逐字同规则」在带空白文本上不成立：壳侧编码器在符号表阶段就 trim（`ControlProtocolV2.kt:196-197` `sym(row.text.trim())`），参考实现 `protocol-v2.ts:349` 直接 `symOf(row.text)`，trim 只发生在 XML 入口 `rowsFromRaw`（`protocol-v2.ts:235-236`）；而跨语言 fixture `app/src/test/resources/protocol-v2/canonical-rows.json` 现场数出 393 行里 0 行 text/desc 带前后空白 ⇒ 门禁看不见这条差异（任一侧 trim 口径回归都不会红），`ControlProtocolV2.kt:21-22` 的「逐字同规则」声明比实际成立范围宽。
 - [K04] 4. （代码路径已证实，设备后果未证实）返回键的「观测不到」方向与硬约束相反：`BackGate.kt:16-17` 的硬约束写「观测不到/关不掉的层一律消费，不得误退应用」，但 `parseDepth` 解析不出即回 0（`:70-73`，注释还自称「与观测不到不消费同向」），`onPageFinished(0)` → `available=false` → `decide` 落 `FINISH_ACTIVITY`（`:52-56`）⇒ 页面侧 `window.__dshBackDepth` 缺席（注入层/页面版本不匹配，正是审查 §7.7 那类「注册了但不真实可用」）时，返回键会退出应用而不是被消费。触发路径：`MainActivity.kt:502` 拉平拿 `undefined` → `parseDepth` 0；`:638` 只对引擎源页面拉平。
@@ -234,21 +234,21 @@ sequenceDiagram
 - [K09] 漂移：`dsh-mobile-apk/docs/AGENTS/ARCHITECTURE.md:27-34` 说 OverlayService.kt 772 / OverlayHalo.kt 164 / OverlayPanel.kt 1217 / OverlayReport.kt 325 行，源码实测 `OverlayService.kt` 785 / `OverlayHalo.kt` 168 / `OverlayPanel.kt` 1222 / `OverlayReport.kt` 384（差 59 行正是块H 的 CompletionNotice 段）
 - [K09] 漂移：`dsh-mobile-apk/docs/AGENTS/ARCHITECTURE.md:29` 与 `dsh-mobile-apk/docs/AGENTS/modules.md:39` 说「应答 POST /api/respond 全信封，approval value={sessionId,approvalId,outcome}；question 取消发 ok:false error cancelled」，源码 `OverlayPanel.kt:818` 是 POST /api/$events/result、payload={args:{clientId,eventId,outcome}}，审批取值 allowed-once/rejected（`OverlayPanel.kt:616-617`）、提问跳过是 kind=rejected 加 error{name:UserQuestionError,code:cancelled}（`OverlayPanel.kt:904-908`）；同族过期注释仍在源码里：`OverlayPanel.kt:24`、`OverlayPanel.kt:489`、`OverlayLiveFeed.kt:166`
 - [K09] 漂移：`dsh-mobile/docs/0.14.1-preview-OVERLAY-COMPLETION-CARD.md` 的 1.1 表说 OverlayService.kt 673 / OverlayPanel.kt 1046 / OverlayLiveFeed.kt 172 / OverlayHalo.kt 91 / OverlayTheme.kt 33 行，源码实测 785 / 1222 / 196 / 168 / 38；该详档被源码注释当准绳引用（`OverlayService.kt:106`、`OverlayReport.kt:252`）
-- [K09] 漂移：`app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:133` 说 flashStatus 在 `OverlayService.kt:669`，源码该函数在 `OverlayService.kt:683`
+- [K09] 漂移：`app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:141` 说 flashStatus 在 `OverlayService.kt:669`，源码该函数在 `OverlayService.kt:683`
 - [K10] 1. 决策链与动作链的记账只走 `LogCollector`（`NotifyDecisionQueue.kt:194/200/229/271/281/299/316/334/338/367/382/388`、`NotifyActionReceiver.kt:89/101/110/119/127`），而 `LogCollector.log` 在采集器未开时直接 return（`LogCollector.kt:785`，闸门 `MainActivity.kt:1167` 缺键即 false）⇒ 默认设备上「点了动作 → 是否落盘 → 是否投递成功」全链路零可观测面，`files/notify-responder.log` 里没有任何 decision 行（只有 `NotifyBridge` 的 waterfall/ready/cancel 行）。这与已修的 J-2（`NotificationContractTest.kt:206` 要求投递结果改走 `NotifyProbe`）是同一族缺陷，只是当时只修了 `NotifyStore`。影响：用户报「批准没生效」时无法从设备取证。
 - [K10] 2. `NotifySuppressQueue` 是纯进程内 `@Volatile List`（`NotifySuppressQueue.kt:83`），而 `drain` 早已推进字节偏移（`NotifyStore.kt:398`）⇒ 命中抑制后进程被回收（后台被杀的常见场景）即永久丢该条，与 FIX-1「抑制＝延后而非丢弃」的承诺只对存活进程成立。已登记：评审 `N-8`（`coord:docs/COMPAT-REVIEW-0.14.0-2026-09-19.md:1238`，锚点正是 `NotifySuppressQueue.kt:83` 与 `:153-167`）与 `H-17`（`coord:docs/0.14.1-REVIEW-CHECKLIST-PROGRESS.md:94`），修法为落盘 sidecar + 启动恢复。
 - [K10] 3. `PostStatus.STALE` 分支（`NotifyDecisionQueue.kt:323-327`，404/410 才触发）在本版本不可达：设备实测网关对未知 eventId 返回 200 no-op（`coord:docs/0.14.0-preview-ACCEPTANCE-LEDGER.md:177` 的 NT-17 注、`coord:docs/NEXT-ITERATION-PLAN-2026-09-12.md:1440` NT-17B）⇒ 旧事件会被判 `OK`、标记 `submitted` 并本地撤通知（`NotifyDecisionQueue.kt:310-316`），用户以为答复已提交而引擎从未收到，「该请求已失效」文案永不出现。已登记为未决项，未证实有壳侧可行替代信号（评审建议查 cancel 帧）。
-- [K10] 4. FIX-2 的可见反馈面是 `OverlayService.flashStatus`，而它要求面板展开且只闪现 2.5s（`OverlayService.kt:683-692` 的 `if (expanded)` 守卫，坑 148 已记该可见性条件）⇒ 「通知已延后」「通知未授权」这类提示在面板收起（最需要提示的前台场景）时依然不可见，`ShellListener`（`NotifyCenter.kt:137-159`）只解决了「零实现」，没解决「不可见」。影响：开启抑制后用户仍可能观察到「什么都没发生」。
-- [K10] 5. 渠道降级结果被空串固化：`resolveChannel` 把 `chosen = null` 写成 `channel.<category> = ""`（`NotifyCenter.kt:392-395`），`channelFor` 命中已初始化标记后直接 `stored.ifEmpty { null }` 返回、不再复查 `getNotificationChannel`（`:361-371`）；`selectedCache` 同进程内同样固化。用户按自检页文案去系统设置把 importance 调回高优后，应用仍永久判「已降级为静默」并只发静默条目（`:443-463` 文案继续报降级）——除非清数据或换新候选 ID。源码级可判，本轮无设备复现。
+- [K10] 4. FIX-2 的可见反馈面是 `OverlayService.flashStatus`，而它要求面板展开且只闪现 2.5s（`OverlayService.kt:683-692` 的 `if (expanded)` 守卫，坑 148 已记该可见性条件）⇒ 「通知已延后」「通知未授权」这类提示在面板收起（最需要提示的前台场景）时依然不可见，`ShellListener`（`NotifyCenter.kt:145-167`）只解决了「零实现」，没解决「不可见」。影响：开启抑制后用户仍可能观察到「什么都没发生」。
+- [K10] 5. 渠道降级结果被空串固化：`resolveChannel` 把 `chosen = null` 写成 `channel.<category> = ""`（`NotifyCenter.kt:401-404`），`channelFor` 命中已初始化标记后直接 `stored.ifEmpty { null }` 返回、不再复查 `getNotificationChannel`（`:361-371`）；`selectedCache` 同进程内同样固化。用户按自检页文案去系统设置把 importance 调回高优后，应用仍永久判「已降级为静默」并只发静默条目（`:443-463` 文案继续报降级）——除非清数据或换新候选 ID。源码级可判，本轮无设备复现。
 - [K10] 漂移：
 - [K10] 漂移：`docs/AGENTS/ARCHITECTURE.md:70` 说 `NotifyCenter.kt` 834 行，源码（`wc -l`）是 1051 行。
 - [K10] 漂移：`docs/AGENTS/ARCHITECTURE.md:71` 说 `NotifyStore.kt` 287 行，源码是 537 行。
 - [K10] 漂移：`docs/AGENTS/ARCHITECTURE.md` 模块表缺 `NotifySuppressQueue.kt`（0.14.1 新增，只在 `docs/AGENTS/modules.md:36` 有条目）。
-- [K10] 漂移：`app/src/main/java/com/dsharnessmobile/shell/OverlayReport.kt:233-234` 注释说与 `notify-projection.ts` 的 `reportOutcomeLabel` 逐字同构，实际 `interrupted` 文案不同——`plugins/dsh-android-bridge/src/notify-projection.ts:68` 是「被中断（进程重启）」，`OverlayReport.kt:244` 与 `NotifyCenter.kt:1041` 是「被中断」。
-- [K10] 漂移：`app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:133` 注释指向 `OverlayService.kt:669` 的 `flashStatus`，实际在 `OverlayService.kt:683`。
-- [K10] 漂移：`app/src/main/java/com/dsharnessmobile/shell/OverlayService.kt:706` 注释说先例在 `NotifyCenter.kt:605-606`，实际 `Intent(app, MainActivity::class.java)` 在 `NotifyCenter.kt:822`（605-606 是 `deferredKey` 的注释）。
+- [K10] 漂移：`app/src/main/java/com/dsharnessmobile/shell/OverlayReport.kt:233-234` 注释说与 `notify-projection.ts` 的 `reportOutcomeLabel` 逐字同构，实际 `interrupted` 文案不同——`plugins/dsh-android-bridge/src/notify-projection.ts:68` 是「被中断（进程重启）」，`OverlayReport.kt:244` 与 `NotifyCenter.kt:1048` 是「被中断」。
+- [K10] 漂移：`app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:141` 注释指向 `OverlayService.kt:669` 的 `flashStatus`，实际在 `OverlayService.kt:683`。
+- [K10] 漂移：`app/src/main/java/com/dsharnessmobile/shell/OverlayService.kt:706` 注释说先例在 `NotifyCenter.kt:612-613`，实际 `Intent(app, MainActivity::class.java)` 在 `NotifyCenter.kt:829`（605-606 是 `deferredKey` 的注释）。
 - [K10] 漂移：`plugins/dsh-android-bridge/src/index.ts:1458` 注释说「壳侧 FileObserver 按偏移消费后截断/轮转」，实际壳侧只读不截断不轮转（`NotifyStore.kt:18-20` 明写「引擎超过 512KB 时轮转 .1」，轮转方是引擎）。
-- [K10] 漂移：`docs/0.14.1-preview-NOTIFY-REALTIME-AND-STATE-SYNC.md` §0/§1.2 仍用旧行号（`:377` 抑制判定、`:114` 默认值、`:88-97` Listener、`:307-311` Result），当前源码对应 `NotifyCenter.kt:624`、`:49` / `:191`、`:111-120`、`:500-514`。
+- [K10] 漂移：`docs/0.14.1-preview-NOTIFY-REALTIME-AND-STATE-SYNC.md` §0/§1.2 仍用旧行号（`:377` 抑制判定、`:114` 默认值、`:88-97` Listener、`:307-311` Result），当前源码对应 `NotifyCenter.kt:631`、`:49` / `:191`、`:111-120`、`:500-514`。
 - [K11] 1. 已确认：判据的产出者与消费者分属两条链。唯一产出结果的执行点是 `.github/workflows/pr-gate.yml:140`（CI 跑 gradle），而数量门禁只在打包/发布链里（`scripts/build-apk.mjs:197`、`scripts/build-apk-013.ps1:145`，均 `--allow-missing`；`scripts/check-release-gates.mjs:104` 登记 `ci: false`），CI 里的 `check-release-gates.mjs`（`.github/workflows/pr-gate.yml:91`）不带 `--run`，只断接线不跑门禁。且两条构建链自己只跑 `:app:assembleDebug`（`scripts/build-apk.mjs:347`、`scripts/build-apk-013.ps1:388`），从不跑 `:app:testDebugUnitTest`。影响：CI 里删掉一个测试类（gradle exit 仍 0）全绿，本地链则只能读到上一次手动跑留下的 XML——改了测试源码就判陈旧。两半防线各自成立，但没有一条链同时具备「产出 + 判据」。
 - [K11] 2. 已确认：`app/build.gradle.kts:88` 的 `unitTests.isReturnDefaultValues = true` 把 android.* 打桩成 0/null/false。本目录已有两条针对性反桩判据（`app/src/test/java/com/dsharnessmobile/shell/CallSiteContractTest.kt:294` 禁 `Color.argb`、`app/src/test/java/com/dsharnessmobile/shell/OverlayHaloInvariantTest.kt:92` 要求四态色互不相同），说明风险真实；将来任何新增的 android.graphics/Log 断言会静默恒真。已确认配置在场；未证实本目录还存在其它被桩恒真的断言（49 文件逐个读过，除 `app/src/test/java/com/dsharnessmobile/shell/NotifyCenterChannelTest.kt:33` 的常量同义反复外未发现）。
 - [K11] 3. 已确认：`app/src/test/java/com/dsharnessmobile/shell/SnapshotUserDataTest.kt:84` 在宿主不允许建符号链接时 `assumeTrue(..., false)` → 整例被 JUnit 假设失败跳过；而 `scripts/check-kotlin-test-count.mjs:143-147` 只对 failures/errors 判红，不判 skipped，基线仍按 5 例计。现场件：`app/build/test-results/testDebugUnitTest/` 下该类的 XML `skipped="1"`，即当前 456 例里实际执行 455 例（总数与基线比对完全一致，这个 skip 不会被任何判据点出来）。
@@ -322,7 +322,7 @@ sequenceDiagram
 - [P03] 2. 已确认（跨会话/跨页记忆）：`tools.ts:33` 的 `lastSnapshot` 是模块级单槽（评审 §M5、H-6 未修），B 会话的 `browser_click` 会直接消费 A 会话的 ref + 代次；新页首快照都是 `bx1` 起、代次 1-2 极易相同，壳侧只验代次与 ref、自述不校验 tab（`BrowserHost.kt:1412-1415`、`:1432-1447`）。引擎侧 `SnapshotMemory.tabId/refs`（`tools.ts:26-30`、`:470`）从不被读，页维度全程无校验 → 症状是「点在了本会话的另一页上但仍报成功」。
 - [P03] 3. 已确认（同一事实两种读数）：`status.ts:135` 的 `ops` 恒为静态 `VD_OPS`（7 条），`snapshotFromRaw` 全程忽略壳侧回执里的 `ops`；面板路径 `mapStatusPayload:299` 读的却是壳侧值，而壳侧 `VdisplayController.ops():124` 只列 5 条（缺 `vdLaunchApp`/`vdInput`）。于是 `android_vdisplay_status` 报 7 条可用、面板报 5 条。F-13（`ops()` 由 `SUPPORTED_OPS` 派生、==7 条）本轮未做，H-14（消费 `caps.ops`）同源。
 - [P03] 4. 已确认（回执丢字段，同 issue #232 族）：`plugins/dsh-android-vdisplay/src/index.ts:140` 的 render 只输出 `guidance`，失败时模型看不到 `code`（工具说明却让模型「看 code/guidance」），active 时看不到 `screens` 里的 alias（`screenId` 需要 `virtual-N`）；`execute` 里算好的 `text`（`:157`）从不被渲染。判据同 `tools.ts:73-87` 记的「能力声明与可用通道不一致」。
-- [P03] 5. 已确认（客户端声明与壳侧不符且不在门禁面内）：`plugins/dsh-android-vdisplay/src/client/index.ts:83` 声明 `vdisplayDestroy(target?: string)`、`:284` 按别名调用，壳侧 `AndroidBridge.kt:322` 是无参方法、`MainActivity.kt:784` 不传 target → 别名被 JS 桥静默丢弃，「关闭全部」的兜底路径（`:281-287`）实际按壳侧默认顺序（选中→本会话→任意）销毁一块。该声明不在 `scripts/bridge-symmetry-baseline.json` 的 surfaces（只覆盖 androidBridge/backGateBridge），门禁看不见；注入层同名声明是无参形态（`dsh-client-ui-responsive/src/client/android-bridge.ts:82`）。同处 `:40` 的 `VD_POLL_MS=10_000` 与真实 1s 轮询（`:252`）不符，是死常量。
+- [P03] 5. 已确认（客户端声明与壳侧不符且不在门禁面内）：`plugins/dsh-android-vdisplay/src/client/index.ts:83` 声明 `vdisplayDestroy(target?: string)`、`:284` 按别名调用，壳侧 `AndroidBridge.kt:325` 是无参方法、`MainActivity.kt:784` 不传 target → 别名被 JS 桥静默丢弃，「关闭全部」的兜底路径（`:281-287`）实际按壳侧默认顺序（选中→本会话→任意）销毁一块。该声明不在 `scripts/bridge-symmetry-baseline.json` 的 surfaces（只覆盖 androidBridge/backGateBridge），门禁看不见；注入层同名声明是无参形态（`dsh-client-ui-responsive/src/client/android-bridge.ts:82`）。同处 `:40` 的 `VD_POLL_MS=10_000` 与真实 1s 轮询（`:252`）不符，是死常量。
 - [P04] 1. 【已确认，安全面；COMPAT-REVIEW §5.12 / H-11 仍在待办】`FileIncoming.SAFE_PREFIXES`（`app/src/main/java/com/dsharnessmobile/shell/FileIncoming.kt:35-38`）含本应用私有目录 `/data/user/0/com.dsharnessmobile.shell/` 与 `/data/data/...`，任意第三方应用 `ACTION_VIEW` 一个 `file://…/home/.dsh/.credentials.yaml` 就能让壳把它拷进临时工作区；引擎侧 `enqueueSession`（`plugins/dsh-android-file-open/src/index.ts:238-261`）只断言「在临时工作区内且存在」，不验来源，于是该文件变成一条未发送草稿，经 claim/content 可被取出（借壳读自身凭据）。
 - [P04] 2. 【已确认（代码面），一致性】linux-env 的两条 env 路由没有走 `ctx.effect`：`plugins/dsh-android-linux-env/src/index.ts:349-376` 在 `for` 循环里直接 `wsvc.register(...)`，而同文件 `:342` 的注释明确要求「热重载/卸载必须回收路由，不留重复 handler」，同文件 `:386/:400` 的 runtime-cache 路由与 file-open 五条（`plugins/dsh-android-file-open/src/index.ts:525/603/695/750/811`）都用了 `ctx.effect`。触发条件=热重载或卸载本插件；影响=旧 handler 残留、同名路由重复注册（未在设备上复现，运行期影响未证实）。
 - [P04] 3. 【已确认（代码 + 目录快照实测），写回口径】`mergeCatalog` 给模型设 `model.compat` 时不写 `model.sources`（`plugins/dsh-model-capability/src/index.ts:166-169`），而 `report.unknown` 按 `sources` 是否为空判定（`:195-198`）；按真实算法在 `plugins/dsh-model-capability/lib/catalog-snapshot.json` 上实测：181 / 961 个模型 id 会落到「有 dialect、无 thinkingLevelMap」。于是 `model_capability_apply`（offline 默认 true）会把 `compat.thinkingFormat` 等写进 settings，同时工具文本把这批模型列进「未获得能力元数据：…」——报告与实际写入自相矛盾（触发条件：路由声明了这批 id 之一并调用 apply）。
@@ -390,9 +390,9 @@ sequenceDiagram
 
 | 从 | 到 | 关系 | 证据 |
 |---|---|---|---|
-| K01 | 引擎进程与快照面 | EngineStartFlow 在工作线程调 refreshSnapshot/startEngine/engineProcessAlive，Activity 侧只传 Activity 与 pickToken | app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:405 |
+| K01 | 引擎进程与快照面 | EngineStartFlow 在工作线程调 refreshSnapshot/startEngine/engineProcessAlive，Activity 侧只传 Activity 与 pickToken | app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:408 |
 | K01 | 引擎鉴权与探活 | 首屏 cookie 注入进程级 CookieManager，探活结果决定 showWeb/showGuide 分流 | app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:812 |
-| K01 | 前台服务与看门狗 | startEngineService 挂载前台服务，回撤阈值取 WatchdogV2.effectiveFailureCount | app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:667 |
+| K01 | 前台服务与看门狗 | startEngineService 挂载前台服务，回撤阈值取 WatchdogV2.effectiveFailureCount | app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:670 |
 | K01 | 诊断落盘 | 启动分段、引导页 stall、HTTP/TLS/渲染进程错误全部经 LogCollector 写壳侧自有文件 | app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:1113 |
 | K01 | 沉浸式与开发者日志真源 | onCreate/onWindowFocusChanged 读 ImmersiveMode，onResume 读 DevLogControl（单一真源，壳侧不再持第二份） | app/src/main/java/com/dsharnessmobile/shell/WebUiChrome.kt:19 |
 | K01 | 隔离浏览器舞台 | onCreate 建 BrowserHost 并挂 BrowserHostHolder，onPause/onDestroy 暂停与销毁 | app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:205 |
@@ -404,15 +404,15 @@ sequenceDiagram
 | K01 | 快照与更新面 | 检查更新按钮与启动前快照刷新走 UpdateManager，自动回撤走 UndoGate 加 SnapshotTransaction | app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:294 |
 | K01 | 内置控制台 | 引导页与控制台按钮 START ConsoleActivity，其 ConsoleSession 用与引擎同源的 shellEnv 起快照 bash | app/src/main/java/com/dsharnessmobile/shell/ConsoleSession.kt:33 |
 | K01 | 系统外部角色 | BootReceiver 接 ACTION_BOOT_COMPLETED 决定是否自启前台服务，分享面板经 VIEW/SEND 进本 Activity | app/src/main/java/com/dsharnessmobile/shell/BootReceiver.kt:24 |
-| K02 | K01 | 启动全程用引导页阶段承载文案，成功才切 WebUI | EngineStartFlow.kt:442-476、MainActivity.kt:145-155 |
+| K02 | K01 | 启动全程用引导页阶段承载文案，成功才切 WebUI | EngineStartFlow.kt:445-479、MainActivity.kt:145-155 |
 | K02 | K03 | 刷新期禁启动、事务恢复、update-pending 健康 3 拍才删 usr-old 三处握手 | EngineManager.kt:813、1344-1369 |
 | K02 | UpdateManager | .update-pending/.update-pending-at 与 usr-old 的生产者 | UpdateManager.kt:84-85 |
 | K02 | UndoGate | 看门狗 UNDO 分支与启动超时两条路走同一闸门，配置层回撤（回滚被拒时须复位锁存，否则引擎不再被重试） | EngineService.kt:157、EngineStartFlow.kt:349 |
-| K02 | 通知链 NotifyStore/NotifyCenter | 每拍按字节偏移消费 .task-done.ndjson，双读不双发 | WatchdogV2.kt:258-309、NotifyCenter.kt:179 |
+| K02 | 通知链 NotifyStore/NotifyCenter | 每拍按字节偏移消费 .task-done.ndjson，双读不双发 | WatchdogV2.kt:258-309、NotifyCenter.kt:188 |
 | K02 | 控制载体 ControlCarrier | 随前台引擎服务起停，a11y 关着也承载 browser*/vd* | EngineService.kt:43 |
 | K02 | ConsoleSession | 复用 usrDir 与 shellEnv 起交互 shell，不起第二个引擎 | ConsoleSession.kt:33-50 |
 | K02 | 门禁 check-boot-budget | files/boot-segments.log 是该门禁的唯一产物 | LogCollector.kt:395-424 |
-| K03 | 引导与启动 | refreshSnapshot 的进度/失败文案与恢复前置由启动流拉起，刷新期 snapshotRefreshing 闸门禁止拉引擎 | app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:424 |
+| K03 | 引导与启动 | refreshSnapshot 的进度/失败文案与恢复前置由启动流拉起，刷新期 snapshotRefreshing 闸门禁止拉引擎 | app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:427 |
 | K03 | 引擎探活与看门狗 | 每 5 秒一拍 onEngineProbe 驱动 .update-pending 的 usr-old 确认或回退 | app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt:1344 |
 | K03 | 引擎总管 EngineManager | 事务/残渣/空间的调用方，也是 usr、home、.snapshot-fingerprint 的持有者 | app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt:99 |
 | K03 | 构建与发布 | 内嵌 assets/snapshot.tar.xz 与 snapshot.sha256 是首次解压与刷新两条路径的唯一输入，指纹翻转是刷新触发条件 | app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt:68 |
@@ -420,6 +420,7 @@ sequenceDiagram
 | K03 | 交互面 MainActivity | DownloadSaver 由 WebView 下载/外链回调拉起，回执经 window.__dshExportResult 回灌页面 | app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:89 |
 | K03 | EngineAuth | DownloadSaver 下载引擎同源 URL 时附加鉴权并做一次 401 自愈重试 | app/src/main/java/com/dsharnessmobile/shell/DownloadSaver.kt:101 |
 | K03 | 开发选项与诊断 | boot-fail.log、update-status.txt 与 diagnostics 镜像目录是本块失败终态的落盘点 | app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt:193 |
+| K03 | 公共导出目录供给 | Documents/dshdata 的创建与**结果记账**（`status|trigger|epochMs|detail` 落在私有目录）；触发点经 onCreate/onResume 与「引擎是否在跑」解耦，且除 OK 外每轮都重试——旧实现只从 startEngine()/shellEnv() 进入，引擎活着早退就永远不再供给（0.14.1 用户反馈：Documents 下一直没有 dshdata）。存储 chip 的判据取该结果，只有 OK 才显示「已就绪」；授权路线按 SDK 分流（API<30 无 All Files Access，改请求运行时 READ/WRITE） | app/src/main/java/com/dsharnessmobile/shell/PublicRepoProvision.kt:1、EngineManager.kt:790、MainActivity.kt:354 |
 | K04 | 引导与启动 | MainActivity/EngineService 是桥与控制承载的唯一安装与起停点（EngineAuth.initContext 必须先于装桥） | app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:160 |
 | K04 | 交互面 | 主 WebView 的 addJavascriptInterface 是桥方法唯一暴露点，页面侧类型面在 dsh-client-ui-responsive/src/client/android-bridge.ts | app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:719 |
 | K04 | 无障碍控制面 | ControlCarrier.handle 的兜底分支把语义/输入类 op 交给 DeviceControlService，a11y 缺席时返回结构化拒绝 | app/src/main/java/com/dsharnessmobile/shell/ControlCarrier.kt:110 |
@@ -442,13 +443,13 @@ sequenceDiagram
 | K06 | 引擎 file-open 插件 | 来件经 POST /api/android/file-incoming 建立强制新会话草稿 | app/src/main/java/com/dsharnessmobile/shell/FileIncoming.kt:332 |
 | K06 | 审计块 ControlAudit | 每条 sh* 写一条 audit.ndjson（result 字段硬编码 ok） | app/src/main/java/com/dsharnessmobile/shell/ShellOps.kt:586 |
 | K06 | 构建门禁块 | check-bounded-io / check-control-ops / gen-screen-scope-fixture 三条门禁约束本块形态 | scripts/check-bounded-io.mjs:54 |
-| K06 | 引擎启动流 EngineStartFlow | 引擎就绪时补投待发来件，闭合冷启动竞态 | app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:547 |
+| K06 | 引擎启动流 EngineStartFlow | 引擎就绪时补投待发来件，闭合冷启动竞态 | app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:550 |
 | K07 | ShizukuTransport | 建屏前必须 ensureBound，输入/拉起/SF token 反查全走 runController 的固定 argv | app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt:324 |
 | K07 | K05 | realScreenScopeError 用 displayIdForAlias 把 virtual-N 解析成动态 displayId 并钉给 a11y 取树/截屏 | app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:718 |
 | K05 | K07 | 屏幕范围门的 SF token 空间用 activeAliases 求交，屏一销毁其 token 立刻失效 | app/src/main/java/com/dsharnessmobile/shell/ShellOps.kt:524 |
 | K07 | K08 浏览器宿主 | 同一套「可信舞台几何 → 原生 SurfaceView」与无 catch 的 onMain 是两份同款实现 | app/src/main/java/com/dsharnessmobile/shell/VdisplayHost.kt:207 |
 | K07 | MainActivity 生命周期 | 建宿主与浮窗、onStart 回挂、onStop 换浮窗并停 reaper、onDestroy 拆宿主 | app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:206 |
-| K07 | 可信侧栏面板 | screen-control 每 2 秒轮询 vdisplayStatus，vdisplay 客户端每帧推 vdisplayBounds | dsh-client-ui-responsive/src/client/dev-section/screen-control.tsx:52 |
+| K07 | 可信侧栏面板 | phone-control 每 2 秒轮询 vdisplayStatus 与 shizukuStatus，vdisplay 客户端每帧推 vdisplayBounds | dsh-client-ui-responsive/src/client/dev-section/phone-control.tsx:180 |
 | K07 | 引擎侧 vdisplay 工具面 | 状态载荷 enabled/ops/transports/screens/viewers 与 status.ts 的 VD_OPS 逐字段对齐 | plugins/dsh-android-vdisplay/src/status.ts:14 |
 | K07 | DeviceControlService 登记门 | vd* 七个分支必须逐行留在 handle 里，scripts/check-control-ops.mjs 的 A 项按行首引号解析 | app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:652 |
 | K08 | S01 | 面板每 300ms 下推 left/top/width/height/viewportWidth/viewportHeight/visible/session，壳侧据此切当前工作台并维持停画保鲜；面板用 status().ownerSessionId 做 foreign 判定 | dsh-client-ui-responsive/src/client/mobile/browser-tab.tsx:229-241, :251, :268 |
@@ -458,7 +459,7 @@ sequenceDiagram
 | K08 | 门禁与测试 | check-control-ops 冻结 op 分支表；BrowserHostCleartextConsistencyTest 真调准入面并解析 NSC 守跨层同向；BrowserOverlayPolicyTest 守可见性纯函数 | app/src/test/java/com/dsharnessmobile/shell/BrowserHostCleartextConsistencyTest.kt:12-32 |
 | K09 | K01 | MainActivity 注册/清除 frameConsumer、onResume 经 OverlayController.ensureStarted 补启、桥开关 λ、点球三击跳转回宿主 | app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:296 |
 | K09 | K10 | 报告栏内容取 NotifyStore.latestReportLine 并经 parseEntry 解析，不另造解析口径 | app/src/main/java/com/dsharnessmobile/shell/OverlayReport.kt:180 |
-| K09 | K10 | K10 的默认 listener 反向调用 OverlayService.flashStatus 做应用内前台反馈 | app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:153 |
+| K09 | K10 | K10 的默认 listener 反向调用 OverlayService.flashStatus 做应用内前台反馈 | app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:161 |
 | K09 | K10 | 通知应答流 dsh-notify-responder 与本块 dsh-overlay-events 并行，首答者结算、另一方收 cancel | app/src/main/java/com/dsharnessmobile/shell/NotifyBridge.kt:304 |
 | K09 | 引擎网关 | postRpc 走 POST /api/<method> 且应答走 POST /api/$events/result，均带 EngineAuth cookie 与 401 重试 | app/src/main/java/com/dsharnessmobile/shell/OverlayService.kt:574 |
 | K09 | 引擎事件流 | MuxClient 消费 $events 的 ready/waterfall/emit/cancel 四类帧 | app/src/main/java/com/dsharnessmobile/shell/OverlayPanel.kt:87 |
@@ -466,9 +467,9 @@ sequenceDiagram
 | K09 | 宿主进程 | 非前台服务，存活依赖 EngineService 前台服务抬升进程优先级 | app/src/main/AndroidManifest.xml:65 |
 | K10 | P01 | .notify.ndjson 的 kind / popup / outcomeLabel 是跨层唯一契约；引擎只写 todo 与 report，提问审批不走文件而走 WS waterfall | plugins/dsh-android-bridge/src/index.ts:1564 |
 | K10 | K09 | 同一 waterfall 由两条独立 $events 流各持 pending：首个应答者结算、另一方收 cancel；通知侧只提交单题答案，面板侧全量按序提交 | app/src/main/java/com/dsharnessmobile/shell/NotifyBridge.kt:207 |
-| K10 | MainActivity | contentIntent 只拉起 Activity 并携带 dsh.notify.kind / dsh.notify.target，全仓无消费点且 MainActivity 无 onNewIntent，点击不会跳到对应会话 | app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:821 |
-| K10 | 设置页桥面 AndroidBridge | getNotifySetting / setNotifySetting 是 suppressForeground 与 cat.* 的唯一 UI 出入口，写后读回判定 applied | app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:372 |
-| K10 | OverlayService | ShellListener 复用 flashStatus 做抑制/未授权/渠道降级的可见反馈，受 expanded 守卫限制 | app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:137 |
+| K10 | MainActivity | contentIntent 只拉起 Activity 并携带 dsh.notify.kind / dsh.notify.target，全仓无消费点且 MainActivity 无 onNewIntent，点击不会跳到对应会话 | app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:828 |
+| K10 | 设置页桥面 AndroidBridge | getNotifySetting / setNotifySetting 是 suppressForeground 与 cat.* 的唯一 UI 出入口，写后读回判定 applied | app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:375 |
+| K10 | OverlayService | ShellListener 复用 flashStatus 做抑制/未授权/渠道降级的可见反馈，受 expanded 守卫限制 | app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:145 |
 | K10 | WatchdogV2 | 旧信道 .task-done.ndjson 只做回退，且与通知共用 dsh-notify 偏好文件的两个偏移键 | app/src/main/java/com/dsharnessmobile/shell/NotifyStore.kt:321 |
 | K10 | OverlayReport | latestReportLine 窄接口供长按查看最近一次汇报，登记在投递判定之前 | app/src/main/java/com/dsharnessmobile/shell/NotifyStore.kt:68 |
 | P01 | K04 | 队列服务端与壳侧轮询客户端的协议面：两条 exact 路由 + pv/caps 协商，「壳侧单线程」语义由此保证 | plugins/dsh-android-bridge/src/control-queue.ts:347 |
@@ -551,7 +552,7 @@ sequenceDiagram
 | 2. 引擎反复被重启或长时间不重启 | K02 | `cat files/boot-segments.log` 看 t_boot_start / t_listen 世代与失败密度；`grep dsh-watchdog`（logcat 或 `Documents/dshdata/log/dsh-日期.log`，需开发者日志开）；熔断态 grep `watchdog circuit open`，半死态 grep `DEGRADED_HTTP` 与 `DEGRADED_HTTP 连续`。 |
 | 3. 端口被占 / 双引擎 | K02 | grep `killExistingEngine: port 3080 still occupied`；设备侧 `adb shell "ps -A | grep -E 'linker|node'"`（进程名是 linker64 不是 node，坑 31）。 |
 | 4. 页面白屏但端口在 | K02 | `adb forward tcp:23080 tcp:3080` 后 `curl -i http://127.0.0.1:23080/`（200/401 都算活）；grep `DEGRADED_LOG` 与 `plugin tree failed to load`（后者只判不重启）。 |
-| 5. 诊断包找不到 | K02 | `mirrorDiagnosticsToShared` 无 All Files Access 时回落私有目录，界面按实际路径回填（EngineStartFlow.kt:721）；`adb shell run-as com.dsharnessmobile.shell ls files/diagnostics`。 |
+| 5. 诊断包找不到 | K02 | `mirrorDiagnosticsToShared` 无 All Files Access 时回落私有目录，界面按实际路径回填（EngineStartFlow.kt:724）；`adb shell run-as com.dsharnessmobile.shell ls files/diagnostics`。 |
 | 1. 启动长期停在「正在更新运行时」或每次开机都重解压：`adb -s <serial> shell run-as com.dsharnessmobile.shell ls -la files/ | grep -E "snapshot|usr-old|update"`；`... cat files/.snapshot-transaction`（看 `phase=` 与 `moved=` 条目）；logcat grep `dsh-engine|dsh-snap`，失败真因在 `files/boot-fail.log` 的 `dsh-boot-fail stage=snapshot-refresh-failed` 行（`error=` / `cause=`），镜像副本在 `Documents/dshdata/diagnostics/snapshot-refresh-failed-*`。 | K03 | （待补） |
 | 2. 报「运行时更新失败（诊断已保存）」但看不到原因：`grep -E "存储空间不足|Directory not empty|InsufficientSpace" files/boot-fail.log`；空间类真因只落在 cause 里（UI 文案是通用的），`df /data` 对账；`Directory not empty` 类看 `~/.failed-<ts>` 残渣是否在场。 | K03 | （待补） |
 | 3. 插件列表在、点开不可用（0.14.0 实报形态）：`grep -n "disabled: true" files/home/.dsh/profiles/web/cordis.patch.yml`；查 `files/.profile-patch-repair-<版本名>` 标记是否已写（没写=上次启动修复失败，下轮重试）；对照 `files/home/.dsh/profiles/web/?` 的 node_modules 是否半合并（1/10 形态）。 | K03 | （待补） |
@@ -664,7 +665,7 @@ sequenceDiagram
   5. `reportWebViewVersion("onCreate")` 落 `boot-diag.log`（内核版本 + `syntax_floor_ok`）。
   6. intent 分流（MainActivity.kt:258）：`ACTION_UPDATE` → `EngineStartFlow.runUpdate`；否则 `startEngineFlow()` **先于** `FileIncoming.processIncomingIntent`。
   7. `onResume`（MainActivity.kt:275）：`DevLogControl.ensureStarted` → `startMonitor`（3s 一拍前台监控）→ `startEngineService`（前台服务 + 看门狗）→ 挂 `frameConsumer` → `OverlayController.ensureStarted` → 维护引导页元信息 → 仅当 WebView 不可见且未关闭引擎时后台探活，失败则再 `startEngineFlow`。
-  8. 启动流 `EngineStartFlow.start()`（EngineStartFlow.kt:405，`flowRunning` CAS 去重）：后台线程内先 `startupRecoverThenProbe`（**恢复事务恒在「已在跑」早退之前**）→ 引擎已在跑 → `showWeb()` 早退；否则 `showGuide()` + 「正在启动引擎…」→ 快照不新鲜则 `refreshSnapshot`（进度写 `progressText`）→ `deployUndoCli` → `startEngine` → 90s 轮询（每 1s 探活，每 15s 更新文案，进程死即判败）。
+  8. 启动流 `EngineStartFlow.start()`（EngineStartFlow.kt:408，`flowRunning` CAS 去重）：后台线程内先 `startupRecoverThenProbe`（**恢复事务恒在「已在跑」早退之前**）→ 引擎已在跑 → `showWeb()` 早退；否则 `showGuide()` + 「正在启动引擎…」→ 快照不新鲜则 `refreshSnapshot`（进度写 `progressText`）→ `deployUndoCli` → `startEngine` → 90s 轮询（每 1s 探活，每 15s 更新文案，进程死即判败）。
   9. 成功：`startEngineService` → `showWeb()`，**控制权交给引擎页面**（引擎侧页面契约归后续块），壳侧退居前台监控 + 桥 + 失败回退。失败：`LogCollector.writeBootFail` + `maybeAutoUndo`（UndoGate 自动回撤）+ `scheduleEngineRetry`（5s/10s，最多 2 次）。
   10. `onPageFinished` 起冻结看门狗并推 insets/主题；页面 `[dsh-boot-ready]` 经 `onConsoleMessage` 停掉 boot-stall 计时。
 - **嵌套与线程**：
@@ -691,8 +692,8 @@ sequenceDiagram
   - `app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:510` — configureWebView：WebView 策略、桥接线、首屏 cookie 注入与 loadUrl
   - `app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:605` — onRenderProcessGone：落诊断 + `destroy()` + `showGuide()`，本类唯一 WebView 创建点在 :193
   - `app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:420` — onDestroy：`webViewRef = null`（:422 无身份校验）、`webView.destroy()`（:445）
-  - `app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:405` — start()：启动流唯一入口（flowRunning CAS + 世代号）
-  - `app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:530` — 90s 轮询预算（常量唯一来源在 :745）
+  - `app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:408` — start()：启动流唯一入口（flowRunning CAS + 世代号）
+  - `app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:533` — 90s 轮询预算（常量唯一来源在 :745）
   - `app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:129` — startMonitor：3s 前台监控与自动回退判据
   - `app/src/main/java/com/dsharnessmobile/shell/GuidePageRenderer.kt:363` — showWeb / :375 showGuide：引导页与 WebUI 的唯一切换点
 - **不变量**：
@@ -713,7 +714,7 @@ sequenceDiagram
 - **可疑点**：
   1. 主 WebView 渲染进程死亡后**没有任何重建路径**（已确认：`onRenderProcessGone` 在 MainActivity.kt:605-619 落诊断后 `view.destroy()`，全类 WebView 创建点只有 :193）。而 `GuidePageRenderer.showWeb()`（GuidePageRenderer.kt:363-372）随后会把引导页藏起、把已销毁的 WebView 置 VISIBLE，并在 `enginePageFailed` 为真时 `reload()`。后果：引擎健康后用户看到的是深灰空页（`:198` 设的中性深色底），冻结看门狗（EngineStartFlow.kt:96-126）会对一个死 WebView 每 20-30s 复判「页面无响应」并 Toast；源码注释所称「交由既有引擎监控/引导页路径恢复」在代码里没有实现（无第二处 `WebView(this)`）。安全网只有 Activity 被系统重建。
   2. `MainActivity.onDestroy` 的 `webViewRef = null`（MainActivity.kt:422）**没有身份校验**，而同文件对 `BrowserHostHolder.host` 却写了 `===` 守卫（:441）。触发条件（未证实于本机）：MainActivity 未声明 `launchMode`、也没有 `onNewIntent`（manifest + 源码 grep 均无），系统分享面板的 VIEW/SEND 在已有实例（尤其 ConsoleActivity 在前台）时会以 standard 模式新建第二个实例——旧实例随即 onDestroy 把 `webViewRef` 清空，`DeviceControlService`（DeviceControlService.kt:852）此后恒报「页面不在场」。同源风险：两份启动流/监控/看门狗/回收定时器并存，`OverlayService.frameConsumer` 被后 Resume 者覆盖。
-  3. `pickToken` 是**进程级随机 UUID**（EngineManager.kt:1552-1559，`ensurePickToken` 只在 companion 内存缓存），但 MainActivity.kt:78-79 的注释称它「MainActivity 重建/看护重启不更换，与引擎 env 的 DSH_PICK_TOKEN 始终一致」；引擎侧在**插件加载时**取一次 `process.env.DSH_PICK_TOKEN`（dsh-host-web-compat/lib/index.js:794-802）并 fail-closed 校验 `x-dsh-pick-token`。而 EngineStartFlow.kt:424-437 明确支持「引擎先跑、app 后启动」的早退路径 ⇒ app 进程被杀重建后新 token 与仍活着的引擎 env 不一致，页面 `getPickToken()` 递的是新值 ⇒ `/api/android/dir-pick/*` 与 `/api/android/open-path` 403（后果未在本机复现，标未证实；代码可证的是两处取值来源不同生命周期）。
+  3. `pickToken` 是**进程级随机 UUID**（EngineManager.kt:1552-1559，`ensurePickToken` 只在 companion 内存缓存），但 MainActivity.kt:78-79 的注释称它「MainActivity 重建/看护重启不更换，与引擎 env 的 DSH_PICK_TOKEN 始终一致」；引擎侧在**插件加载时**取一次 `process.env.DSH_PICK_TOKEN`（dsh-host-web-compat/lib/index.js:794-802）并 fail-closed 校验 `x-dsh-pick-token`。而 EngineStartFlow.kt:427-440 明确支持「引擎先跑、app 后启动」的早退路径 ⇒ app 进程被杀重建后新 token 与仍活着的引擎 env 不一致，页面 `getPickToken()` 递的是新值 ⇒ `/api/android/dir-pick/*` 与 `/api/android/open-path` 403（后果未在本机复现，标未证实；代码可证的是两处取值来源不同生命周期）。
   4. `WebUiChrome` 只剩沉浸式一条活链路：`applyImmersive`/`immersivePrefs`（MainActivity.kt:191）有调用点，而 `copyTextNative`(:37)、`keepScreenOn`(:54)、`releaseWakeLock`(:72)、`pushSystemDark`(:94)、`cancelThemePush`(:120)、`setImmersivePersisted`(:27) 全仓**零调用点**（grep 确认），实际生效的是 MainActivity.kt:850/874/967 的私有同形副本与 onDestroy 的 `screenWakeLock` 释放。影响：本类注释与 ARCHITECTURE.md:15 都把它当作这四类 chrome 的执行面（漂移）；且两个 `screenWakeLock` 字段并存——将来把 `onKeepScreen`/`onSetImmersive` 接回本类，`MainActivity.onDestroy` 的释放不会覆盖新字段，回归老 Review 修过的「成对 acquire/release」泄漏形态。
   5. WebView 信任边界在本块的两处锚点（评审已点名，均只做登记不改）：进程级 `CookieManager` 注入引擎鉴权 cookie（MainActivity.kt:812-819，评审 S1/S3——同一 jar 对隔离 BrowserHost 可见，「隔离只是没有桥，不是存储隔离」）；非引擎 URL 一律 `downloadSaver.openInExternalBrowser`，无 scheme 白名单（MainActivity.kt:544-549，评审 5.13/H-11——`intent://`/`market://`/`tel:` 等任意 scheme 可经页面触发）。
 
@@ -759,7 +760,7 @@ flowchart TD
   1. `MainActivity.onCreate` → `startEngineFlow()`（MainActivity.kt:265）→ `EngineStartFlow.start()`；`onResume` 再幂等补挂前台服务与前台监控（MainActivity.kt:282-293）。
   2. `BootReceiver.onReceive`（BOOT_COMPLETED，BootReceiver.kt:24-36）→ `startForegroundService(EngineService)`；持久化的 userShutdown 为真则不自启。
   3. `EngineService.onCreate/onStartCommand`（EngineService.kt:29-55）→ `ensureEngine()` 装 5s 看门狗；首个 tick 就可能重启。
-  4. 设置面「重启引擎」→ `EngineStartFlow.restart()`（EngineStartFlow.kt:691）→ pkill bin.js + 1s 后重走 `start()`。
+  4. 设置面「重启引擎」→ `EngineStartFlow.restart()`（EngineStartFlow.kt:694）→ pkill bin.js + 1s 后重走 `start()`。
   5. `ConsoleSession`（ConsoleSession.kt:33-50）只复用 `usrDir`/`shellEnv()` 起交互 shell，不起第二个引擎。
 - **运行顺序**：
   - **启动期（本块所属阶段，引导页可见）**：`EngineStartFlow.start()` 在工作线程上串行执行 `recoverInterruptedRefresh()`（先消费事务残留，K03）→ 探活已在跑则 `markListen` + `markFirstHttp` + `showWeb()` 早退 → `snapshotFresh()` 为假则 `refreshSnapshot()`（K03；失败即写 boot-fail.log 并停在错误页）→ `deployUndoCli()` → `startEngine()` → 90s 预算内轮询 `EngineProbe.check()`（进程死则提早宣判）→ 成功则 `startEngineService()` + `showWeb()`；失败/超时则 boot-fail.log + 最多 2 次自动重试 + `maybeAutoUndo()`。
@@ -775,7 +776,7 @@ flowchart TD
   - 偏好键：`engine_lifecycle/user_shutdown`（EngineService 写 :223、BootReceiver 读 :26、onStartCommand 门 :49）；`dsh_prefs/dev_log_enabled`（MainActivity.DevLogPrefs:1163-1173，默认关）；`notify.markerOffset`（WatchdogV2.kt:29，经 NotifyCenter.prefs:179）。
   - 文件面：`files/usr{-old,-broken}`、`files/.snapshot-fingerprint`、`files/.update-pending{,-at}`（UpdateManager.kt:84-85 写，EngineManager.onEngineProbe:1344-1369 消费）、`files/engine.log` 加 `.1`..`.5`、`files/boot-segments.log`、`files/boot-diag.log`、`files/boot-fail.log`、`files/home/.dsh/.task-done.ndjson`、`Documents/dshdata/{log,diagnostics}`。
   - `shellEnv()`（EngineManager.kt:1400-1478）是引擎/控制台/日志三处子进程环境的唯一来源：PATH、LD_LIBRARY_PATH、HOME、DSH_HOME、TMPDIR、LD_PRELOAD、TERMUX_EXEC__*、OPENSSL_CONF、DSH_PICK_TOKEN、NODE_COMPILE_CACHE、UV_THREADPOOL_SIZE、npm_config_store_dir。
-  - 交叉读写：`WatchdogV2.consecutiveFailures/consecutiveDegradedHttp` 由看门狗写，被 EngineStartFlow.kt:349、EngineService.kt:134 读；`EngineManager.lastRefreshFailure` 被 EngineStartFlow.kt:482 读；`pendingRecoveryFailure` 由 EngineManager.kt:312 写。
+  - 交叉读写：`WatchdogV2.consecutiveFailures/consecutiveDegradedHttp` 由看门狗写，被 EngineStartFlow.kt:349、EngineService.kt:134 读；`EngineManager.lastRefreshFailure` 被 EngineStartFlow.kt:485 读；`pendingRecoveryFailure` 由 EngineManager.kt:312 写。
   - `EngineProbe.ENGINE_URL`（EngineProbe.kt:26）被 MainActivity.kt:819/822 的 loadUrl 与 EngineAuth.AUTHORITY（EngineAuth.kt:48）共用，cookie 名 = sha256(authority)。
   - `ControlCarrier.ensureStarted` / `NotifyStore.start` / `NotifyBridge.start` 随 EngineService.onCreate 起停（EngineService.kt:40-43）。
   - `LiveProbe.kt` 是状态页 TTL 探测原语，与本块引擎生命周期无运行时交集：生产侧零调用点（`grep -rn "LiveProbe\|tcpProbe" app/src/main` 只剩定义行），仅 AdbLiveProbeTest 使用。
@@ -801,7 +802,7 @@ flowchart TD
   2. 引擎反复被重启或长时间不重启 → `cat files/boot-segments.log` 看 t_boot_start / t_listen 世代与失败密度；`grep dsh-watchdog`（logcat 或 `Documents/dshdata/log/dsh-日期.log`，需开发者日志开）；熔断态 grep `watchdog circuit open`，半死态 grep `DEGRADED_HTTP` 与 `DEGRADED_HTTP 连续`。
   3. 端口被占 / 双引擎 → grep `killExistingEngine: port 3080 still occupied`；设备侧 `adb shell "ps -A | grep -E 'linker|node'"`（进程名是 linker64 不是 node，坑 31）。
   4. 页面白屏但端口在 → `adb forward tcp:23080 tcp:3080` 后 `curl -i http://127.0.0.1:23080/`（200/401 都算活）；grep `DEGRADED_LOG` 与 `plugin tree failed to load`（后者只判不重启）。
-  5. 诊断包找不到 → `mirrorDiagnosticsToShared` 无 All Files Access 时回落私有目录，界面按实际路径回填（EngineStartFlow.kt:721）；`adb shell run-as com.dsharnessmobile.shell ls files/diagnostics`。
+  5. 诊断包找不到 → `mirrorDiagnosticsToShared` 无 All Files Access 时回落私有目录，界面按实际路径回填（EngineStartFlow.kt:724）；`adb shell run-as com.dsharnessmobile.shell ls files/diagnostics`。
 - **可疑点**：
   1. 【已确认，评审 §5.14 / I-5 / H-12 点名】`LogCollector.writeBootDiag`/`writeBootFail` 出口不过 `EngineAuth.redact`：LogCollector.kt:458-480 直接 `appendText(line)`，:544/562-590 的 `bootFailLine` 也不脱敏 detail；MainActivity.kt:569-573 却把 `url=${request.url}` 写进 boot-diag，而页面 URL 形态是 `ENGINE_URL + "/?token=" + token`（MainActivity.kt:822）。影响：一次 401/5xx 即把 launch token 明文落进 `files/boot-diag.log`（对照 :885 是唯一过 redact 的日文件咽喉）。
   2. 【已确认，注释与实现不符】`startEngine` 的 90s 冷却窗不是闸门：`withinCooldown`（:831）只用于打一行日志（:845-847），真门槛是 `portReachable || managedProcessAlive`（:832-834）。影响：端口未开且句柄已失（孤儿 linker64 / 句柄被覆盖）时任何调用方都能立刻再 spawn；`START_COOLDOWN_MS` 注释（:1519-1524「no new start within this window」）会让排障者误判「90s 内不会再起」。
@@ -847,7 +848,7 @@ flowchart TD
 - **一句话**：把内嵌运行时快照以「暂存解压 → 逐条换位 → 指纹提交」三段事务换进 live 树，并包办中断恢复、残渣回收（含年龄门）、profiles 工厂/用户面合并，以及默认已下线的在线快照更新。
 - **入口/触发**：① 启动流 `EngineStartFlow.runFlow`（工作线程）判 `snapshotFresh()` 为假 → `refreshSnapshot`；② 每次 `EngineService.ensureEngine()` → `recoverInterruptedRefresh()`（幂等，无事务时只是一次 stat）；③ 引导页「检查更新」按钮 → `UpdateManager.checkAndApply`；④ MainActivity 的 WebView 下载/外链回调 → `DownloadSaver`；⑤ APK 自更新按钮 → `UpdateChecker`（与引擎快照链完全分离，仅共用落盘目录语义）。
 - **运行顺序**：
-  1. 启动前置 `startupRecoverThenProbe`(EngineStartFlow.kt:424) 先恢复事务（读 `.snapshot-transaction`：STAGED 丢弃暂存 / SWAPPED 前滚并补写指纹 / SWAPPING 逐条回滚，回滚失败**保留** marker），再做引擎探活；
+  1. 启动前置 `startupRecoverThenProbe`(EngineStartFlow.kt:427) 先恢复事务（读 `.snapshot-transaction`：STAGED 丢弃暂存 / SWAPPED 前滚并补写指纹 / SWAPPING 逐条回滚，回滚失败**保留** marker），再做引擎探活；
   2. 指纹不新鲜 → `refreshSnapshot`(EngineManager.kt:99)：清上次 stage（删不净则整体改名 `.snapshot-stage-orphan-<ts>` 挪开）→ `SnapshotExtractor.extract` 解压到 `.snapshot-stage` → `stagedRuntimeComplete` 校验 node/bin.js/profiles → 写 STAGED marker → `SnapshotTransaction.swap`（空间断言 → 写 SWAPPING → `usr` 与 `home` 工厂项逐条 rename 并先记账 → `mergeProfiles` 深拷贝备份后合并）→ `writeFingerprint` 提交 → `finish()` 删 previous/stage 并清 marker → 控制权交回启动流继续 `startEngine()`；
   3. 稳态：EngineService 看门狗每 5s 一拍 → `onEngineProbe(healthy)` 驱动 `.update-pending`（连续 `UPDATE_CONFIRM_TICKS=3` 拍健康删 `usr-old`；超 `UPDATE_ROLLBACK_MS=180s` 不健康 `rollbackToOld`）；
   4. 手动在线更新：`checkAndApply` 自建线程 → `DEFAULT_MANIFEST_URL` 为空即拒绝（S-10 姿态）→ 经 `overrideManifestUrl` 打开后：manifest → 下载 → sha256 → 解压 `update-stage` → 换 `usr`（`usr`→`usr-old`，新树→`usr`）→ 写 `.update-pending` 与指纹 → `pkill -f bin.js`；
@@ -871,7 +872,7 @@ flowchart TD
   - `app/src/main/java/com/dsharnessmobile/shell/SnapshotTransaction.kt:345` — 写 SWAPPED 提交哨兵（回滚/前滚的唯一判据）
   - `app/src/main/java/com/dsharnessmobile/shell/SnapshotTransaction.kt:688` — `recover` 回滚失败保留 marker（D-3）
   - `app/src/main/java/com/dsharnessmobile/shell/SnapshotTransaction.kt:787` — `rollbackEntry` 删不净则把 live 改名挪开再放回 displaced
-  - `app/src/main/java/com/dsharnessmobile/shell/SnapshotFs.kt:61` — `newDirectoryStream` 枚举（P0-B：避开 API 34 的 `Stream.toList`）
+  - `app/src/main/java/com/dsharnessmobile/shell/SnapshotFs.kt`（`deletePath`）— 逐项容错 + `newDirectoryStream` 枚举（P0-B：避开 API 34 的 `Stream.toList`）；0.14.1 D1 起容错面为 `Exception` + `LinkageError`（重抛 `VirtualMachineError`），判定在顶层 `isTolerableDeletionFailure`
   - `app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt:196` — 刷新失败路径：回滚结果未判 + 无条件清 marker（D-3 逃逸点）
   - `app/src/main/java/com/dsharnessmobile/shell/UpdateManager.kt:34` — 未配置可信发布源即拒绝（S-10 fail-closed）
   - `app/src/main/java/com/dsharnessmobile/shell/FactoryProfilePatch.kt:79` — 工厂 disabled 语义纠正入口
@@ -891,7 +892,7 @@ flowchart TD
   5. 在线更新/APK 更新：`cat files/update-status.txt`（`runUpdate` 逐行追加）、logcat grep `dsh-update`、`ls files/ | grep -E "update-pending|usr-old|update-stage|update.tar.xz"`；`snapshot-fingerprint` 内容与 `assets/snapshot.sha256` 不一致 = 走的不是内嵌链。
 - **可疑点**：
   1. `app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt:196-198` —— 刷新失败 catch 里 `SnapshotTransaction.rollback(...)` 的返回值未判、紧接着无条件 `clearMarker`，与 `SnapshotTransaction.recover` 的 D-3 处理（SnapshotTransaction.kt:688-699「回滚失败不得无条件清 marker」）自相矛盾，也与同文件的 `applyRecovery`（:308-313 把失败明细写进 `pendingRecoveryFailure`）不对称。触发：swap 中途抛异常且回滚有任一条目失败（例如删不净的 live 子树），marker 被清、失败条目无人上报。后果链：下一次刷新若在写 SWAPPING 之前就抛异常（空间断言拒绝 §7.2-F-4、或 stage 派生的任何异常），catch 会走 `rollback(marker=STAGED)`，而 `collectDisplacedNames`(SnapshotTransaction.kt:798) 会把**残留的 `.snapshot-previous`** 当成回滚源逐条覆盖回 live —— 即旧的工厂树被静默“复活”盖在新树上；此后 `hasResidue && snapshotFresh()` 的回收门（:253）也可能把仍需的残渣删掉。建议按 `recover` 的口径改：`if (!result.ok) { 保留 marker + 上报告警 } else clearMarker()`。
-  2. `app/src/main/java/com/dsharnessmobile/shell/SnapshotTransaction.kt:283-289` —— 空间断言覆盖面窄于审查 §7.2-F-4 / B12 的原始发现：断言跑在**解压完成之后**（stage 已付过 2.5 GB 量级空间），解压阶段本身仍无任何 StatFs 前置检查（`EngineManager.extractSnapshotTo` :434 直调解压），所以「解压中途 ENOSPC → 报运行时更新失败」的原症状还在；且 required 只由 **live profiles 体积**推导（`backupBytes + 25% + 64MB`），当 live profiles 明显小于 staged（回滚补偿删剩 / 半合并的现场，正是「失败→留残渣→空间紧→更易失败」的自我强化回路）时，`mergeTree` 补入文件的新分配不在预算内，`SnapshotFs.sizeOf`(:89) 还会把不可读条目按 0 静默低估。后果：断言放行后仍在合并中途 ENOSPC。另有一致性问题：`InsufficientSpaceException` 的可照做文案只进 `lastRefreshFailure`/boot-fail.log，用户界面拿到的是通用「运行时更新失败」（EngineStartFlow.kt:494），B12 要的「专门文案」只实现了一半。
+  2. `app/src/main/java/com/dsharnessmobile/shell/SnapshotTransaction.kt:283-289` —— 空间断言覆盖面窄于审查 §7.2-F-4 / B12 的原始发现：断言跑在**解压完成之后**（stage 已付过 2.5 GB 量级空间），解压阶段本身仍无任何 StatFs 前置检查（`EngineManager.extractSnapshotTo` :434 直调解压），所以「解压中途 ENOSPC → 报运行时更新失败」的原症状还在；且 required 只由 **live profiles 体积**推导（`backupBytes + 25% + 64MB`），当 live profiles 明显小于 staged（回滚补偿删剩 / 半合并的现场，正是「失败→留残渣→空间紧→更易失败」的自我强化回路）时，`mergeTree` 补入文件的新分配不在预算内，`SnapshotFs.sizeOf`(:89) 还会把不可读条目按 0 静默低估。后果：断言放行后仍在合并中途 ENOSPC。另有一致性问题：`InsufficientSpaceException` 的可照做文案只进 `lastRefreshFailure`/boot-fail.log，用户界面拿到的是通用「运行时更新失败」（EngineStartFlow.kt:497），B12 要的「专门文案」只实现了一半。
   3. `app/src/main/java/com/dsharnessmobile/shell/UpdateManager.kt:96-98` 与 `app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt:81-86` —— 在线更新把 **manifest 的 sha256** 写进 `.snapshot-fingerprint`，而内嵌链的 `snapshotFresh()` 要求该文件**等于** `assets/snapshot.sha256`；两个口径天然不等，于是下次进程启动必然判「不新鲜」→ 重解压内嵌快照，把刚完成的在线更新整体回滚（且 `.update-pending`/`usr-old` 不会被这条路径清掉，看门狗仍按旧时间戳推进确认/回退状态机，`rollbackToOld`(EngineManager.kt:1372) 可能在新树已就位后又把 `usr` 换回 `usr-old` —— 这一段的最终表现未在设备上证实）。影响面受 S-10 限定：默认 `DEFAULT_MANIFEST_URL` 为空，只有 `overrideManifestUrl` 打开时可达。
   4. `app/src/main/java/com/dsharnessmobile/shell/UpdateManager.kt:69-80` —— 在线更新的 `usr` 换位是**非事务**的两步 `renameTo`（`usr`→`usr-old`→新树入位），既不写 `.snapshot-transaction`，也不进 `SnapshotFs.move`；`.update-pending` 只在两步都成功后才写。若在两次 rename 之间被杀（OOM、厂商清理），live 无 `usr`，而 `recoverInterruptedRefresh` 只认 `.snapshot-stage`/`.snapshot-previous`，看门狗也因缺 `.update-pending` 不会调 `rollbackToOld` —— 唯一恢复路径是内嵌快照全量重解压（实测 8 分钟量级）。同一函数开头 `SnapshotFs.deletePath(old)`(:71) 还会在上一次更新尚未确认/回退时先删掉唯一回退源 `usr-old`。
   5. `app/src/main/java/com/dsharnessmobile/shell/SnapshotExtractor.kt:81` 与 `:142` —— 同一条目把 `entry.size` 累加进 `done` 两次（一次用于上限判定、一次用于进度），于是总量上限 `maxTotalBytes = 8 GiB` 实际在约 4 GiB 处触发，`onProgress` 上报的解压字节数约翻倍（解压条在解压到一半时即报满）。后果：S-10 想要的「快照真实体量 3–5 倍余量」实际只剩约 1.6 倍，偏大的合法快照会被判成「解压炸弹」中止（错误文案指向超限而真因是重复计数）。进度口径同时失真——EngineStartFlow 的「已写入 N MB」由它派生。
@@ -953,7 +954,7 @@ flowchart TD
   - 环境变量：`DSH_HOME`/`DSH_UNDO_ROOT`/`DSH_UNDO_PROFILE`/`OPENSSL_CONF`（`UndoGate.runCli` 注入，缺 `OPENSSL_CONF` 会令 CLI 无输出被误判）。
   - 页面侧类型面（镜像自协调仓同名路径）：`dsh-client-ui-responsive/src/client/android-bridge.ts` 的 `AndroidShellBridge`、`dsh-client-ui-responsive/src/client/mobile/back-stack.ts` 的 `dshBackBridge`。
 - **关键坐标**：
-  - `app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:420`（`jsString` 注入转义实现）
+  - `app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:423`（`jsString` 注入转义实现）
   - `app/src/main/java/com/dsharnessmobile/shell/BackGate.kt:52`（`decide` 三输入判定）
   - `app/src/main/java/com/dsharnessmobile/shell/EngineAuth.kt:172`（`refresh` 主体：对象锁 + 同步 HTTP）
   - `app/src/main/java/com/dsharnessmobile/shell/MuxClient.kt:172`（文本帧重组缓冲，唯一跨帧累积点）
@@ -975,7 +976,7 @@ flowchart TD
   4. 「页面里返回键没反应 / 直接退出应用」→ `adb logcat -d | grep dsh-back`（`page stack signal: available=` / `page stack pulled: available=… depth=` / `page stack reset (page started)`）；只有 reset 没有 pulled 说明页面侧 `window.__dshBackDepth` 缺席，该场景返回键会走 `FINISH_ACTIVITY`。
   5. 「审计对不上账」→ `adb shell run-as com.dsharnessmobile.shell tail -5 files/audit/audit.ndjson`：同一行里 `result:"ok"` 与 `args.ok:false` 并存即命中 §5.3；`screen-out-of-scope` 这类拒绝根本不落账。
 - **可疑点**：
-  1. **（已证实，机制层）`jsString` 的 U+2028/U+2029「修复」编译成恒等替换**：`AndroidBridge.kt:420-422` 源码是 `.replace(<裸 U+2028 字符>, "<单个反斜杠>u2028")`，第二个实参在 Kotlin 里是**同一个字符**（`\uXXXX` 是转义，不是六个字符）——编译产物 `app/build/tmp/kotlin-classes/debug/com/dsharnessmobile/shell/AndroidBridgeKt.class` 常量池里只有裸 U+2028/U+2029 两条字符串常量（`\x01\x00\x03 E2 80 A8`），**没有** `\u2028` 转义串，两个实参去重成同一条 ⇒ 该行不做任何转义。**为什么单测还是绿的（现场反证）**：JVM 单测类路径显式引入了另一份实现 `org.json:json:20240303`（`app/build.gradle.kts:136-137` 注释自陈「本地单测用真实 org.json，android.jar 桩在 JVM 里抛 Stub!」）；`BrowserHostNavigationPolicyTest.kt:129-141` 在恒等替换下仍判绿（`app/build/tmp/kotlin-classes/debugUnitTest/.../BrowserHostNavigationPolicyTest.class` 的常量池含断言用 `\u20` 字面量，`app/build/test-results/testDebugUnitTest/TEST-…BrowserHostNavigationPolicyTest.xml` 现场读到 tests=9 failures=0），只可能是这份 jar 的 `quote` 自己转义了 U+2028/U+2029（其 `JSONObject.class` 内含写 `\u` 的字符串字面量，与该区间转义实现相符）。设备运行时用的是 Android 框架 `org.json`，与单测类路径**不是同一实现** ⇒ 这条绿的判据测不到设备行为，是假保证。设备侧是否真需要该转义（审查 §3.1-C3 / F-3 断言 `JSONObject.quote` 不转义该区间）本轮无本机复算手段，**未证实**。
+  1. **（已证实，机制层）`jsString` 的 U+2028/U+2029「修复」编译成恒等替换**：`AndroidBridge.kt:423-425` 源码是 `.replace(<裸 U+2028 字符>, "<单个反斜杠>u2028")`，第二个实参在 Kotlin 里是**同一个字符**（`\uXXXX` 是转义，不是六个字符）——编译产物 `app/build/tmp/kotlin-classes/debug/com/dsharnessmobile/shell/AndroidBridgeKt.class` 常量池里只有裸 U+2028/U+2029 两条字符串常量（`\x01\x00\x03 E2 80 A8`），**没有** `\u2028` 转义串，两个实参去重成同一条 ⇒ 该行不做任何转义。**为什么单测还是绿的（现场反证）**：JVM 单测类路径显式引入了另一份实现 `org.json:json:20240303`（`app/build.gradle.kts:136-137` 注释自陈「本地单测用真实 org.json，android.jar 桩在 JVM 里抛 Stub!」）；`BrowserHostNavigationPolicyTest.kt:129-141` 在恒等替换下仍判绿（`app/build/tmp/kotlin-classes/debugUnitTest/.../BrowserHostNavigationPolicyTest.class` 的常量池含断言用 `\u20` 字面量，`app/build/test-results/testDebugUnitTest/TEST-…BrowserHostNavigationPolicyTest.xml` 现场读到 tests=9 failures=0），只可能是这份 jar 的 `quote` 自己转义了 U+2028/U+2029（其 `JSONObject.class` 内含写 `\u` 的字符串字面量，与该区间转义实现相符）。设备运行时用的是 Android 框架 `org.json`，与单测类路径**不是同一实现** ⇒ 这条绿的判据测不到设备行为，是假保证。设备侧是否真需要该转义（审查 §3.1-C3 / F-3 断言 `JSONObject.quote` 不转义该区间）本轮无本机复算手段，**未证实**。
   2. **（已证实）审计语义：真实结果被塞进 args，`result` 恒 `ok`，拒绝完全不落账**：`ControlAudit.kt:34` 硬编码 `.put("result","ok")`，而调用方把真值放进参数里（`ShellOps.kt:588-597` 传 `"ok" to ok`）⇒ `audit.ndjson` 出现 `result:"ok"` 与 `args.ok:false` 自相矛盾；`ShellOps.kt:94` 的范围拒绝 `return` 早于 `audit(...)`（四族审计点只在 `:101/:110/:119/:127`），安全事件（`screen-out-of-scope`）零留痕。事后复盘不可信（审查 §5.3）。
   3. **（已证实，潜伏）跨语言「逐字同规则」在带空白文本上不成立**：壳侧编码器在符号表阶段就 trim（`ControlProtocolV2.kt:196-197` `sym(row.text.trim())`），参考实现 `protocol-v2.ts:349` 直接 `symOf(row.text)`，trim 只发生在 XML 入口 `rowsFromRaw`（`protocol-v2.ts:235-236`）；而跨语言 fixture `app/src/test/resources/protocol-v2/canonical-rows.json` 现场数出 393 行里 **0 行** text/desc 带前后空白 ⇒ 门禁看不见这条差异（任一侧 trim 口径回归都不会红），`ControlProtocolV2.kt:21-22` 的「逐字同规则」声明比实际成立范围宽。
   4. **（代码路径已证实，设备后果未证实）返回键的「观测不到」方向与硬约束相反**：`BackGate.kt:16-17` 的硬约束写「观测不到/关不掉的层一律消费，不得误退应用」，但 `parseDepth` 解析不出即回 0（`:70-73`，注释还自称「与观测不到不消费同向」），`onPageFinished(0)` → `available=false` → `decide` 落 `FINISH_ACTIVITY`（`:52-56`）⇒ 页面侧 `window.__dshBackDepth` 缺席（注入层/页面版本不匹配，正是审查 §7.7 那类「注册了但不真实可用」）时，返回键会退出应用而不是被消费。触发路径：`MainActivity.kt:502` 拉平拿 `undefined` → `parseDepth` 0；`:638` 只对引擎源页面拉平。
@@ -1108,7 +1109,7 @@ flowchart TD
   3. `ShellOps.handle` 分发 → `exec` 先过执行点范围复查 `scopeDenied`（仅 `VIRTUAL_ONLY` 生效，`ShellOps.kt:132`）→ `ShizukuTransport.runShell` 组装 `sh -c <PATH 前缀 + command>`（`ShizukuTransport.kt:271`）。
   4. 绑定：`readyService` → `ensureBound`（15s 总预算内循环等绑，`ShizukuTransport.kt:169-199`）→ 协议版本 < 2 直接拒；Binder 调用 `ShizukuUserService.exec/execCapture`（独立进程 uid 2000，`ShizukuUserService.kt:60`、`:95`）→ Bundle 回执。
   5. 回写：`ShellOps` 补 `op/transport` 与 `ControlAudit.log`（`ShellOps.kt:102`、`:586`）→ `ControlPoller` POST `/api/android/ui/result` 回填 → 引擎把回执交给发起工具。
-  6. 文件进：`processIncomingIntent` 主线程只做 intent 识别 + `validate`，其余交 `dsh-file-incoming` 单线程（`FileIncoming.kt:379`、`:301`）：`sweepExpired` → `copyIn` → `recordOpening` → `enqueuePending` → 20s 内 4s 一次 `flushPending`（POST 带 `X-DSH-Control-Token`）；引擎就绪时 `EngineStartFlow.kt:547` 补投；`EngineService.onTaskRemoved` 调 `cleanupTmp`（`EngineService.kt:66`）。
+  6. 文件进：`processIncomingIntent` 主线程只做 intent 识别 + `validate`，其余交 `dsh-file-incoming` 单线程（`FileIncoming.kt:379`、`:301`）：`sweepExpired` → `copyIn` → `recordOpening` → `enqueuePending` → 20s 内 4s 一次 `flushPending`（POST 带 `X-DSH-Control-Token`）；引擎就绪时 `EngineStartFlow.kt:550` 补投；`EngineService.onTaskRemoved` 调 `cleanupTmp`（`EngineService.kt:66`）。
   7. 文件出/配置：`PathOpen.openChooser` / `FileIncoming.openWithExternalReader` / `ConfigTransfer.exportToShared|importFromShared` 同步返回 JSON 文本给页面。
 - **嵌套与线程**：主线程（intent 识别与 `validate`、`ServiceConnection` 回调、`startActivity`）；WebView JavaBridge 线程（AndroidBridge 方法体，配置导入导出同步 IO）；`dsh-control-poller` 单线程（整条控制队列串行，长命令阻塞后续 op）；`dsh-file-incoming` 单线程（拷贝 + 投递 + 重试）；Shizuku UserService 独立进程（uid 2000）内自建 reader 线程（`execCapture`，`ShizukuUserService.kt:108`）；SF 反查是执行点内的额外一次 Shizuku 往返（`ShellOps.kt:200`）。
 - **耦合**：
@@ -1132,6 +1133,7 @@ flowchart TD
   - `scope == VIRTUAL_ONLY` 时真实屏读写命令必须拒；SF 反查不可达/超时/解析空 → 空集 → 拒（fail-closed，宁可误拒）。
   - 目标屏参数按**原样十进制串**比对，禁止数值化（SF token 超 Long 值域，见坑 147）；两个 id 空间（displayId、SF token）都要核对。
   - `onServiceConnected/onServiceDisconnected` 后 `bindLatch` 必须置 null（`ShizukuTransport.kt:59`、`:70`；否则复用已放行 latch → 恒「第一次必失败」）。
+  - 绑定闩必须有看门狗（0.14.1 D7）：`ShizukuBindState` 的 `reapIfStale`（阈值 `BIND_WATCHDOG_MS=20s`），执行点在 `status()` 与 `ensureBound()` 入口；否则一次不回调的 bind 会让 `binding` 永久为 true 且 `kickBind` 从此不再发起任何尝试。
   - 协议 `protocolVersion() < 2` 一律结构化拒绝，不得静默降级。
   - pull/push 本地落点必须在 `filesDir` 内（canonical 比对），远端必须绝对路径；来件落盘前写后写后各做一次归属断言。
   - 边界：来件单文件 200 MB、远端单文件 512 MB、内联输出 16 KiB、`shExec` 超时 1s..120s。
@@ -1184,8 +1186,8 @@ flowchart TD
   - 显示器名 `"DSH <alias>"` 是**跨仓契约**：壳侧 `createVirtualDisplay` 写，引擎侧 `screen-scope.ts` 与 `plugins/dsh-android-manage/src/vd-shot.ts` 按该前缀把 SF token 配回 `virtual-N`。
   - `ScreenTargets.REAL / REAL_DISPLAY_ID / isVirtual`（ScreenScope.kt:31-44）、`ScreenScopePrefs`：`screen-not-selectable`、`screen-not-found`、`screen-out-of-scope` 的判据来源。
   - `VdisplayPrefs`：SharedPreferences 文件 `dsh-vdisplay`，键 `resolutionScale`（0.4-1.0，默认 0.75）、`floatEnabled`（默认 true）——设置页写，`create` 与 `onStop` 读。
-  - `AndroidBridge.kt:316-348` 的 `vdisplay*` 桥方法 + `MainActivity.kt:782-791` 的 lambda；`VdisplayHost.setStageBounds` 的入参由 `plugins/dsh-android-vdisplay/src/client/index.ts` 发布（`VIEWER_ID='files-sidebar'` 与宿主的 `viewer-<identityHashCode>` **不是同一个 id**）。
-  - 面板轮询：`dsh-client-ui-responsive/src/client/dev-section/screen-control.tsx:52` 每 2s 读 `vdisplayStatus`。
+  - `AndroidBridge.kt:319-351` 的 `vdisplay*` 桥方法 + `MainActivity.kt:782-791` 的 lambda；`VdisplayHost.setStageBounds` 的入参由 `plugins/dsh-android-vdisplay/src/client/index.ts` 发布（`VIEWER_ID='files-sidebar'` 与宿主的 `viewer-<identityHashCode>` **不是同一个 id**）。
+  - 面板轮询：`dsh-client-ui-responsive/src/client/dev-section/phone-control.tsx:180` 与 `:220` 每 2s 读 `vdisplayStatus` 与 `shizukuStatus`（后者是「装没装」的事实来源，`installed` 决定「打开 Shizuku」是否可点）。
   - `DeviceControlService.activeScreenId/activeDisplayId` 与 `realScreenScopeError`（`:718` 用 `displayIdForAlias` 把 `virtual-N` 钉成动态 displayId）；反向 `ShellOps.kt:197` 用 `aliasForDisplayId` 核对模型给的 displayId，`:524` 用 `activeAliases()` 收敛 SF token 反查的**有效期**（屏一销毁 token 立即失效）。
   - `Record.viewerId/viewerSurface`（`:56-57`）是仲裁唯一状态；`generation`（`:117`）是面板与「回收后自动重挂」的观测点。
 - **关键坐标**：
@@ -1223,7 +1225,7 @@ flowchart TD
 
 - **漂移**：
   - 漂移：`docs/AGENTS/ARCHITECTURE.md:90` 说 `VdisplayController.kt` 389 行、`:91` 说 `VdisplayHost.kt` 177 行，源码 `app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt` 是 766 行、`VdisplayHost.kt` 是 214 行（`wc -l` 现场数）。
-  - 漂移：`docs/AGENTS/BRIDGE-API.md:117` 与 `:195` 说页面桥面有 `vdisplayLaunchSettingsProbe`/`backProbe`，源码 `app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:316-348` 没有这两个方法（`sendBackProbe` 只有定义、无调用点，`VdisplayController.kt:529`）；实际存在的 `vdisplaySelect`、`get/setVdisplayScale`、`get/setVdisplayFloatEnabled`、`forceDestroyVdisplay` 未列出。
+  - 漂移：`docs/AGENTS/BRIDGE-API.md:117` 与 `:195` 说页面桥面有 `vdisplayLaunchSettingsProbe`/`backProbe`，源码 `app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:319-351` 没有这两个方法（`sendBackProbe` 只有定义、无调用点，`VdisplayController.kt:529`）；实际存在的 `vdisplaySelect`、`get/setVdisplayScale`、`get/setVdisplayFloatEnabled`、`forceDestroyVdisplay` 未列出。
   - 漂移：`docs/AGENTS/ARCHITECTURE.md:136` 与 `docs/AGENTS/BRIDGE-API.md:201` 说建屏 flag 是「公开 `PUBLIC|OWN_CONTENT_ONLY|SUPPORTS_TOUCH`」，源码 `VdisplayController.kt:372-373` 是 5 个（另含 `DESTROY_CONTENT_ON_REMOVAL`、`ROTATES_WITH_CONTENT`），且同文件 `:366-368` 的实测注释已写明 13+ 上 `FLAG_PUBLIC` 不生效。
   - 漂移：`VdisplayController.kt:124` 的 `ops()` 说支持 5 个 vd op（缺 `vdLaunchApp`/`vdInput`，且把只回 `unsupported` 的 `vdMoveTask` 列成支持），而 `VdisplayOps.kt:21-44` 实际分发 7 个，引擎侧 `plugins/dsh-android-vdisplay/src/status.ts:14` 的 `VD_OPS` 也是 7 个 —— 面板读载荷里的 `ops`（`mapStatusPayload`）时 capabilities 会少报两条。
 
@@ -1349,7 +1351,7 @@ flowchart TD
   - 工作线程：`postRpc`、`postEventResult`、`probeEngine` 的 `HttpURLConnection` 调用 → `main.post` 回调。
 - **耦合**（具体符号）：
   - 偏好键：`overlay_display` 的 `auto_collapse_on_done`（`OverlayService.kt:427`）与 `template_thinking`/`template_tool`/`template_completion`（`OverlayPanel.kt:387/390/396`）；`dsh-overlay` 的 `enabled`（`OverlayController.kt:22-23`）。
-  - 跨块符号：`OverlayService.instance`（`OverlayService.kt:775`）被 `OverlayController.isEnabled`、`NotifyCenter.kt:153`、`MainActivity.kt:642` 读；`OverlayService.frameConsumer`（`OverlayService.kt:783`）被 `MainActivity.kt:296` 写、`:424` 清。
+  - 跨块符号：`OverlayService.instance`（`OverlayService.kt:775`）被 `OverlayController.isEnabled`、`NotifyCenter.kt:161`、`MainActivity.kt:642` 读；`OverlayService.frameConsumer`（`OverlayService.kt:783`）被 `MainActivity.kt:296` 写、`:424` 清。
   - 服务级共享字段：`activeSessionId`/`userPinnedSession`/`engineRunning`/`sessionBusy`/`toolCount`/`optimisticBusyAt`/`currentToolName`/`pendingKind`/`panelOccupied`/`completion`/`report`（`OverlayService.kt:85-111`）由 OverlayPanel/OverlayLiveFeed/OverlayHalo 直接读写。
   - 网络与鉴权：`http://127.0.0.1:3080/api/<method>`（`OverlayService.kt:574`）与 `POST /api/$events/result`（`OverlayPanel.kt:818`），均 `EngineAuth.attach`（`:580`、`OverlayPanel.kt:824`）+ 401 重试一次（`:586`）。
   - 引擎事件流：streamId `dsh-overlay-events`（`MuxClient.kt:46`）与 K10 的 `dsh-notify-responder`（`NotifyBridge.kt:28`）并行，两条流首答者结算、另一方收 `cancel`。
@@ -1382,7 +1384,7 @@ flowchart TD
 
 漂移：`dsh-mobile/docs/0.14.1-preview-OVERLAY-COMPLETION-CARD.md` 的 1.1 表说 OverlayService.kt 673 / OverlayPanel.kt 1046 / OverlayLiveFeed.kt 172 / OverlayHalo.kt 91 / OverlayTheme.kt 33 行，源码实测 785 / 1222 / 196 / 168 / 38；该详档被源码注释当准绳引用（`OverlayService.kt:106`、`OverlayReport.kt:252`）
 
-漂移：`app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:133` 说 flashStatus 在 `OverlayService.kt:669`，源码该函数在 `OverlayService.kt:683`
+漂移：`app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:141` 说 flashStatus 在 `OverlayService.kt:669`，源码该函数在 `OverlayService.kt:683`
 
 ```mermaid
 flowchart TD
@@ -1413,25 +1415,25 @@ flowchart TD
 #### K10 通知中心
 
 - **一句话**：把引擎的两条事件信道（文件 `.notify.ndjson` + WS waterfall）渲染成五类系统通知，并把用户在通知栏里做的回答/授权经耐久队列投回引擎（`$events/result`）。
-- **入口/触发**：① 文件信道：引擎只写 `todo` / `report` 两行（`plugins/dsh-android-bridge/src/index.ts:1593` / `:1612`），`NotifyStore.start` 的 FileObserver（`NotifyStore.kt:197`，位集 `WATCH_MASK`）与启动 drain（`:186`）消费，**外加看门狗 tick 的兜底 drain**（`EngineService.kt:123` → `NotifyStore.drainTick`，`NotifyStore.kt:233`）；② WS 信道：`NotifyBridge.onFrame`（`NotifyBridge.kt:165`）收 `ready` / `waterfall` / `cancel` 三种帧，承载 question / approval；③ 用户动作：通知栏回复/选项/批准/拒绝/重试广播 → `NotifyActionReceiver.onReceive`（`NotifyActionReceiver.kt:82`）；④ 设置面：`AndroidBridge.getNotifySetting/setNotifySetting`（`AndroidBridge.kt:372` / `:381`）→ `NotifyCenter.settingsSnapshot/applySetting`（`NotifyCenter.kt:248` / `:276`）；⑤ 常驻拉起：`EngineService.onCreate`（`EngineService.kt:40-41`）。
+- **入口/触发**：① 文件信道：引擎只写 `todo` / `report` 两行（`plugins/dsh-android-bridge/src/index.ts:1593` / `:1612`），`NotifyStore.start` 的 FileObserver（`NotifyStore.kt:197`，位集 `WATCH_MASK`）与启动 drain（`:186`）消费，**外加看门狗 tick 的兜底 drain**（`EngineService.kt:123` → `NotifyStore.drainTick`，`NotifyStore.kt:233`）；② WS 信道：`NotifyBridge.onFrame`（`NotifyBridge.kt:165`）收 `ready` / `waterfall` / `cancel` 三种帧，承载 question / approval；③ 用户动作：通知栏回复/选项/批准/拒绝/重试广播 → `NotifyActionReceiver.onReceive`（`NotifyActionReceiver.kt:82`）；④ 设置面：`AndroidBridge.getNotifySetting/setNotifySetting`（`AndroidBridge.kt:375` / `:381`）→ `NotifyCenter.settingsSnapshot/applySetting`（`NotifyCenter.kt:257` / `:276`）；⑤ 常驻拉起：`EngineService.onCreate`（`EngineService.kt:40-41`）。
 - **运行顺序**：进程启动 → `EngineService.onCreate` → `NotifyStore.start`（装 `ShellListener`、跑存量抑制迁移、挂 FileObserver、启动即 drain 一次）→ `NotifyBridge.start`（建 MuxClient 流、`NotifyDecisionQueue.ensureScheduled` 重评滞留决策、起心跳线程）。**事件到达** → `drain(trigger=watch:<name>)` 读偏移 → `drainBytes` 取完整行 → 逐行 `dispatch`（置 `notifyChannelActive`、登记 `lastReportLineRaw`、打延迟点）→ `notifyEvent` → `deliverEvent`：kind 分流（`resolve` 撤通知即终态）→ 类别门 → 权限门 → report 抑制门 → `formDecision` 定形态 → `channelFor` 解析渠道 → **P3 去重**（同 id 同内容 2 s 内丢弃）→ `notify()` → 探针 `result=` → **最后**才推进偏移（`:398`，至少一次语义）。**兜底到达**（每 5 s，不依赖任何文件事件）→ `drainTick` → 走同一条 `drain`（`trigger=tick`；每 5 分钟记一行 `notify tick alive ticks=… lag=… watchEvents=… watchEventAgeMs=…` 心跳）。WS 到达 → `handleValue`：`ready` 换代并 3s 后对账过期 pending + 后台线程补投决策队列；`waterfall` 登记 pending 并投递提问/审批；`cancel` 走 `markSettled → settleInteractive`（重投后撤）。用户点动作 → `outcomeFor` 构造协议 outcome → `enqueue` 落盘 → 幂等热身 `NotifyStore.start`/`NotifyBridge.start` → `goAsync` + 后台线程 `flush → postResult` → 成功本地结算 / 失效或失败走 `postDeliveryFailure` 可见态。跑完交给谁：成功投递交给系统通知栏与 `NotifyProbe` 记账；决策交给引擎网关；失败交给可见的「提交失败，点击重试」条目。
 - **嵌套与线程**：最多三层。主线程（服务回调）：`EngineService.onCreate → NotifyStore.start → drain → dispatch → notifyEvent → NotificationManager.notify`（含文件 IO 与 prefs 写，同步跑在 onCreate 里）。FileObserver 回调线程：`onEvent → drain → dispatch → notifyEvent`；**看门狗单线程执行器**（`EngineService.kt:116`，5 s 固定延迟、持唤醒锁）：`drainTick → drain → dispatch → notifyEvent`——它与 FileObserver 线程**并发跑同一份 offset**，故 `drain` 必须 `@Synchronized`（否则同一批行各投一遍：真机实测同 id 80 ms 内 5 次）；MuxClient 读线程：`onFrame → handleValue → notifyEvent`，其 `ready` 分支把 3s 对账 `handler.postDelayed` 抛回主线程。动作广播主线程：`onReceive → outcomeFor → NotifyDecisionQueue.enqueue` 只落盘，重活交 `goAsync` + 后台线程 `flush → postResult`（同步 HTTP，禁主线程）。定时器：`scheduleRetry` 与 `scheduleTick` 都挂主线程 Handler，前者再起后台线程 flush、后者在主线程直接 flush；`NotifyBridge` 心跳是独立 daemon 线程 `notify-probe`。结算：`settleInteractive` 在主线程 notify，400ms 后再 cancel。
-- **耦合**：偏好文件 `dsh-notify`（`NotifyCenter.PREFS`，`NotifyCenter.kt:33`）被四处共用——`channelsInitialized` / `channel.<category>`（`:34-35`）、`suppressForeground` + `suppressForegroundSchema` + `suppressForegroundLegacy`（`:36` / `:55` / `:59`，读写方都是 NotifyCenter）、`notify.offset`（`NotifyStore.KEY_OFFSET`，`NotifyStore.kt:66`）、`notify.markerOffset`（`WatchdogV2.kt:29`，经 `NotifyCenter.prefs(context)` 读写，`WatchdogV2.kt:236` / `:243`）。落盘面：`files/notify-decisions.ndjson`（`NotifyDecisionQueue.kt:28`，>256KB 压缩）、`files/notify-responder.log`（`NotifyProbe.kt:21`，>128KB 清空）、`files/home/.dsh/.notify.ndjson` 与 `.1` 残段、`.task-done.ndjson`（`NotifyStore.kt:36-38`）。引擎契约：`plugins/dsh-android-bridge/src/index.ts:1457-1479`（写盘 + 512KB 轮转；`kind` 是唯一分类权威）、`notify-projection.ts:55` / `:79`（outcomeLabel / popup 判定）；引擎侧插件权威源在协调仓同名路径，apk 仓为逐字节镜像（本轮 md5 核对一致）。双流：`NotifyBridge.STREAM_ID = "dsh-notify-responder"`（`NotifyBridge.kt:28`）与 `OverlayPanel` 的 `eventsClientId` 是两条独立 `$events` 流，同一 waterfall 事件分别落在 `NotifyBridge.pending`（`:66`）与 `OverlayPanel.pendingQuestions/pendingApprovals`（`OverlayPanel.kt:69-70`）。其它：`Face` 候选 ID 落 `channel.<category>`（`NotifyCenter.kt:84-103`）、固定 ID `ID_WATCHDOG/ID_TODO`（`:62-63`）、反馈面 `ShellListener` 只依赖 `OverlayService.instance` + `flashStatus`（`OverlayService.kt:683`）、桥面 `AndroidBridge.getNotifySetting/setNotifySetting` → 页面 `dsh-client-ui-responsive/src/client/dev-section/notify-settings.tsx`（`applied !== true` 不置位）。
+- **耦合**：偏好文件 `dsh-notify`（`NotifyCenter.PREFS`，`NotifyCenter.kt:33`）被四处共用——`channelsInitialized` / `channel.<category>`（`:34-35`）、`suppressForeground` + `suppressForegroundSchema` + `suppressForegroundLegacy`（`:36` / `:55` / `:59`，读写方都是 NotifyCenter）、`notify.offset`（`NotifyStore.KEY_OFFSET`，`NotifyStore.kt:66`）、`notify.markerOffset`（`WatchdogV2.kt:29`，经 `NotifyCenter.prefs(context)` 读写，`WatchdogV2.kt:236` / `:243`）。落盘面：`files/notify-decisions.ndjson`（`NotifyDecisionQueue.kt:28`，>256KB 压缩）、`files/notify-responder.log`（`NotifyProbe.kt:21`，>128KB 清空）、`files/home/.dsh/.notify.ndjson` 与 `.1` 残段、`.task-done.ndjson`（`NotifyStore.kt:36-38`）。引擎契约：`plugins/dsh-android-bridge/src/index.ts:1457-1479`（写盘 + 512KB 轮转；`kind` 是唯一分类权威）、`notify-projection.ts:55` / `:79`（outcomeLabel / popup 判定）；引擎侧插件权威源在协调仓同名路径，apk 仓为逐字节镜像（本轮 md5 核对一致）。双流：`NotifyBridge.STREAM_ID = "dsh-notify-responder"`（`NotifyBridge.kt:28`）与 `OverlayPanel` 的 `eventsClientId` 是两条独立 `$events` 流，同一 waterfall 事件分别落在 `NotifyBridge.pending`（`:66`）与 `OverlayPanel.pendingQuestions/pendingApprovals`（`OverlayPanel.kt:69-70`）。其它：`Face` 候选 ID 落 `channel.<category>`（`NotifyCenter.kt:84-102`）、固定 ID `ID_WATCHDOG/ID_TODO`（`:62-63`）、反馈面 `ShellListener` 只依赖 `OverlayService.instance` + `flashStatus`（`OverlayService.kt:683`）、桥面 `AndroidBridge.getNotifySetting/setNotifySetting` → 页面 `dsh-client-ui-responsive/src/client/dev-section/notify-settings.tsx`（`applied !== true` 不置位）。
 - **关键坐标**：
   - `app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:49` 抑制默认值常量（`DEFAULT_SUPPRESS_FOREGROUND = false`）
-  - `app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:336` 渠道三态纯函数 `selectChannel`；`:357` / `:374` 映射读取与落 prefs
-  - `app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:582` 唯一投递入口 `notifyEvent`（异常边界）；`:624` 唯一抑制判定
+  - `app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:345` 渠道三态纯函数 `selectChannel`；`:357` / `:374` 映射读取与落 prefs
+  - `app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:589` 唯一投递入口 `notifyEvent`（异常边界）；`:624` 唯一抑制判定
   - `app/src/main/java/com/dsharnessmobile/shell/NotifyStore.kt:360` `drain`（带触发源 + 加锁）；`:398` 先投递再推进偏移（至少一次）
   - `app/src/main/java/com/dsharnessmobile/shell/NotifyBridge.kt:200` 帧分发 `handleValue`；`:307` `postResult`（`:339-346` 404/410→STALE）
   - `app/src/main/java/com/dsharnessmobile/shell/NotifyActionReceiver.kt:51` outcome 闭集 `outcomeFor`；`:82` `onReceive`（只落盘 + 一次快速 flush）
   - `app/src/main/java/com/dsharnessmobile/shell/NotifyDecisionQueue.kt:266` NOT_READY 处置；`:292` `flush`
   - `app/src/main/java/com/dsharnessmobile/shell/NotifySuppressQueue.kt:119` 补投 `flush`；`:153` 自续 tick
 - **不变量**：
-  1. `kind` 是唯一分类权威、六类闭集，未知 kind 显式忽略并记账（`NotifyCenter.kt:543-556`）；`resolve` 只撤提问/审批通知（`:640-648`）。
-  2. 渠道 importance 应用不可调高：弹窗类首次必须 HIGH 建，候选 ID 序列是唯一迁移手段，选中项落 `channel.<category>` 后只读映射（`NotifyCenter.kt:361-371`）。违反＝弹窗类永久只能静默，只能换新候选 ID 救。
-  3. 前台抑制只作用于 `report`、默认关闭；提问/审批永不因前台抑制丢弃，引擎 `popup=false` 也不能把它们静默（`NotifyCenter.kt:520` / `:567-577`）。类别开关（`cat.*`）、权限、渠道全降级是三条硬拒发路径，每条都有独立记账串（表驱动锁死见 `NotificationContractTest.kt:242`）。
-  4. 经 RemoteInput 回复过的通知受平台 `LIFETIME_EXTENDED_BY_DIRECT_REPLY` 保护，直接 `cancel()` 无效：必须先同 `(tag,id)` 重投再撤（`NotifyCenter.kt:669-701`），否则通知撤不掉、回复框可再点。
-  5. 动作 receiver 的权限面＝manifest `android:exported="false"`（`app/src/main/AndroidManifest.xml:98-104`）+ 显式 `Intent(app, NotifyActionReceiver::class.java)`（`NotifyCenter.kt:843`）：外部应用无法构造有效动作（只有同 UID 能投递到它），唯一 `FLAG_MUTABLE` 的回复动作仍是显式 Intent，不存在 intent redirection 面；主 WebView 桥面也没有任意广播出口。outcome 是闭集 `allowed-once` / `rejected` / `answers`。
+  1. `kind` 是唯一分类权威、六类闭集，未知 kind 显式忽略并记账（`NotifyCenter.kt:550-563`）；`resolve` 只撤提问/审批通知（`:640-648`）。
+  2. 渠道 importance 应用不可调高：弹窗类首次必须 HIGH 建，候选 ID 序列是唯一迁移手段，选中项落 `channel.<category>` 后只读映射（`NotifyCenter.kt:370-380`）。违反＝弹窗类永久只能静默，只能换新候选 ID 救。
+  3. 前台抑制只作用于 `report`、默认关闭；提问/审批永不因前台抑制丢弃，引擎 `popup=false` 也不能把它们静默（`NotifyCenter.kt:527` / `:567-577`）。类别开关（`cat.*`）、权限、渠道全降级是三条硬拒发路径，每条都有独立记账串（表驱动锁死见 `NotificationContractTest.kt:242`）。
+  4. 经 RemoteInput 回复过的通知受平台 `LIFETIME_EXTENDED_BY_DIRECT_REPLY` 保护，直接 `cancel()` 无效：必须先同 `(tag,id)` 重投再撤（`NotifyCenter.kt:676-708`），否则通知撤不掉、回复框可再点。
+  5. 动作 receiver 的权限面＝manifest `android:exported="false"`（`app/src/main/AndroidManifest.xml:98-104`）+ 显式 `Intent(app, NotifyActionReceiver::class.java)`（`NotifyCenter.kt:850`）：外部应用无法构造有效动作（只有同 UID 能投递到它），唯一 `FLAG_MUTABLE` 的回复动作仍是显式 Intent，不存在 intent redirection 面；主 WebView 桥面也没有任意广播出口。outcome 是闭集 `allowed-once` / `rejected` / `answers`。
   6. 决策先落盘再投递、状态只追加（`NotifyDecisionQueue.kt:192-231`），读侧 `fold` 折叠；`requestId = sha1(eventId|kind|outcome)` 前 16 位 ⇒ 同一次点击重复触发只投一次；`SUBMITTED/SETTLED/EXPIRED` 不再重投，`FAILED` 仍可被后续 flush 重投（设计如此，见计划 §6.7.7）。
   7. 消费**不再受单一事件源支配**（0.14.1 真机停摆 `#238` 的修法）：三个驱动者——`start()` 一次性、`FileObserver`（位集 `WATCH_MASK`：`MODIFY|CREATE|CLOSE_WRITE|MOVED_TO|DELETE|MOVED_FROM`，白名单 `FILE_NAME`/`ROTATED_NAME`/`path==null`）、看门狗 5 s tick（`NotifyStore.drainTick`）——都走同一把 `@Synchronized` 的 `drain`，且**先投递再推进偏移**（至少一次；重复由 P3 去重挡住）。违反：只靠事件 ⇒ 一次事件丢失即永久停摆（文件在长、`notify.offset` 冻住、一条报告都不投，真机实测十余分钟）；先推进再投递 ⇒ 崩溃静默丢。
   8. 长按面板的最近汇报**不依赖消费是否活着**：`lastReportLineRaw` 为空时由 `tailReportLine` 倒读 `.notify.ndjson` 尾部（32 KB 窗口）取最后一条 `kind=report` 行（`NotifyStore.kt:118` / `:127`）。违反：进程重启或消费停摆后长按面板只剩占位行。
@@ -1447,17 +1449,17 @@ flowchart TD
   1. 决策链与动作链的记账**只走 `LogCollector`**（`NotifyDecisionQueue.kt:194/200/229/271/281/299/316/334/338/367/382/388`、`NotifyActionReceiver.kt:89/101/110/119/127`），而 `LogCollector.log` 在采集器未开时直接 return（`LogCollector.kt:785`，闸门 `MainActivity.kt:1167` 缺键即 false）⇒ 默认设备上「点了动作 → 是否落盘 → 是否投递成功」全链路零可观测面，`files/notify-responder.log` 里没有任何 decision 行（只有 `NotifyBridge` 的 waterfall/ready/cancel 行）。这与已修的 J-2（`NotificationContractTest.kt:206` 要求投递结果改走 `NotifyProbe`）是同一族缺陷，只是当时只修了 `NotifyStore`。影响：用户报「批准没生效」时无法从设备取证。
   2. `NotifySuppressQueue` 是**纯进程内** `@Volatile List`（`NotifySuppressQueue.kt:83`），而 `drain` 早已推进字节偏移（`NotifyStore.kt:398`）⇒ 命中抑制后进程被回收（后台被杀的常见场景）即永久丢该条，与 FIX-1「抑制＝延后而非丢弃」的承诺只对存活进程成立。已登记：评审 `N-8`（`coord:docs/COMPAT-REVIEW-0.14.0-2026-09-19.md:1238`，锚点正是 `NotifySuppressQueue.kt:83` 与 `:153-167`）与 `H-17`（`coord:docs/0.14.1-REVIEW-CHECKLIST-PROGRESS.md:94`），修法为落盘 sidecar + 启动恢复。
   3. `PostStatus.STALE` 分支（`NotifyDecisionQueue.kt:323-327`，404/410 才触发）在本版本**不可达**：设备实测网关对未知 eventId 返回 200 no-op（`coord:docs/0.14.0-preview-ACCEPTANCE-LEDGER.md:177` 的 NT-17 注、`coord:docs/NEXT-ITERATION-PLAN-2026-09-12.md:1440` NT-17B）⇒ 旧事件会被判 `OK`、标记 `submitted` 并本地撤通知（`NotifyDecisionQueue.kt:310-316`），用户以为答复已提交而引擎从未收到，「该请求已失效」文案永不出现。已登记为未决项，未证实有壳侧可行替代信号（评审建议查 cancel 帧）。
-  4. FIX-2 的可见反馈面是 `OverlayService.flashStatus`，而它要求面板展开且只闪现 2.5s（`OverlayService.kt:683-692` 的 `if (expanded)` 守卫，坑 148 已记该可见性条件）⇒ 「通知已延后」「通知未授权」这类提示在面板收起（最需要提示的前台场景）时依然不可见，`ShellListener`（`NotifyCenter.kt:137-159`）只解决了「零实现」，没解决「不可见」。影响：开启抑制后用户仍可能观察到「什么都没发生」。
-  5. 渠道降级结果被**空串固化**：`resolveChannel` 把 `chosen = null` 写成 `channel.<category> = ""`（`NotifyCenter.kt:392-395`），`channelFor` 命中已初始化标记后直接 `stored.ifEmpty { null }` 返回、不再复查 `getNotificationChannel`（`:361-371`）；`selectedCache` 同进程内同样固化。用户按自检页文案去系统设置把 importance 调回高优后，应用仍永久判「已降级为静默」并只发静默条目（`:443-463` 文案继续报降级）——除非清数据或换新候选 ID。源码级可判，本轮无设备复现。
+  4. FIX-2 的可见反馈面是 `OverlayService.flashStatus`，而它要求面板展开且只闪现 2.5s（`OverlayService.kt:683-692` 的 `if (expanded)` 守卫，坑 148 已记该可见性条件）⇒ 「通知已延后」「通知未授权」这类提示在面板收起（最需要提示的前台场景）时依然不可见，`ShellListener`（`NotifyCenter.kt:145-167`）只解决了「零实现」，没解决「不可见」。影响：开启抑制后用户仍可能观察到「什么都没发生」。
+  5. 渠道降级结果被**空串固化**：`resolveChannel` 把 `chosen = null` 写成 `channel.<category> = ""`（`NotifyCenter.kt:401-404`），`channelFor` 命中已初始化标记后直接 `stored.ifEmpty { null }` 返回、不再复查 `getNotificationChannel`（`:361-371`）；`selectedCache` 同进程内同样固化。用户按自检页文案去系统设置把 importance 调回高优后，应用仍永久判「已降级为静默」并只发静默条目（`:443-463` 文案继续报降级）——除非清数据或换新候选 ID。源码级可判，本轮无设备复现。
 漂移：
 - 漂移：`docs/AGENTS/ARCHITECTURE.md:70` 说 `NotifyCenter.kt` 834 行，源码（`wc -l`）是 1051 行。
 - 漂移：`docs/AGENTS/ARCHITECTURE.md:71` 说 `NotifyStore.kt` 287 行，源码是 537 行。
 - 漂移：`docs/AGENTS/ARCHITECTURE.md` 模块表缺 `NotifySuppressQueue.kt`（0.14.1 新增，只在 `docs/AGENTS/modules.md:36` 有条目）。
-- 漂移：`app/src/main/java/com/dsharnessmobile/shell/OverlayReport.kt:233-234` 注释说与 `notify-projection.ts` 的 `reportOutcomeLabel` **逐字同构**，实际 `interrupted` 文案不同——`plugins/dsh-android-bridge/src/notify-projection.ts:68` 是「被中断（进程重启）」，`OverlayReport.kt:244` 与 `NotifyCenter.kt:1041` 是「被中断」。
-- 漂移：`app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:133` 注释指向 `OverlayService.kt:669` 的 `flashStatus`，实际在 `OverlayService.kt:683`。
-- 漂移：`app/src/main/java/com/dsharnessmobile/shell/OverlayService.kt:706` 注释说先例在 `NotifyCenter.kt:605-606`，实际 `Intent(app, MainActivity::class.java)` 在 `NotifyCenter.kt:822`（605-606 是 `deferredKey` 的注释）。
+- 漂移：`app/src/main/java/com/dsharnessmobile/shell/OverlayReport.kt:233-234` 注释说与 `notify-projection.ts` 的 `reportOutcomeLabel` **逐字同构**，实际 `interrupted` 文案不同——`plugins/dsh-android-bridge/src/notify-projection.ts:68` 是「被中断（进程重启）」，`OverlayReport.kt:244` 与 `NotifyCenter.kt:1048` 是「被中断」。
+- 漂移：`app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:141` 注释指向 `OverlayService.kt:669` 的 `flashStatus`，实际在 `OverlayService.kt:683`。
+- 漂移：`app/src/main/java/com/dsharnessmobile/shell/OverlayService.kt:706` 注释说先例在 `NotifyCenter.kt:612-613`，实际 `Intent(app, MainActivity::class.java)` 在 `NotifyCenter.kt:829`（605-606 是 `deferredKey` 的注释）。
 - 漂移：`plugins/dsh-android-bridge/src/index.ts:1458` 注释说「壳侧 FileObserver 按偏移消费后截断/轮转」，实际壳侧只读不截断不轮转（`NotifyStore.kt:18-20` 明写「引擎超过 512KB 时轮转 .1」，轮转方是引擎）。
-- 漂移：`docs/0.14.1-preview-NOTIFY-REALTIME-AND-STATE-SYNC.md` §0/§1.2 仍用旧行号（`:377` 抑制判定、`:114` 默认值、`:88-97` Listener、`:307-311` Result），当前源码对应 `NotifyCenter.kt:624`、`:49` / `:191`、`:111-120`、`:500-514`。
+- 漂移：`docs/0.14.1-preview-NOTIFY-REALTIME-AND-STATE-SYNC.md` §0/§1.2 仍用旧行号（`:377` 抑制判定、`:114` 默认值、`:88-97` Listener、`:307-311` Result），当前源码对应 `NotifyCenter.kt:631`、`:49` / `:191`、`:111-120`、`:500-514`。
 
 ```mermaid
 flowchart TD
@@ -1798,7 +1800,7 @@ flowchart TD
   - 控制面：`androidPrivilege.controlExec`（`plugins/dsh-android-bridge/src/index.ts:949`）是唯一通路；它内部按 `TIER_REQUIRED_OPS`（`index.ts:428`）判档位——`browser*` 与 `vdInfo/vdCreate/vdDestroy` 刻意不在列，`vdInput/vdLaunch/vdLaunchApp/vdMoveTask` 在列。
   - 会话键：`sessionScope`（`AsyncLocalStorage`，`tools.ts:193`）自动把 `session` 塞进每个 op 参数；vdisplay 用 `sessionOf(exec)`（`plugins/dsh-android-vdisplay/src/index.ts:162`）。
   - 壳侧真源字段：`BrowserHost.status()` 的 `url/title/loadState/pageGeneration/canGoBack/canGoForward/tabId/tabs/reason`（`BrowserHost.kt:908-939`）、`tabSummaries()` 五字段（`BrowserHost.kt:91-101`）、`lastError`（`BrowserHost.kt:304`）；`VdisplayController.status()` 的 `state/code/guidance/ops/screens/viewers/ownerSessionId`（`VdisplayController.kt:233-268`）。
-  - 面板/客户端：`window.androidBridge.vdisplayStatus/vdisplaySelect/vdisplayBounds/forceDestroyVdisplay`（`AndroidBridge.kt:316/330/326/348`），`vdisplayBounds` 的 `viewerId='files-sidebar'`（`plugins/dsh-android-vdisplay/src/client/index.ts:93`）与壳侧 viewer 仲裁表同名；收起信号 `[data-sidebar-right-expand]`（`dsh-client-ui-responsive/src/client/index.ts:192`）。
+  - 面板/客户端：`window.androidBridge.vdisplayStatus/vdisplaySelect/vdisplayBounds/forceDestroyVdisplay`（`AndroidBridge.kt:319/330/326/348`），`vdisplayBounds` 的 `viewerId='files-sidebar'`（`plugins/dsh-android-vdisplay/src/client/index.ts:93`）与壳侧 viewer 仲裁表同名；收起信号 `[data-sidebar-right-expand]`（`dsh-client-ui-responsive/src/client/index.ts:192`）。
   - 环境/事实：`DSH_BROWSER_FACTS`（`facts.ts:50`）、`DSH_ADB_PREFS_PATH`/`TERMUX__PREFIX`/`DSH_HOME` 决定控制令牌读取路径（`index.ts:69-74`），令牌头 `x-dsh-control-token`（`index.ts:31`）。
   - 门禁：`scripts/check-tool-output-schema.mjs`（VARIANTS 覆盖全部 `browser_*`，`scripts/check-tool-output-schema.mjs:153`）、`scripts/check-control-ops.mjs`、`scripts/check-bridge-symmetry.mjs`。
 
@@ -1824,7 +1826,7 @@ flowchart TD
   2. 已确认（跨会话/跨页记忆）：`tools.ts:33` 的 `lastSnapshot` 是模块级单槽（评审 §M5、H-6 未修），B 会话的 `browser_click` 会直接消费 A 会话的 ref + 代次；新页首快照都是 `bx1` 起、代次 1-2 极易相同，壳侧只验代次与 ref、自述不校验 tab（`BrowserHost.kt:1412-1415`、`:1432-1447`）。引擎侧 `SnapshotMemory.tabId/refs`（`tools.ts:26-30`、`:470`）从不被读，页维度全程无校验 → 症状是「点在了本会话的另一页上但仍报成功」。
   3. 已确认（同一事实两种读数）：`status.ts:135` 的 `ops` 恒为静态 `VD_OPS`（7 条），`snapshotFromRaw` 全程忽略壳侧回执里的 `ops`；面板路径 `mapStatusPayload:299` 读的却是壳侧值，而壳侧 `VdisplayController.ops():124` 只列 5 条（缺 `vdLaunchApp`/`vdInput`）。于是 `android_vdisplay_status` 报 7 条可用、面板报 5 条。F-13（`ops()` 由 `SUPPORTED_OPS` 派生、==7 条）本轮未做，H-14（消费 `caps.ops`）同源。
   4. 已确认（回执丢字段，同 issue #232 族）：`plugins/dsh-android-vdisplay/src/index.ts:140` 的 render 只输出 `guidance`，失败时模型看不到 `code`（工具说明却让模型「看 code/guidance」），active 时看不到 `screens` 里的 alias（`screenId` 需要 `virtual-N`）；`execute` 里算好的 `text`（`:157`）从不被渲染。判据同 `tools.ts:73-87` 记的「能力声明与可用通道不一致」。
-  5. 已确认（客户端声明与壳侧不符且不在门禁面内）：`plugins/dsh-android-vdisplay/src/client/index.ts:83` 声明 `vdisplayDestroy(target?: string)`、`:284` 按别名调用，壳侧 `AndroidBridge.kt:322` 是无参方法、`MainActivity.kt:784` 不传 target → 别名被 JS 桥静默丢弃，「关闭全部」的兜底路径（`:281-287`）实际按壳侧默认顺序（选中→本会话→任意）销毁一块。该声明不在 `scripts/bridge-symmetry-baseline.json` 的 surfaces（只覆盖 androidBridge/backGateBridge），门禁看不见；注入层同名声明是无参形态（`dsh-client-ui-responsive/src/client/android-bridge.ts:82`）。同处 `:40` 的 `VD_POLL_MS=10_000` 与真实 1s 轮询（`:252`）不符，是死常量。
+  5. 已确认（客户端声明与壳侧不符且不在门禁面内）：`plugins/dsh-android-vdisplay/src/client/index.ts:83` 声明 `vdisplayDestroy(target?: string)`、`:284` 按别名调用，壳侧 `AndroidBridge.kt:325` 是无参方法、`MainActivity.kt:784` 不传 target → 别名被 JS 桥静默丢弃，「关闭全部」的兜底路径（`:281-287`）实际按壳侧默认顺序（选中→本会话→任意）销毁一块。该声明不在 `scripts/bridge-symmetry-baseline.json` 的 surfaces（只覆盖 androidBridge/backGateBridge），门禁看不见；注入层同名声明是无参形态（`dsh-client-ui-responsive/src/client/android-bridge.ts:82`）。同处 `:40` 的 `VD_POLL_MS=10_000` 与真实 1s 轮询（`:252`）不符，是死常量。
 
 ```mermaid
 flowchart TD
@@ -1856,8 +1858,8 @@ flowchart TD
 ```
 
 漂移：`plugins/dsh-android-browser/src/tools.ts:407` 说壳侧 `reason` 在 `BrowserHost.kt:818` 的 `lastError`，同文件 `:160` 说 `tabSummaries()` 在 `BrowserHost.kt:80-91`；源码 `lastError` 声明在 `app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt:304`、`tabSummaries()` 在 `:91`（`:818` 是 `ORPHAN_REFS`），注释锚点按 0.14.0 基线写死。
-漂移：`docs/AGENTS/ARCHITECTURE.md:17` 说 AndroidBridge.kt 383 行、`:90` 说 VdisplayController.kt 389 行、`:91` 说 VdisplayHost.kt 177 行；源码现数 422 / 766 / 214 行（`wc -l`，文件末行分别为 `app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:422`、`VdisplayController.kt:766`、`VdisplayHost.kt:214`），同文档 `:18` 自己注明「行数每次改都会漂、不要写死」。
-漂移：`docs/AGENTS/BRIDGE-API.md:117` 与 `:195` 把虚拟屏桥面写成 `vdisplayStatus/create/destroy/launchSettingsProbe/backProbe/bounds`，未列 `vdisplaySelect`（`app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:330`）、`forceDestroyVdisplay`（`:348`）与 Scale/Float 四个存取（`:334/:337/:341/:344`），而面板侧正在调用前两个（`plugins/dsh-android-vdisplay/src/client/index.ts:84`、`:89`）。
+漂移：`docs/AGENTS/ARCHITECTURE.md:17` 说 AndroidBridge.kt 383 行、`:90` 说 VdisplayController.kt 389 行、`:91` 说 VdisplayHost.kt 177 行；源码现数 422 / 766 / 214 行（`wc -l`，文件末行分别为 `app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:425`、`VdisplayController.kt:766`、`VdisplayHost.kt:214`），同文档 `:18` 自己注明「行数每次改都会漂、不要写死」。
+漂移：`docs/AGENTS/BRIDGE-API.md:117` 与 `:195` 把虚拟屏桥面写成 `vdisplayStatus/create/destroy/launchSettingsProbe/backProbe/bounds`，未列 `vdisplaySelect`（`app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:333`）、`forceDestroyVdisplay`（`:348`）与 Scale/Float 四个存取（`:334/:337/:341/:344`），而面板侧正在调用前两个（`plugins/dsh-android-vdisplay/src/client/index.ts:84`、`:89`）。
 
 #### P04 文件打开、Linux 环境与模型能力插件
 
@@ -1985,13 +1987,14 @@ flowchart TD
     - `getDevLogEnabled` / `setDevLogEnabled` → `DevSection.tsx:60,186`；`getOverlayEnabled` / `setOverlayEnabled` → `DevSection.tsx:31,199`
     - `hasAllFilesAccess` → `DevSection.tsx:72`；`exportConfig` / `importConfig` → `DevSection.tsx:220,230`
     - `restartEngine` / `shutdownToGuide` / `reloadWebUI` / `openConsole` → `DevSection.tsx:152,162,170,178`
-    - `getScreenScope` / `setScreenScope` → `phone-control.tsx:42,116`、`screen-control.tsx:18,55`
-    - `vdisplayStatus` → `phone-control.tsx:52`、`screen-control.tsx:28`；`getVdisplayScale` / `setVdisplayScale` → `phone-control.tsx:68,121`
-    - `getVdisplayFloatEnabled` / `setVdisplayFloatEnabled` → `phone-control.tsx:78,126`；`a11yStatus` / `openA11ySettings` → `phone-control.tsx:86,131`
-    - `forceDestroyVdisplay` → `phone-control.tsx:143`；`getNotifySetting` / `setNotifySetting` → `notify-settings.tsx:66,86`
+    - `getScreenScope` / `setScreenScope` → `phone-control.tsx:170,283`
+    - `vdisplayStatus` → `phone-control.tsx:180`；`getVdisplayScale` / `setVdisplayScale` → `phone-control.tsx:196,288`
+    - `getVdisplayFloatEnabled` / `setVdisplayFloatEnabled` → `phone-control.tsx:206,293`；`a11yStatus` / `openA11ySettings` / `unlockRestrictedSettings` → `phone-control.tsx:240,298,303`
+    - `forceDestroyVdisplay` → `phone-control.tsx:363`；`getNotifySetting` / `setNotifySetting` → `notify-settings.tsx:66,86`
+    - `shizukuStatus` / `openShizukuManager` / `openExternalLink` → `phone-control.tsx:220,346,326`（外链 key 只有 `shizuku-download` / `shizuku-tutorial`，URL 表在壳侧 `ExternalLinks.kt`）
     - `incomingWorkspacePath` → `incoming-draft.ts:150`；`browserHostStatus` → `browser-tab.tsx:200,250,317` 与 `index.ts:380`
     - `browserHostBounds` → `browser-tab.tsx:229`；`browserHostViewport` → `:335`；`browserHostIdentity` → `:373`；`browserHostShow` → `:256,354`；`browserHostHide` → `:274,283`；`browserHostReload` → `:352`
-    - 本块无页面调用点（归壳侧/文件面板/浏览器插件）：`version`、`checkEngine`、`keepScreenOn`、`showNotification`、`copyText`、`requestAllFilesAccess`、`unlockRestrictedSettings`、`vdisplayCreate`、`vdisplayDestroy`、`vdisplayBounds`、`vdisplaySelect`、`browserHostClose`
+    - 本块无页面调用点（归壳侧/文件面板/浏览器插件）：`version`、`checkEngine`、`keepScreenOn`、`showNotification`、`copyText`、`requestAllFilesAccess`、`vdisplayCreate`、`vdisplayDestroy`、`vdisplayBounds`、`vdisplaySelect`、`browserHostClose`
   - **非 androidBridge 的页壳契约**：`window.dshBackBridge.setAvailable` ← `back-stack.ts:428`（消费方 `MainActivity.kt:803` 注入、`BackGate.kt:126`）；`window.__dshBack` / `__dshBackDepth` 被 `BackGate.kt:38,44` 求值；`window.__dshExportResult` ← `index.ts:432`，生产方 `MainActivity.kt:1030`、`DownloadSaver.kt:61`；`window.__dshThemeBridge.setDark` ← `theme-bridge.ts:68` 与 `dsh-host-web-compat/lib/index.js:381`，生产方 `MainActivity.kt:880,886`；`window.__dshBridge.onDirectoryPicked/onPermissionRequired` ← `dsh-host-web-compat/lib/index.js:398-405`，生产方 `ConfigTransfer.kt:117,241`；`window.__dshOpenPath` ← `dsh-host-web-compat/lib/index.js:409`；看门狗/就绪行经 `console.error` 的 `[dsh-boot-stall]` / `[dsh-boot-ready]` 前缀（`dsh-host-web-compat/lib/index.js:302,267`）被 `LogCollector.kt:740,742` 与 `EngineStartFlow.kt:206,224` 消费。
 - **关键坐标**：
   - `dsh-host-web-compat/lib/index.js:552` — `POLYFILL_SCRIPT_BODY` 逐段补分号 + 换行装配（坑 61 防线①）。
@@ -2051,7 +2054,7 @@ flowchart TD
 
 漂移：`dsh-mobile-apk/docs/AGENTS/gotchas.md:103`（坑 61）说防线③是「常驻 `node dsh-host-web-compat/scripts/smoke-injections.mjs` 门禁」，源码 `dsh-host-web-compat/lib/index.js:783,791` 已是两次 `tapIndex`，而 `dsh-host-web-compat/scripts/smoke-injections.mjs:50` 仍断言 `transforms.length === 1` —— 该门禁当下是红的（apk 仓 `.github/workflows` 不跑它）。
 
-漂移：`dsh-mobile-apk/docs/AGENTS/BRIDGE-API.md:117` 说 AndroidBridge 桥面「方法计数由 `check-bridge-symmetry.mjs` 从源码守」，但该清单及其余各表都未收录 0.14.1 新增的 `getNotifySetting` / `setNotifySetting`，源码 `app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:372,381` 已实现，页面 `dsh-client-ui-responsive/src/client/dev-section/notify-settings.tsx:66,86` 已在调用。
+漂移：`dsh-mobile-apk/docs/AGENTS/BRIDGE-API.md:117` 说 AndroidBridge 桥面「方法计数由 `check-bridge-symmetry.mjs` 从源码守」，但该清单及其余各表都未收录 0.14.1 新增的 `getNotifySetting` / `setNotifySetting`，源码 `app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:375,381` 已实现，页面 `dsh-client-ui-responsive/src/client/dev-section/notify-settings.tsx:66,86` 已在调用。
 
 漂移：apk 仓 `dsh-shell-termux/README.md` 与协调仓同名副本不是逐字节镜像（6 行行尾 CRLF/LF 差异，正文逐字相同，无功能影响）。
 
@@ -2424,6 +2427,7 @@ node scripts/check-code-map.mjs --self-test   # 判别力自检（8 个用例，
 
 <!-- COVERAGE
 app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt
+app/src/main/java/com/dsharnessmobile/shell/UserCopy.kt
 app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt
 app/src/main/java/com/dsharnessmobile/shell/GuideChrome.kt
 app/src/main/java/com/dsharnessmobile/shell/GuidePageRenderer.kt
@@ -2442,6 +2446,8 @@ app/src/main/java/com/dsharnessmobile/shell/WatchdogV2.kt
 app/src/main/java/com/dsharnessmobile/shell/LogCollector.kt
 app/src/main/java/com/dsharnessmobile/shell/SnapshotTransaction.kt
 app/src/main/java/com/dsharnessmobile/shell/SnapshotFs.kt
+app/src/main/java/com/dsharnessmobile/shell/SnapshotRefreshPolicy.kt
+app/src/main/java/com/dsharnessmobile/shell/PublicRepoProvision.kt
 app/src/main/java/com/dsharnessmobile/shell/SnapshotExtractor.kt
 app/src/main/java/com/dsharnessmobile/shell/SnapshotUserData.kt
 app/src/main/java/com/dsharnessmobile/shell/SnapshotFileMode.kt
@@ -2467,6 +2473,7 @@ app/src/main/java/com/dsharnessmobile/shell/AdbKeyboardService.kt
 app/src/main/java/com/dsharnessmobile/shell/AdbKeyboardReceiver.kt
 app/src/main/java/com/dsharnessmobile/shell/ShellOps.kt
 app/src/main/java/com/dsharnessmobile/shell/ScreenScope.kt
+app/src/main/java/com/dsharnessmobile/shell/ShizukuBindState.kt
 app/src/main/java/com/dsharnessmobile/shell/ShizukuTransport.kt
 app/src/main/java/com/dsharnessmobile/shell/ShizukuUserService.kt
 app/src/main/java/com/dsharnessmobile/shell/ShizukuProbe.kt
@@ -2474,6 +2481,7 @@ app/src/main/java/com/dsharnessmobile/shell/ShizukuSupport.kt
 app/src/main/java/com/dsharnessmobile/shell/ProcIo.kt
 app/src/main/java/com/dsharnessmobile/shell/FileIncoming.kt
 app/src/main/java/com/dsharnessmobile/shell/PathOpen.kt
+app/src/main/java/com/dsharnessmobile/shell/ExternalLinks.kt
 app/src/main/java/com/dsharnessmobile/shell/ConfigTransfer.kt
 app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt
 app/src/main/java/com/dsharnessmobile/shell/VdisplayHost.kt
@@ -2628,7 +2636,7 @@ scripts/e2e-phone-test.ps1
 - [K06] 漂移：`docs/AGENTS/BRIDGE-API.md:122` 说 ShizukuTransport/ShizukuUserService 是「固定 argv、16KB 输出上限；页面/引擎拿不到原始 binder 或任意 shell 面」（AIDL v1），源码 `ShizukuUserService.kt:30` 是 `PROTOCOL_VERSION = 2`（execCapture 落盘面 + 单文件 256 MiB），`ShizukuTransport.kt:271-301` 与 `ShellOps.kt:91-103` 交给引擎的正是任意 `sh -c` 命令面。
 - [K06] 漂移：`docs/AGENTS/BRIDGE-API.md:125` 说 ScreenScope「执行点复查在 DeviceControlService」，源码 `ShellOps.kt:132`（scopeDenied）才是特权 shell 通道的执行点复查，`DeviceControlService.kt:703`（realScreenScopeError）只管无障碍 op 面。
 - [K07] 漂移：`docs/AGENTS/ARCHITECTURE.md:90` 说 `VdisplayController.kt` 389 行、`:91` 说 `VdisplayHost.kt` 177 行，源码 `app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt` 是 766 行、`VdisplayHost.kt` 是 214 行（`wc -l` 现场数）。
-- [K07] 漂移：`docs/AGENTS/BRIDGE-API.md:117` 与 `:195` 说页面桥面有 `vdisplayLaunchSettingsProbe`/`backProbe`，源码 `app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:316-348` 没有这两个方法（`sendBackProbe` 只有定义、无调用点，`VdisplayController.kt:529`）；实际存在的 `vdisplaySelect`、`get/setVdisplayScale`、`get/setVdisplayFloatEnabled`、`forceDestroyVdisplay` 未列出。
+- [K07] 漂移：`docs/AGENTS/BRIDGE-API.md:117` 与 `:195` 说页面桥面有 `vdisplayLaunchSettingsProbe`/`backProbe`，源码 `app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:319-351` 没有这两个方法（`sendBackProbe` 只有定义、无调用点，`VdisplayController.kt:529`）；实际存在的 `vdisplaySelect`、`get/setVdisplayScale`、`get/setVdisplayFloatEnabled`、`forceDestroyVdisplay` 未列出。
 - [K07] 漂移：`docs/AGENTS/ARCHITECTURE.md:136` 与 `docs/AGENTS/BRIDGE-API.md:201` 说建屏 flag 是「公开 `PUBLIC|OWN_CONTENT_ONLY|SUPPORTS_TOUCH`」，源码 `VdisplayController.kt:372-373` 是 5 个（另含 `DESTROY_CONTENT_ON_REMOVAL`、`ROTATES_WITH_CONTENT`），且同文件 `:366-368` 的实测注释已写明 13+ 上 `FLAG_PUBLIC` 不生效。
 - [K07] 漂移：`VdisplayController.kt:124` 的 `ops()` 说支持 5 个 vd op（缺 `vdLaunchApp`/`vdInput`，且把只回 `unsupported` 的 `vdMoveTask` 列成支持），而 `VdisplayOps.kt:21-44` 实际分发 7 个，引擎侧 `plugins/dsh-android-vdisplay/src/status.ts:14` 的 `VD_OPS` 也是 7 个 —— 面板读载荷里的 `ops`（`mapStatusPayload`）时 capabilities 会少报两条。
 - [K08] 漂移：`docs/AGENTS/ARCHITECTURE.md:18` 说 `BrowserHostNavigationPolicy.kt` / `BrowserOverlayPolicy.kt` 为 210 / 82 行，现场 `wc -l` 是 231 / 86 行（同行的 BrowserHost.kt 1813 与文档一致）。
@@ -2636,28 +2644,28 @@ scripts/e2e-phone-test.ps1
 - [K09] 漂移：`dsh-mobile-apk/docs/AGENTS/ARCHITECTURE.md:27-34` 说 OverlayService.kt 772 / OverlayHalo.kt 164 / OverlayPanel.kt 1217 / OverlayReport.kt 325 行，源码实测 `OverlayService.kt` 785 / `OverlayHalo.kt` 168 / `OverlayPanel.kt` 1222 / `OverlayReport.kt` 384（差 59 行正是块H 的 CompletionNotice 段）
 - [K09] 漂移：`dsh-mobile-apk/docs/AGENTS/ARCHITECTURE.md:29` 与 `dsh-mobile-apk/docs/AGENTS/modules.md:39` 说「应答 POST /api/respond 全信封，approval value={sessionId,approvalId,outcome}；question 取消发 ok:false error cancelled」，源码 `OverlayPanel.kt:818` 是 POST /api/$events/result、payload={args:{clientId,eventId,outcome}}，审批取值 allowed-once/rejected（`OverlayPanel.kt:616-617`）、提问跳过是 kind=rejected 加 error{name:UserQuestionError,code:cancelled}（`OverlayPanel.kt:904-908`）；同族过期注释仍在源码里：`OverlayPanel.kt:24`、`OverlayPanel.kt:489`、`OverlayLiveFeed.kt:166`
 - [K09] 漂移：`dsh-mobile/docs/0.14.1-preview-OVERLAY-COMPLETION-CARD.md` 的 1.1 表说 OverlayService.kt 673 / OverlayPanel.kt 1046 / OverlayLiveFeed.kt 172 / OverlayHalo.kt 91 / OverlayTheme.kt 33 行，源码实测 785 / 1222 / 196 / 168 / 38；该详档被源码注释当准绳引用（`OverlayService.kt:106`、`OverlayReport.kt:252`）
-- [K09] 漂移：`app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:133` 说 flashStatus 在 `OverlayService.kt:669`，源码该函数在 `OverlayService.kt:683`
+- [K09] 漂移：`app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:141` 说 flashStatus 在 `OverlayService.kt:669`，源码该函数在 `OverlayService.kt:683`
 - [K10] 漂移：
 - [K10] 漂移：`docs/AGENTS/ARCHITECTURE.md:70` 说 `NotifyCenter.kt` 834 行，源码（`wc -l`）是 1051 行。
 - [K10] 漂移：`docs/AGENTS/ARCHITECTURE.md:71` 说 `NotifyStore.kt` 287 行，源码是 537 行。
 - [K10] 漂移：`docs/AGENTS/ARCHITECTURE.md` 模块表缺 `NotifySuppressQueue.kt`（0.14.1 新增，只在 `docs/AGENTS/modules.md:36` 有条目）。
-- [K10] 漂移：`app/src/main/java/com/dsharnessmobile/shell/OverlayReport.kt:233-234` 注释说与 `notify-projection.ts` 的 `reportOutcomeLabel` 逐字同构，实际 `interrupted` 文案不同——`plugins/dsh-android-bridge/src/notify-projection.ts:68` 是「被中断（进程重启）」，`OverlayReport.kt:244` 与 `NotifyCenter.kt:1041` 是「被中断」。
-- [K10] 漂移：`app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:133` 注释指向 `OverlayService.kt:669` 的 `flashStatus`，实际在 `OverlayService.kt:683`。
-- [K10] 漂移：`app/src/main/java/com/dsharnessmobile/shell/OverlayService.kt:706` 注释说先例在 `NotifyCenter.kt:605-606`，实际 `Intent(app, MainActivity::class.java)` 在 `NotifyCenter.kt:822`（605-606 是 `deferredKey` 的注释）。
+- [K10] 漂移：`app/src/main/java/com/dsharnessmobile/shell/OverlayReport.kt:233-234` 注释说与 `notify-projection.ts` 的 `reportOutcomeLabel` 逐字同构，实际 `interrupted` 文案不同——`plugins/dsh-android-bridge/src/notify-projection.ts:68` 是「被中断（进程重启）」，`OverlayReport.kt:244` 与 `NotifyCenter.kt:1048` 是「被中断」。
+- [K10] 漂移：`app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:141` 注释指向 `OverlayService.kt:669` 的 `flashStatus`，实际在 `OverlayService.kt:683`。
+- [K10] 漂移：`app/src/main/java/com/dsharnessmobile/shell/OverlayService.kt:706` 注释说先例在 `NotifyCenter.kt:612-613`，实际 `Intent(app, MainActivity::class.java)` 在 `NotifyCenter.kt:829`（605-606 是 `deferredKey` 的注释）。
 - [K10] 漂移：`plugins/dsh-android-bridge/src/index.ts:1458` 注释说「壳侧 FileObserver 按偏移消费后截断/轮转」，实际壳侧只读不截断不轮转（`NotifyStore.kt:18-20` 明写「引擎超过 512KB 时轮转 .1」，轮转方是引擎）。
-- [K10] 漂移：`docs/0.14.1-preview-NOTIFY-REALTIME-AND-STATE-SYNC.md` §0/§1.2 仍用旧行号（`:377` 抑制判定、`:114` 默认值、`:88-97` Listener、`:307-311` Result），当前源码对应 `NotifyCenter.kt:624`、`:49` / `:191`、`:111-120`、`:500-514`。
+- [K10] 漂移：`docs/0.14.1-preview-NOTIFY-REALTIME-AND-STATE-SYNC.md` §0/§1.2 仍用旧行号（`:377` 抑制判定、`:114` 默认值、`:88-97` Listener、`:307-311` Result），当前源码对应 `NotifyCenter.kt:631`、`:49` / `:191`、`:111-120`、`:500-514`。
 - [P01] 漂移：`dsh-mobile-apk/docs/AGENTS/known-gaps.md:127` 说 0.14.1 块G F1 落在 `bridge/index.ts` 第 832-838 行，源码该处是 `a11ySource()` 的心跳判定（`plugins/dsh-android-bridge/src/index.ts:829-838`），F1 的「按 args.screenId 经 screenAccessResolved 判定」实际在 `plugins/dsh-android-bridge/src/index.ts:991-997`。
 - [P01] 漂移：`dsh-mobile-apk/docs/AGENTS/ARCHITECTURE.md:151`（§9「0.13.5 设备控制面」）说 `adb → execAdbLine/execAdbShell（shell 执行、原图截图、pm/dumpsys 等系统面）`，源码 `plugins/dsh-android-bridge/src/index.ts:1034`/`:1070` 与 `plugins/dsh-android-bridge/src/shell-ops.ts:120` 已在 0.14.0 改成经控制队列投递壳侧 Shizuku、不再有 adb 客户端语义（该节自带 0.13.5 标注，属历史段落，按「以源码为准」记录）。
 - [P02] 漂移：`docs/AGENTS/gotchas.md:178` 说坑 72 的锚点是 `plugins/dsh-android-manage/src/lossless-json.ts` 与 `plugins/dsh-android-manage/test/privilege-status.test.mjs`，源码里这两个文件只在 bridge 插件下（`plugins/dsh-android-bridge/src/lossless-json.ts:1`、`plugins/dsh-android-bridge/test/privilege-status.test.mjs:1`），manage 的 `src/` 只有 index/ui-tree/protocol-v2/detail-store/vd-shot 五个文件。
 - [P02] 漂移：`plugins/dsh-android-manage/src/index.ts:7` 的文件头工具集注释只列 8 个工具（screenshot/ui_tree/device_info/act_input/ui_dump/ui_click/ui_scroll/ui_input），源码 `plugins/dsh-android-manage/src/index.ts:2283` 实际注册 14 个（另有 screen_list/ui_detail/web_dump/env_prepare/app_launch/ui_global）。
 - [P02] 漂移：`scripts/check-code-map.mjs:152` 的注释说耦合边右端可以是「外部角色」文字，同文件 `scripts/check-code-map.mjs:103` 的解析正则却要求两端都形如查点 ID，凡右端写外部角色的边一律判 `bad-coupling`。
 - [P03] 漂移：`plugins/dsh-android-browser/src/tools.ts:407` 说壳侧 `reason` 在 `BrowserHost.kt:818` 的 `lastError`，同文件 `:160` 说 `tabSummaries()` 在 `BrowserHost.kt:80-91`；源码 `lastError` 声明在 `app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt:304`、`tabSummaries()` 在 `:91`（`:818` 是 `ORPHAN_REFS`），注释锚点按 0.14.0 基线写死。
-- [P03] 漂移：`docs/AGENTS/ARCHITECTURE.md:17` 说 AndroidBridge.kt 383 行、`:90` 说 VdisplayController.kt 389 行、`:91` 说 VdisplayHost.kt 177 行；源码现数 422 / 766 / 214 行（`wc -l`，文件末行分别为 `app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:422`、`VdisplayController.kt:766`、`VdisplayHost.kt:214`），同文档 `:18` 自己注明「行数每次改都会漂、不要写死」。
-- [P03] 漂移：`docs/AGENTS/BRIDGE-API.md:117` 与 `:195` 把虚拟屏桥面写成 `vdisplayStatus/create/destroy/launchSettingsProbe/backProbe/bounds`，未列 `vdisplaySelect`（`app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:330`）、`forceDestroyVdisplay`（`:348`）与 Scale/Float 四个存取（`:334/:337/:341/:344`），而面板侧正在调用前两个（`plugins/dsh-android-vdisplay/src/client/index.ts:84`、`:89`）。
+- [P03] 漂移：`docs/AGENTS/ARCHITECTURE.md:17` 说 AndroidBridge.kt 383 行、`:90` 说 VdisplayController.kt 389 行、`:91` 说 VdisplayHost.kt 177 行；源码现数 422 / 766 / 214 行（`wc -l`，文件末行分别为 `app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:425`、`VdisplayController.kt:766`、`VdisplayHost.kt:214`），同文档 `:18` 自己注明「行数每次改都会漂、不要写死」。
+- [P03] 漂移：`docs/AGENTS/BRIDGE-API.md:117` 与 `:195` 把虚拟屏桥面写成 `vdisplayStatus/create/destroy/launchSettingsProbe/backProbe/bounds`，未列 `vdisplaySelect`（`app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:333`）、`forceDestroyVdisplay`（`:348`）与 Scale/Float 四个存取（`:334/:337/:341/:344`），而面板侧正在调用前两个（`plugins/dsh-android-vdisplay/src/client/index.ts:84`、`:89`）。
 - [P04] 漂移：`app/src/main/java/com/dsharnessmobile/shell/FileIncoming.kt:326` 注释说「三条 file-incoming exact 路由」（`plugins/dsh-android-file-open/src/index.ts:20` 同样写「三条」），实际注册五条（`plugins/dsh-android-file-open/src/index.ts:527/605/697/752/813`，`scripts/api-route-auth-policy.json` 也列五条），`docs/AGENTS/BRIDGE-API.md:198` 按五条记。
 - [P04] 漂移：`app/src/main/java/com/dsharnessmobile/shell/FileIncoming.kt:97-99` 注释说「canonical 形态会被插件 `safeResolveInside` 的词法首门拒绝」，源码 `plugins/dsh-android-file-open/src/index.ts:431-452` 是两侧都 realpath 后比较（只有 ws 侧 realpath 抛错时才回落词法），不存在会拒 canonical 的词法首门——该注释会把维护者引向不必要的路径形态限制。
 - [S01] 漂移：`dsh-mobile-apk/docs/AGENTS/gotchas.md:103`（坑 61）说防线③是「常驻 `node dsh-host-web-compat/scripts/smoke-injections.mjs` 门禁」，源码 `dsh-host-web-compat/lib/index.js:783,791` 已是两次 `tapIndex`，而 `dsh-host-web-compat/scripts/smoke-injections.mjs:50` 仍断言 `transforms.length === 1` —— 该门禁当下是红的（apk 仓 `.github/workflows` 不跑它）。
-- [S01] 漂移：`dsh-mobile-apk/docs/AGENTS/BRIDGE-API.md:117` 说 AndroidBridge 桥面「方法计数由 `check-bridge-symmetry.mjs` 从源码守」，但该清单及其余各表都未收录 0.14.1 新增的 `getNotifySetting` / `setNotifySetting`，源码 `app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:372,381` 已实现，页面 `dsh-client-ui-responsive/src/client/dev-section/notify-settings.tsx:66,86` 已在调用。
+- [S01] 漂移：`dsh-mobile-apk/docs/AGENTS/BRIDGE-API.md:117` 说 AndroidBridge 桥面「方法计数由 `check-bridge-symmetry.mjs` 从源码守」，但该清单及其余各表都未收录 0.14.1 新增的 `getNotifySetting` / `setNotifySetting`，源码 `app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:375,381` 已实现，页面 `dsh-client-ui-responsive/src/client/dev-section/notify-settings.tsx:66,86` 已在调用。
 - [S01] 漂移：apk 仓 `dsh-shell-termux/README.md` 与协调仓同名副本不是逐字节镜像（6 行行尾 CRLF/LF 差异，正文逐字相同，无功能影响）。
 - [B01] 漂移：`docs/AGENTS/build-and-env.md:32,41-42` 说快照归档/解压用 `xz -T0`/`xz -dT0`，源码 `scripts/build-snapshot-013.mjs:985` 是 `xz -T${XZ_THREADS} -6`、`:120` 是 `xz -dT${XZ_THREADS}`（`scripts/lib/shell.mjs:31` 默认 8，`scripts/check-build-parallel-cap.mjs` 把「吃满全部核心」判红）。
 - [B01] 漂移：`docs/AGENTS/BRIDGE-API.md:33` 同一句「瘦身 + xz -T0 归档」与源码 `scripts/build-snapshot-013.mjs:985` 的 `xz -T${XZ_THREADS}` 不符（该文件的构建段落是 build-and-env.md 的拷贝）。

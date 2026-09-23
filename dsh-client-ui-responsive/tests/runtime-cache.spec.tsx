@@ -60,7 +60,7 @@ const EXECUTE_BODY = {
   plannedBytes: 3 * 1024 * 1024,
   items: [
     { id: 'engine-log-1', label: '$DSH_FILES_DIR/engine.log.1', status: 'removed', bytes: 1024 * 1024 },
-    { id: 'cache-pip', label: '$DSH_HOME/cache/pip', status: 'failed', bytes: 0, reason: 'EBUSY: injected' },
+    { id: 'cache-pip', label: '$DSH_HOME/cache/pip', status: 'failed', bytes: 0, reason: 'remove-failed', detail: 'EBUSY: injected' },
   ],
 }
 
@@ -154,7 +154,12 @@ describe('RuntimeCacheRow（块 E 设置页面）', () => {
     })
     expect(el.textContent).toContain('已清理 1 项')
     expect(el.textContent).toContain('1 项失败')
-    expect(el.textContent).toContain('失败：EBUSY: injected')
+    // P3-1/P3-6：OS 错误串不上屏——正文给人话，明细只进 data-detail（可截图给维护方）。
+    expect(el.textContent).toContain('删除失败（文件被占用、只读或权限不足）')
+    expect(el.textContent, 'OS 错误串不得出现在正文').not.toContain('EBUSY')
+    const failed = el.querySelector('[data-detail="EBUSY: injected"]')
+    expect(failed, '明细必须可诊断').not.toBeNull()
+    expect(failed?.getAttribute('data-reason')).toBe('remove-failed')
     expect(el.textContent).toContain('$DSH_FILES_DIR/engine.log.1 — 已删除 1.0 MB')
   })
 
@@ -171,15 +176,23 @@ describe('RuntimeCacheRow（块 E 设置页面）', () => {
     const fetchSpy = makeFetch({ '/api/android/runtime-cache/scan': { status: 403 } })
     vi.stubGlobal('fetch', fetchSpy.impl)
     const el = await render()
-    expect(el.textContent).toContain('未获授权（HTTP 403）')
+    // P3-1/P3-6：状态码不上屏——正文给人话，码只进 data-http（可 grep、可截图给维护方）。
+    expect(el.textContent).toContain('未获授权')
+    expect(el.textContent, '状态码不得出现在正文').not.toContain('403')
+    expect(el.querySelector('[data-http="403"]'), '状态码必须可诊断').not.toBeNull()
     const clean = [...el.querySelectorAll('button')].find((b) => b.textContent === '清理') as HTMLButtonElement
     expect(clean.disabled, '无可回收体积时「清理」必须禁用').toBe(true)
   })
 
-  it('宿主未装配（fetch 抛错）时静默降级，不抛异常', async () => {
+  it('宿主未装配（fetch 抛错）时如实说「读不到」，不抛异常也不冒充 0 B', async () => {
+    // S3-16：旧断言要求显示「可回收：0 B」——那是把「读不到」画成合法空态，属「把缺陷当契约」。
+    // 现在：不报错、界面照常渲染，但头部必须说读不到，清理入口禁用。
     vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('offline') }))
     const el = await render()
-    expect(el.textContent).toContain('运行时缓存可回收：0 B')
+    expect(el.textContent).toContain('读不到')
+    expect(el.textContent, '不得冒充真值 0').not.toContain('可回收：0 B')
+    const clean = [...el.querySelectorAll('button')].find((b) => b.textContent === '清理') as HTMLButtonElement
+    expect(clean.disabled).toBe(true)
   })
 
   it('可回收体积为 0 时禁用「清理」按钮（不给无意义破坏性入口）', async () => {
@@ -197,5 +210,59 @@ describe('RuntimeCacheRow（块 E 设置页面）', () => {
     const el = await render()
     await act(async () => { [...el.querySelectorAll('button')].find((b) => b.textContent === '重新扫描')!.click() })
     expect(fetchSpy.calls.filter((call) => call.method === 'GET')).toHaveLength(2)
+  })
+})
+
+// ── 0.14.1 批 9（§3.3 S3-16）：「读不到」不得画成「0 B」 ─────────────────────
+describe('RuntimeCacheRow 读不到 vs 真值 0（S3-16）', () => {
+  it('扫描失败时头部必须说「读不到」，且清理按钮禁用', async () => {
+    const fetchSpy = makeFetch({ '/api/android/runtime-cache/scan': { status: 500 } })
+    vi.stubGlobal('fetch', fetchSpy.impl)
+    const el = await render()
+    // 旧实现：`reclaimable` 回落成 0 ⇒ 「可回收：0 B（0 项）」，看起来像「确实没东西可清」。
+    expect(el.textContent).toContain('读不到')
+    expect(el.textContent, '不得把读不到画成 0 B').not.toContain('可回收：0 B')
+    expect(el.querySelector('[data-scan-state]')?.getAttribute('data-scan-state')).toBe('failed')
+    const clean = [...el.querySelectorAll('button')].find((b) => b.textContent === '清理') as HTMLButtonElement
+    expect(clean.disabled, '读不到时不得允许清理').toBe(true)
+    // 设备实测补正：读不到时不得继续展示上一次的清单（陈旧数据看起来像现值）。
+    expect(el.querySelector('.dsh-dev-cache-list'), '读不到时不得展示缓存清单').toBeNull()
+  })
+
+  it('读不到之后再读成功：清单必须回来（证明上面的隐藏不是永久隐藏）', async () => {
+    let fail = true
+    const impl = vi.fn(async () => {
+      if (fail) throw new Error('offline')
+      return { ok: true, status: 200, json: async () => SCAN_BODY }
+    })
+    vi.stubGlobal('fetch', impl)
+    const el = await render()
+    await act(async () => { await Promise.resolve() })
+    expect(el.textContent).toContain('读不到')
+    expect(el.querySelector('.dsh-dev-cache-list')).toBeNull()
+    fail = false
+    const rescan = [...el.querySelectorAll('button')].find((b) => b.textContent === '重新扫描') as HTMLButtonElement
+    await act(async () => { rescan.click() })
+    await act(async () => { await Promise.resolve() })
+    expect(el.textContent).toContain('运行时缓存可回收：3.0 MB')
+    expect(el.querySelector('.dsh-dev-cache-list')).not.toBeNull()
+  })
+
+  it('宿主不可用（fetch 抛错）时同样说「读不到」，不退化成 0 B', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('offline') }))
+    const el = await render()
+    expect(el.textContent).toContain('读不到')
+    expect(el.textContent).not.toContain('可回收：0 B')
+  })
+
+  it('扫描成功但没有可清理项时，才是「暂无可清理项」这个合法空态', async () => {
+    const fetchSpy = makeFetch({
+      '/api/android/runtime-cache/scan': { body: { ok: true, reclaimableBytes: 0, targets: [], skipped: [] } },
+    })
+    vi.stubGlobal('fetch', fetchSpy.impl)
+    const el = await render()
+    expect(el.textContent).toContain('暂无可清理项')
+    expect(el.textContent).not.toContain('读不到')
+    expect(el.querySelector('[data-scan-state]')?.getAttribute('data-scan-state')).toBe('ok')
   })
 })

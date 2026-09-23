@@ -282,12 +282,12 @@ let ran = 0
 // SKIP 合计（ST-31 / ST-16）：逐门禁捕获输出并解析 SKIP=n；发布链（--require）要求合计 = 0。
 let skipTotal = 0
 const perGateSkips = {}
-const runGate = (argvFor, gate) => {
+const runGate = (argvFor, label) => {
   const r = spawnSync(process.execPath, argvFor, { cwd: ROOT, encoding: 'utf8', maxBuffer: 128 * 1024 * 1024 })
   if (r.stdout) process.stdout.write(r.stdout)
   if (r.stderr) process.stderr.write(r.stderr)
   const m = /SKIP=(\d+)/.exec((r.stdout || '') + (r.stderr || ''))
-  perGateSkips[gate] = m !== null ? Number(m[1]) : 0
+  perGateSkips[label] = m !== null ? Number(m[1]) : 0
   if (m) skipTotal += Number(m[1])
   if (r.status !== 0) {
     console.error('CHECK-RELEASE-GATES FAILED：' + label + ' 退出码 ' + r.status + '，中止组装')
@@ -298,7 +298,10 @@ const snapshotTar = (abi) => join(resolve(snapshotDir), 'snapshot-' + abi + '.ta
 for (const gate of ALL_GATES) {
   const argvFor = [join('scripts', gate)]
   // 严格档（发布链 --require）：凡支持 --require 的门禁一律传，SKIP 即失败（ST-31：发布链 SKIP=0）。
-  if (STRICT && ['check-snapshot-fingerprint.mjs', 'check-perf-instrumentation.mjs', 'check-snapshot-secrets.mjs', 'check-contract.mjs'].includes(gate)) argvFor.push('--require')
+  // check-tool-output-schema 自 0.14.1 W1 起支持 --require：宿主缺 peer 依赖（净检出无 node_modules 的
+  // 必然后果）在严格档下判红——此前该情形是**未捕获异常直接终止进程**，聚合链在第 6 条就死，
+  // 后面 20 多条一条没跑，而没有任何一层把它报成失败。
+  if (STRICT && ['check-snapshot-fingerprint.mjs', 'check-perf-instrumentation.mjs', 'check-snapshot-secrets.mjs', 'check-contract.mjs', 'check-tool-output-schema.mjs'].includes(gate)) argvFor.push('--require')
   // 冷启动预算（0.14.1 块F P0-2）：真检需要**设备原始产物**（boot-segments.log + 引擎探针输出），
   // 冷启动预算（0.14.1 块F P0-2）：**不再强制 --self-test**。默认档会先找设备真产物
   // （`--segments/--probe` > `DSH_BOOT_SEGMENTS`/`DSH_BOOT_PROBE` > `.deploy-tmp/boot-budget/`）：
@@ -342,6 +345,14 @@ for (const gate of ALL_GATES) {
       console.error('CHECK-RELEASE-GATES FAILED：' + gate + ' 需要 --snapshot-dir 的快照面，严格发布档不得只验空集')
       process.exit(1)
     }
+    // 【0.14.1 W1】无快照面的非严格档：**计数的 SKIP 并继续**，而不是把子门禁当无参调用（它按用法错误
+    // exit 2）——那会让整条链停在这里，后面 20 多条一条不跑（与「插件 peer 依赖崩在入口」同一形态：
+    // 失败点发生在**聚合器**，而不是被判据拒绝）。SKIP 已计数、发布链 --require 仍判红，不构成掩盖。
+    skipTotal += 1
+    console.log('SKIP(#' + skipTotal + ')  ' + gate + '：无快照面（--snapshot-dir 未给且 .deploy-tmp/snapshot-013 无 tar）；'
+      + '本档不给快照，机密门禁无从真检——发布链 --require 下此项判红')
+    ran += 1
+    continue
   }
   if (gate === 'check-api-route-auth.mjs') {
     if (snapshotDir && abis.length > 0) {

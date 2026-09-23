@@ -329,7 +329,10 @@ function cacheExecutePayload(plan: CleanupPlan): Record<string, unknown> {
       label: displayLabel(item.path, plan),
       status: item.status,
       bytes: item.bytes,
+      // P3-1：`reason` 是稳定码（页面侧按码翻译成人话）；`detail` 是诊断明细（OS 错误串），
+      // 只供页面放进 `data-detail` 与审计，两端都不上正文。
       ...(item.reason === undefined ? {} : { reason: item.reason }),
+      ...(item.detail === undefined ? {} : { detail: item.detail }),
     })),
   }
 }

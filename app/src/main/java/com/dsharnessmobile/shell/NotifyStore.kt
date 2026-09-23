@@ -306,6 +306,7 @@ object NotifyStore {
       outcome = j.optString("outcome", ""),
       outcomeLabel = j.optString("outcomeLabel", ""),
       summary = j.optString("summary", ""),
+      body = j.optString("body", ""),
       durationMs = j.optLong("durationMs", 0L),
       durationLabel = j.optString("durationLabel", ""),
       toolCount = j.optInt("toolCount", 0),

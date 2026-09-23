@@ -104,11 +104,61 @@ export function sessionTag(sessionId: unknown): string {
   return (h >>> 0).toString(16).padStart(8, '0').slice(0, 6)
 }
 
+/**
+ * 从 `assistant/message` 的 content 块数组里取**可见正文**（0.14.1 设备缺陷修复）。
+ *
+ * 缺陷本体：上游 `TextBlock { type:'text'; text }` 与 `ReasoningBlock { type:'reasoning'; text }`
+ * **共用 `text` 字段名**（dsh/packages/llm/llm/src/types.ts:54-64）。投影层此前写的是
+ * `content.map(c => c.text ?? '').join('')`——**按字段取值而不按类型过滤**，于是思考块被当成回答。
+ * 思考块在一条 assistant message 里通常排在最前，再经 `summarize(text, 120)` 硬截断，
+ * 用户在上拉汇报栏看到的正是「某一段思考内容」的开头。同一条 summary 还是通知展开正文与
+ * `.live.ndjson` 的 `sum` 来源，故修在这一处即可三处同好。
+ *
+ * 判据来源：上游 `agent.ts:486` 用 `message.content.filter(block => block.type === 'tool-call')`
+ * 判别块类型，证明运行期 content 项**带 `type` 字段**。
+ *
+ * **兼容分支（刻意保留）**：仅当整条消息**没有任何块带 `type`**（未知 provider 的旧形状）时，
+ * 才退化为「取全部 `text`」。没有这条兜底，一次 provider 形状差异就会把缺陷从
+ * 「显示思考」直接劣化成「什么都不显示」——那不是修复，是把可见的错误换成不可见的错误。
+ */
+export function visibleText(content: unknown): string {
+  if (!Array.isArray(content)) return ''
+  const blocks = content.filter(
+    (b): b is { type?: unknown; text?: unknown } => b !== null && typeof b === 'object',
+  )
+  const typed = blocks.filter((b) => typeof b.type === 'string')
+  const picked = typed.length > 0 ? typed.filter((b) => b.type === 'text') : blocks
+  return picked.map((b) => (typeof b.text === 'string' ? b.text : '')).join('').trim()
+}
+
 /** 摘要压缩（单行、去空白、硬截断；上限默认 120 字＝§6.1.1 的汇报摘要口径）。 */
 export function summarize(text: unknown, max = 120): string {
   const s = String(text ?? '').replace(/\s+/g, ' ').trim()
   if (s === '') return ''
   return s.length <= max ? s : s.slice(0, max - 1) + '…'
+}
+
+/**
+ * 汇报正文（可滚动区）的上限：8 KiB。
+ *
+ * 为什么需要正文而不只是摘要（0.14.1 D6，设备实报「长按查看详情…无法滚动查看输出」）：
+ * 报告栏此前只有 120 字摘要，而摘要经单行化 + 硬截断后**恒不超高**——「栏内可滚动」这条验收
+ * 判据在 120 字上限下恒真而无意义（内容从来不会超标），于是「读不到完整输出」从设计上即不可达。
+ * 换句话说：不是滚动坏了，是**没有可滚的内容**。
+ *
+ * 有界是必须的：`.notify.ndjson` 的轮转上限是 512 KiB（壳侧 NOTIFY_MAX），单轮无界落盘会让
+ * 几十轮就把信道撑爆、把历史汇报挤掉。8 KiB 对「一轮的最终答复」足够，超出部分显式截断。
+ */
+export const REPORT_BODY_MAX = 8 * 1024
+
+/** 正文截断标记。有界截断**必须显式**——不得让用户把截断处当成全文结尾。 */
+export const REPORT_BODY_TRUNCATED = '\n…（正文过长，此处截断）'
+
+/** 正文（有界、保留换行）。空文本返回空串。 */
+export function boundReportBody(text: unknown, max = REPORT_BODY_MAX): string {
+  const s = String(text ?? '').trim()
+  if (s === '') return ''
+  return s.length <= max ? s : s.slice(0, max) + REPORT_BODY_TRUNCATED
 }
 
 /** 用时文案（毫秒 → 「1m23s」/「8.4s」）。 */
@@ -182,7 +232,10 @@ export interface ReportEntry {
   outcomeLabel: string
   sessionId: string
   title: string
+  /** 单行摘要（通知展开正文 / 悬浮窗工具行 chip 的口径，120 字上限）。 */
   summary: string
+  /** 该轮可见正文全文（有界 8 KiB，保留换行）；报告栏可滚动区的内容来源。空 = 该轮没有可见正文。 */
+  body: string
   durationMs: number
   toolCount: number
   turn: number
@@ -207,6 +260,7 @@ export class SessionNotifyState {
   private readonly turnStart = new Map<string, number>()
   private readonly turnTools = new Map<string, number>()
   private readonly summaries = new Map<string, string>()
+  private readonly bodies = new Map<string, string>()
   private readonly presented = new Map<string, string[]>()
   private readonly todoAt = new Map<string, number>()
   private readonly todoSig = new Map<string, string>()
@@ -233,6 +287,7 @@ export class SessionNotifyState {
     this.turnStart.set(id, now)
     this.turnTools.set(id, 0)
     this.summaries.delete(id)
+    this.bodies.delete(id)
     this.presented.delete(id)
     void turn
   }
@@ -244,12 +299,19 @@ export class SessionNotifyState {
     this.turnTools.set(id, (this.turnTools.get(id) ?? 0) + 1)
   }
 
-  /** `assistant/message`：本轮最后一段文本（汇报摘要来源）。 */
+  /**
+   * `assistant/message`：本轮最后一段文本。
+   *
+   * 同时记两份口径：`summary`（单行 120 字，通知展开正文与工具行 chip 用）与
+   * `body`（有界 8 KiB、保留换行，报告栏可滚动区用）。二者同源但用途不同——
+   * 报告栏此前只拿得到 summary，于是「可滚动」是空的（见 [REPORT_BODY_MAX]）。
+   */
   setSummary(sessionId: unknown, text: unknown): void {
     const id = String(sessionId ?? '')
     const s = summarize(text)
     if (id === '' || s === '') return
     this.summaries.set(id, s)
+    this.bodies.set(id, boundReportBody(text))
   }
 
   /** `deliverables/presented`：产出文件名（只留 basename，避免锁屏泄露绝对路径）。 */
@@ -294,6 +356,7 @@ export class SessionNotifyState {
       sessionId: id,
       title: this.titleFor(id),
       summary: this.summaries.get(id) ?? '',
+      body: this.bodies.get(id) ?? '',
       durationMs,
       toolCount: this.turnTools.get(id) ?? 0,
       turn: Number(input.turn ?? 0) || 0,

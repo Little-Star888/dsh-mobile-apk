@@ -181,6 +181,14 @@ if (peer) {
     // build-snapshot-013.mjs 已在镜像面，其依赖模块若不入册就会出现「构建脚本同源、依赖单边演进」
     // —— 云端自包含构建跑旧净化逻辑，产物照样带 111/113 条设备必然丢弃的软链。
     'scripts/lib/symlink-sanitize.mjs',
+    // 0.14.1 W1：产物新鲜度的**重建哈希裁决**模块。check-tool-output-schema 与 check-protocol-v2
+    // 两条门禁共用它——单边演进即「一侧仍按纯 mtime 判（假阳性 SKIP 或假阳性判红），另一侧按内容判」，
+    // 同一份工作树在两个仓里得出不同结论，正是镜像面要防的形态。
+    'scripts/lib/product-freshness.mjs',
+    // 0.14.1 W1：Git Data API 重放的**安全预检**（逐文件比对「我的基线 blob vs 远端现状」，
+    // 防重放静默回退别人的内容）。两个仓都可能作为重放源，脚本必须同源——单边演进 = 一侧拿旧判据
+    // 放行一次会覆盖别人的重放，且该次事故不可逆（远端历史已被改写）。
+    'scripts/replay-guard.mjs',
     // 0.14.1：Kotlin 单测数量回归门禁与基线。apk 仓的 check-release-gates.mjs 已把它列进清单，
     // 但脚本与基线此前**只存在于协调仓** → apk 侧聚合门禁会因「脚本缺席」判红（云端自包含构建同理）。
     // 门禁脚本自身 = 防线，必须与产物面同源；基线只许升档（--update-baseline 拒绝降级）。

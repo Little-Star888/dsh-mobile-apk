@@ -2,6 +2,7 @@ package com.dsharnessmobile.shell
 
 import java.io.File
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -100,28 +101,39 @@ class OverlayHaloInvariantTest {
   }
 
   /**
-   * ring 的描边色**取自 Halo.color 本身**（0.14.1 块I 的口径：不另配「更亮的 ring 色」——
-   * 逐字复用即「字面同一存储」，不存在漂移的可能）。
-   * 本断言读的是**源码**（纯 JVM 无 Robolectric，无法实例化 drawable）：
-   * ring 层的 `setStroke(..., halo.color)` 必须直接引用形参 `halo.color`。
-   * 改成第二张色表（例如 `halo.ring`、或写死 ARGB）→ 本用例红。
+   * ring 的描边色必须与 glow **取同一次解析的同一个值**（0.14.1 块I 的口径：不另配「更亮的 ring 色」）。
+   *
+   * **批 5（P5-3）后的形态变化**：空闲态改为按主题取色，配色解析收口到唯一一处
+   * [haloColorsFor]（`resolveColors` 只给它传主题判定），两处 `setStroke` 因此从
+   * `halo.color` 改读**同一次解构出的局部 `color`**。不变的是「两层同源」这条不变量：
+   *  - 两处 setStroke 必须都读同一个局部变量名（写成 `halo.color` 就绕过了主题变体，
+   *    写成第二张色表则直接判红）；
+   *  - 该 color 只允许来自 [haloColorsFor]（非 IDLE / 深色主题原样透传 `halo.color`）。
+   * 本断言读的是**源码**（纯 JVM 无 Robolectric，无法实例化 drawable）。
    */
   @Test
-  fun ringStrokeColorIsReadStraightFromTheHaloParameter() {
-    val src = java.io.File("src/main/java/com/dsharnessmobile/shell/OverlayHalo.kt")
-      .takeIf { it.isFile }
-      ?: java.io.File("app/src/main/java/com/dsharnessmobile/shell/OverlayHalo.kt")
-    assertTrue("找不到 OverlayHalo.kt", src.isFile)
-    val code = src.readText().lineSequence()
-      .filterNot { it.trimStart().startsWith("//") || it.trimStart().startsWith("*") }
-      .joinToString("\n")
-    assertTrue(
-      "ring 描边必须直接引用 halo.color（不得另立色表或写死 ARGB）",
-      code.contains("setStroke(haloRingPx, halo.color)"),
+  fun ringStrokeColorComesFromTheSameSingleResolutionAsGlow() {
+    val src = code("OverlayHalo.kt")
+    val occurrences = Regex("""setStroke\(haloRingPx,\s*color\)""").findAll(src).count()
+    assertEquals("ring 改色必须有且仅有构建期+运行期两处，且都读同一个 color", 2, occurrences)
+    assertFalse(
+      "两处不得再直读 halo.color（那会绕过按主题取色的空闲变体）",
+      src.contains("setStroke(haloRingPx, halo.color)"),
     )
-    // 构建期（newHaloDrawable）与运行期（setHaloColors）各一处——两条路径都同源才叫同源。
-    val occurrences = Regex("setStroke\\(haloRingPx, halo\\.color\\)").findAll(code).count()
-    assertEquals("ring 改色必须有且仅有构建期+运行期两处，且都取自 halo.color", 2, occurrences)
+    assertEquals(
+      "构建期与运行期都必须解构唯一解析点的返回值（两处）",
+      2,
+      Regex(Regex.escape("val (color, fade) = resolveColors(halo)")).findAll(src).count(),
+    )
+    // 唯一解析点本身：只有 IDLE 取主题色板的空闲底色，其余三态原样透传（Halo 仍是那三态的色源）。
+    assertTrue(
+      "解析点必须只对 IDLE 换档",
+      src.contains("if (halo == Halo.IDLE) idleColor to idleFade else halo.color to halo.fade"),
+    )
+    assertTrue(
+      "空闲底色必须来自主题色板（本文件不得新增颜色字面量）",
+      src.contains("haloColorsFor(halo, c.haloIdle, c.haloIdleFade)"),
+    )
   }
 
   /** fade 是「同一色相的次强档」：RGB 必须与 color 一致，仅 alpha 更弱（撑起更宽的可见环）。 */

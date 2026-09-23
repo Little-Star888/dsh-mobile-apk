@@ -101,10 +101,32 @@ class MainActivity : ComponentActivity() {
   internal var userClosedEngine = false
 
   private val notificationPermission =
-    registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* test channel only */ }
+    registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+      // S1-11：结果如实回执——用户拒绝后下一次「该提醒而没提醒」的原因就是这一下。
+      if (!granted) {
+        Toast.makeText(
+          this,
+          getString(R.string.ds_notify_denied_note),
+          Toast.LENGTH_LONG,
+        ).show()
+      }
+    }
+
+  /** 本次会话是否已经为通知权限弹过一次（S1-11：不重复弹、且只在真需要时弹）。 */
+  private var notifPermissionAsked = false
 
   companion object {
     private const val TAG = "dsh-shell"
+
+    /**
+     * showTestNotification 用的通知渠道 ID。
+     *
+     * **ID 必须是 `dsh`**：它是历史构建已经建在系统里的渠道，改 ID 等于新建一个渠道并丢掉
+     * 用户对该渠道做过的一切设置（重要性/静音/角标）。S1-11 修的是**展示名**——旧实现把
+     * 名称也写成 `dsh`，于是系统通知设置里出现一条叫「dsh」的渠道，用户看不出它属于哪个
+     * 应用的哪类通知；现在名称/说明走 strings.xml（见 ds_notify_channel_name/desc）。
+     */
+    private const val NOTIF_CHANNEL_ID = "dsh"
 
     /**
      * §2.3（0.14.1 块C）：主 WebView 背景色（中性深灰）。未设时为默认白，白屏与「正常空页」
@@ -163,10 +185,12 @@ class MainActivity : ComponentActivity() {
     installCrashMarker()
     // 启动即 TTL 清扫临时工作区（issue #60 F5.1：7 天过期文件自动回收）
     try { FileIncoming.sweepExpired(this) } catch (_: Throwable) {}
-    // 通知权限首启注册（issue #80 反馈实锤 2026-08-24）：Android 13+ POST_NOTIFICATIONS
-    // 默认拒绝——不主动请求则引擎任务完成/授权请求等 NotifyCenter 通知全部静默丢弃。
-    // 授权回调沿用 showTestNotification 的 launch（后果一致：拒绝即静默降级）。
-    registerNotificationAsync()
+    // S1-11：**冷启动不再弹通知权限**。旧实现在 onCreate 里直接 launch：应用刚打开、用户还
+  // 不知道这是干什么的，系统弹窗先来了——没有前置说明，拒绝了也没有任何后果提示，而
+  // 后果其实很重（引擎提问/授权请求没有超时，通知被丢 = 任务永久挂起）。
+    // 现在的口径：**到真的要用通知时才请求**，并且先给一句「为什么」（见 ensureNotificationPermission），
+    // 一次会话最多弹一次。
+    noteNotificationPermissionState()
     val crashFile = File(filesDir, ".crashed")
     if (crashFile.exists()) {
       crashInfo = try { crashFile.readText() } catch (_: Exception) { null }
@@ -202,6 +226,11 @@ class MainActivity : ComponentActivity() {
     guideView = guideRenderer.buildGuideView()
     root.addView(guideView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
     setContentView(root)
+    // 0.14.1 用户反馈：公共导出目录（Documents/dshdata）的供给必须在**不依赖引擎状态**的地方触发。
+    // 旧实现只从 startEngine()/shellEnv() 进入，而 startEngine() 在「引擎已可连或进程还活着」时
+    // 早退、onResume 的探活发现引擎活着也不再走启动流程 → 授权之后没有任何东西会再跑一次建目录，
+    // 用户看到的就是「Documents 下一直没有 dshdata」。
+    provisionPublicRepoAndRefreshChip(PublicRepoProvision.TRIGGER_ON_CREATE)
     browserHost = BrowserHost(this, root, webView)
     vdisplayHost = VdisplayHost(root, webView)
     vdisplayFloat = VdisplayFloat(this)
@@ -264,6 +293,65 @@ class MainActivity : ComponentActivity() {
       // 「拷完 POST 早于引擎 listen」的竞态窗口（投递另有待发清单 + 引擎就绪钩子兜底）。
       startEngineFlow()
       FileIncoming.processIncomingIntent(this, intent) { title, text -> showTestNotification(title, text) }
+      // P0-1：冷启动路径的通知落点（热路径在 onNewIntent）。放在 startEngineFlow 之后：
+      // 落点要等页面把会话列表装起来，故这里只登记，真正的投递由页面就绪/onNewIntent 触发。
+      consumeNotifyRoute(intent)
+    }
+  }
+
+  /**
+   * 通知点击的**落点**（0.14.1 批 4 / P0-1）。
+   *
+   * 缺陷形态：`NotifyCenter.contentIntent` 一直在写 `dsh.notify.*` extras，而**全仓没有读取者**、
+   * `MainActivity` 也没有 `onNewIntent` ⇒ 整族通知是单向公告板：点进去只是把应用拉到前台，
+   * 停在原页面——不打开对应会话、不定位那条待答问题。同一处还把 sessionId 与 agentId 写进
+   * 同一个 key（已拆成 [NotifyCenter.EXTRA_TARGET_SESSION] / [NotifyCenter.EXTRA_TARGET_AGENT]）。
+   *
+   * 落点由**页面**执行（`window.__dshOpenSession`，页面才有会话视图与切换能力）；壳侧只负责
+   * 把 id 送进去、并在送不进去时**说话**（不静默）。
+   */
+  private var pendingNotifySession: String? = null
+
+  private fun consumeNotifyRoute(intent: Intent?) {
+    val session = intent?.getStringExtra(NotifyCenter.EXTRA_TARGET_SESSION).orEmpty()
+    if (session.isEmpty()) return
+    pendingNotifySession = session
+    deliverNotifyRoute()
+  }
+
+  override fun onNewIntent(intent: Intent) {
+    super.onNewIntent(intent)
+    // SINGLE_TOP：应用已在前台时点击通知走这里（此前**没有这个覆写**，intent 直接丢掉）。
+    setIntent(intent)
+    consumeNotifyRoute(intent)
+  }
+
+  /** 把待投递的通知落点交给页面；页面未就绪则留到 onPageFinished 再送一次。 */
+  internal fun deliverNotifyRoute() {
+    val session = pendingNotifySession ?: return
+    if (!webViewReady || webView.visibility != android.view.View.VISIBLE) return
+    pendingNotifySession = null
+    val script = "(() => { try { return (typeof window.__dshOpenSession === 'function') && window.__dshOpenSession(" +
+      jsString(session) + ") === true } catch (e) { return false } })()"
+    try {
+      webView.evaluateJavascript(script) { raw ->
+        if (raw?.trim() != "true") {
+          // 落点失败必须可见：会话可能已被删除，或页面还没装好会话视图。
+          notifyRouteFailed()
+        }
+      }
+    } catch (t: Throwable) {
+      Log.w("dsh-notify", "notify route failed: " + t.message)
+      notifyRouteFailed()
+    }
+  }
+
+  private fun notifyRouteFailed() {
+    runOnUiThread {
+      try {
+        Toast.makeText(this, "无法打开对应的会话（可能已被删除）——请从会话列表手动选择", Toast.LENGTH_LONG).show()
+      } catch (_: Throwable) {
+      }
     }
   }
 
@@ -280,6 +368,14 @@ class MainActivity : ComponentActivity() {
     // ST-11：开发者日志回前台补启——EngineService 退出时采集器可能已停而偏好仍为开，
     // 「开关事实 = 偏好 && 在跑」由 DevLogControl 保证（幂等；偏好关时 no-op）。
     DevLogControl.ensureStarted(this)
+    // 0.14.1 批 3（P3-2）：渠道**展示名**随用词更新同步（幂等；未变则零写入）。
+    // 为什么挂在 onResume 而不是只在创建渠道时：`channelFor` 在 channelsInitialized 之后只读
+    // prefs 映射、不再走创建分支，改名代码写在创建路径里对老装机等于没写（设备实测撞到）。
+    try {
+      NotifyCenter.syncChannelNames(this)
+    } catch (_: Throwable) {
+      // 名称同步失败不得影响启动（渠道本身仍可用，只是可能显示旧词）。
+    }
     // 前台引擎监控：引擎被杀/崩溃时自动回退测试界面，恢复后回 WebUI。
     if (!userClosedEngine) {
       engineFlow.startMonitor()
@@ -302,13 +398,19 @@ class MainActivity : ComponentActivity() {
       }
     }
     // 0.13.2 W7 + ST-02：悬浮球开关已开且权限在场时补启。权限缺失时 OverlayController 把偏好
-    // 回落 false，本行随即短路——不再每次回前台弹系统页；用户重新授予后需再点一次开关。
+    // 回落 false，本行随即短路——不再每次回前台弹系统页。
+    // S2-17：另外结算「用户已经表达过开启意图、刚去系统页授了权」这一笔——旧实现里这条路径
+    // 是死路（偏好已回落 → 短路 → 球不出现、开关自己变回关闭、零解释）。
     OverlayController.ensureStarted(this)
+    OverlayController.settlePendingEnable(this)
     // 0.14.0：ADB 端口预取与 server 预热随内置 adb 退役（Shizuku UserService 自身常驻，无需预热）。
     // Back from the directory picker / Termux: re-route if the engine came up.
     // 仅当 WebView 未展示（引导页/首次启动）时才探测并重路由；相册/文件选择器
     // 返回时 WebView 已可见，探测超时会误触发 showWeb→reload，导致 JS 状态丢失。
     guideRenderer.refreshGuideMeta()
+    // 授权返回后的**自愈点**（0.14.1 用户反馈）：从「所有文件访问」页回来时引擎通常还在跑，
+    // 于是启动流程不会重跑、建目录也不会重试——这里补一次，只在还没成功过时才做。
+    provisionPublicRepoAndRefreshChip(PublicRepoProvision.TRIGGER_ON_RESUME)
     // FX-210.5：探活不得在主线程（onResume 每次回前台都跑；cookie 取不到 + 3080 半死时
     // 单次同步 HTTP 为秒级）。后台探活 + 主线程分流，失败原因结构化落盘。
     if (!userClosedEngine && webView.visibility != View.VISIBLE) {
@@ -325,6 +427,28 @@ class MainActivity : ComponentActivity() {
     dirPickerController.settlePendingOnResume()
     // 0.13.8 批 H：从「安装未知应用」授权页返回——已授权则续继 APK 更新包的安装。
     guideRenderer.settlePendingInstall()
+  }
+
+  /**
+   * 公共导出目录供给 + 刷新存储 chip（0.14.1 用户反馈）。
+   *
+   * 两条与旧实现的关键差别：
+   *  1. **触发点与引擎解耦**：旧实现挂在 `startEngine()` 的早退点后面（引擎活着就整段跳过），
+   *     这里由 Activity 生命周期触发，`onResume` 因而成为「授权返回后自愈」的闭环。
+   *  2. **只在还没成功过时才做**（[PublicRepoProvision.needsRetry]）：成功即幂等跳过，
+   *     不因为「每次回前台」而反复做文件系统操作。
+   *
+   * 文件系统操作放后台线程（失败路径可能带 IO 异常），完成后回主线程刷 chip。
+   */
+  internal fun provisionPublicRepoAndRefreshChip(trigger: String) {
+    if (!PublicRepoProvision.needsRetry(engineManager.publicRepoStatus())) return
+    Thread(
+      {
+        engineManager.provisionPublicRepo(trigger)
+        runOnUiThread { guideRenderer.refreshGuideMeta() }
+      },
+      "dsh-public-repo",
+    ).start()
   }
 
   /**
@@ -641,6 +765,9 @@ class MainActivity : ComponentActivity() {
         // 悬浮球避让帧补放（启动期首帧注入若因页面未就绪落空，此处重放）
         if (isEngineSource(url)) OverlayService.instance?.replayFrame()
         if (isEngineSource(url) && !userClosedEngine) engineFlow.startFreezeWatchdog()
+        // P0-1：冷启动时点的通知，落点要等这一帧之后页面才有会话视图（文档级就绪 ≠ 会话列表就绪，
+        // 故页面侧的回执为 false 时会给出可见提示，而不是静默失败）。
+        if (isEngineSource(url)) deliverNotifyRoute()
       }
     }
     // WebView 下载：会话日志导出与其余引擎源下载统一走 DownloadSaver（app 内
@@ -721,6 +848,27 @@ class MainActivity : ComponentActivity() {
         onPickRequest = { callbackId -> dirPickerController.pickDirectoryWithPermissionCheck(callbackId) },
         onKeepScreen = { enable -> keepScreenOn(enable) },
         onNotify = { title, text -> NotifyCenter.notify(this, "task", title, text) },
+        // 0.14.1 批 4：通知设置页的系统深链（此前 `appSettingsIntent`/`channelSettingsIntent`
+        // 在页面侧零调用点——「系统已降级，应用无法调回」这句用户永远看不到）。
+        // 返回 boolean：该 ROM 没有对应设置页时页面必须如实提示，不能假装拉起过。
+        onOpenNotifyAppSettings = {
+          try {
+            startActivity(NotifyCenter.appSettingsIntent(this))
+            true
+          } catch (t: Throwable) {
+            Log.w("dsh-notify", "app notification settings unavailable: " + t.message)
+            false
+          }
+        },
+        onOpenNotifyChannelSettings = { channelId ->
+          try {
+            startActivity(NotifyCenter.channelSettingsIntent(this, channelId))
+            true
+          } catch (t: Throwable) {
+            Log.w("dsh-notify", "channel settings unavailable: " + t.message)
+            false
+          }
+        },
         onAllFilesAccessRequest = { dirPickerController.openAllFilesAccessSettings() },
 
         onExportConfig = { ConfigTransfer(engineManager.homeDir, engineManager.dshDataDir).exportToShared() },
@@ -736,7 +884,7 @@ class MainActivity : ComponentActivity() {
         onExportSettingsDocument = { engineManager.settingsDocumentExport() },
         onCopyTextRequest = { text -> copyTextNative(text) },
         pickToken = pickToken,
-        onRestartEngine = { engineFlow.restart() },
+        onRestartEngine = { engineFlow.restart() },  // S3-15：返回 Boolean，页面据此如实反馈
         onShutdownToGuide = { engineFlow.shutdownToGuide() },
         onReloadWebUI = {
           webView.reload()
@@ -794,6 +942,17 @@ class MainActivity : ComponentActivity() {
         onOpenA11ySettings = { openAccessibilitySettings() },
         // 0.14.0：Android 13+ 侧载应用「受限设置」解锁改走 Shizuku shell（appops）——内置 adb 已退役。
         onUnlockRestrictedSettings = { unlockRestrictedSettingsViaShizuku() },
+        // 0.14.1 设置页「手机控制」：Shizuku 引导三件套（用户 2026-09-22 定例）。
+        // 外链只收 key（下载页 / 视频教程共用这一条通道），URL 表在壳侧 ExternalLinks。
+        onOpenExternalLink = { key -> ExternalLinks.open(this, key) },
+        onOpenShizukuManager = { ExternalLinks.openShizukuManager(this) },
+        onShizukuStatus = {
+          // 读路径自带自愈（与 vdisplayStatus 同口径）：已装 + 已运行 + 已授权而未绑定时发起一次
+          // **后台**绑定并立即返回当前状态，下一次 2s 轮询即收敛。缺了这一步，设置页无论刷新多少次
+          // 都不会建连——0.14.0 设备实锤「会一直卡在这」。绝不在此阻塞等待（UI 轮询路径）。
+          ShizukuTransport.kickBind(this)
+          ShizukuTransport.status(this).toString()
+        },
       ),
       "androidBridge",
     )
@@ -984,34 +1143,69 @@ class MainActivity : ComponentActivity() {
   /** 首启注册通知权限（issue #80 实锤 2026-08-24）：Android 13+ POST_NOTIFICATIONS 默认拒绝，
    *  不主动请求则引擎任务完成/授权请求等 NotifyCenter 通知全部静默丢弃。仅在未授予时请求一次
    *  （用户拒绝后不重复打扰；showTestNotification 仍会在用户主动触发时二次请求）。 */
-  private fun registerNotificationAsync() {
+  /**
+   * 冷启动只**记录**通知权限现状，不弹窗（S1-11）。
+   *
+   * 记录本身有用：通知设置页与自检面据此显示「未授予（任务完成不会提醒）」，用户能看到事实，
+   * 而不是在首屏被一个没有上下文的系统弹窗拦住。
+   */
+  private fun noteNotificationPermissionState() {
     if (Build.VERSION.SDK_INT < 33) return
-    if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-      try {
-        notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-      } catch (_: Throwable) {
-        // Activity 未就绪时忽略（下次启动再试）
-      }
+    val granted =
+      checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+    if (!granted) {
+      LogCollector.log(TAG, "notification permission not granted at cold start (no prompt; will ask at need)")
     }
   }
 
+  /**
+   * 需要发通知时才请求权限（S1-11），并**先说明为什么**（S1-12 的另一半）。
+   *
+   * @return 当前是否可用（已授予=可直接发；未授予=调用方必须自己把内容展示出来）。
+   */
+  private fun ensureNotificationPermission(rationale: String): Boolean {
+    if (Build.VERSION.SDK_INT < 33) return true
+    if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return true
+    if (!notifPermissionAsked) {
+      notifPermissionAsked = true
+      // 前置说明：这句话本身就是「为什么要授权」，不再让用户对着一个光秃秃的系统弹窗猜。
+      Toast.makeText(this, rationale, Toast.LENGTH_LONG).show()
+      try {
+        notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+      } catch (_: Throwable) {
+        // Activity 未就绪：忽略（下次真需要时再试）。
+      }
+    }
+    return false
+  }
+
   internal fun showTestNotification(title: String, text: String) {
-    if (Build.VERSION.SDK_INT >= 33 &&
-      checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-    ) {
-      notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+    // S1-12：**权限缺失不得吞掉内容**。旧实现 launch 之后就 return —— 内容消失得无影无踪，
+    // 而调用点都是「引擎重启中」「会话日志已导出」「导出失败」这类用户必须知道的事。
+    // 现在：内容先在应用内以 Toast 落地（这是真正的「不丢」），再顺带说明为什么需要通知权限。
+    if (!ensureNotificationPermission(getString(R.string.ds_notify_permission_rationale))) {
+      Toast.makeText(this, title + "：" + text, Toast.LENGTH_LONG).show()
       return
     }
     val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
     if (Build.VERSION.SDK_INT >= 26) {
-      manager.createNotificationChannel(NotificationChannel("dsh", "dsh", NotificationManager.IMPORTANCE_DEFAULT))
+      // S1-11：渠道名此前与 ID 同为 `dsh`，在系统通知设置里就显示成一个「dsh」——用户看不懂
+      // 这是哪个应用的哪一类通知。ID 保持 `dsh`（既有渠道不可改名换 ID，否则历史设置丢失），
+      // 只把**展示名与说明**写成人话（系统在重建渠道时会更新名称）。
+      manager.createNotificationChannel(
+        NotificationChannel(
+          NOTIF_CHANNEL_ID,
+          getString(R.string.ds_notify_channel_name),
+          NotificationManager.IMPORTANCE_DEFAULT,
+        ).apply { description = getString(R.string.ds_notify_channel_desc) },
+      )
     }
     val pending = android.app.PendingIntent.getActivity(
       this, 0, Intent(this, MainActivity::class.java), android.app.PendingIntent.FLAG_IMMUTABLE,
     )
     manager.notify(
       1,
-      NotificationCompat.Builder(this, "dsh")
+      NotificationCompat.Builder(this, NOTIF_CHANNEL_ID)
         .setSmallIcon(android.R.drawable.stat_notify_chat)
         .setContentTitle(title)
         .setContentText(text)

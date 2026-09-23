@@ -108,7 +108,7 @@ internal object ControlCarrier {
       }
     }
     else -> a11y?.handle(op, args) ?: JSONObject()
-      .put("__error", "无障碍服务未开启——该操作需要「DSH 设备控制」无障碍通道；浏览器与虚拟屏操作不受影响。")
+      .put("__error", "无障碍服务未开启——该操作需要「" + UserCopy.A11Y_SERVICE_NAME + "」无障碍通道；浏览器与虚拟屏操作不受影响。")
       .put("reason", "a11y-unavailable")
       .put("op", op)
   }

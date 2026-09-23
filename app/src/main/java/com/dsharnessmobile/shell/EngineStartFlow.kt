@@ -64,7 +64,14 @@ internal class EngineStartFlow(private val activity: MainActivity) {
                   // error page (long snapshot refresh): retry that navigation instead
                   // of leaving the user on ERR_CONNECTION_REFUSED.
                   lastEnginePageReloadAt = System.currentTimeMillis()
-                  try { activity.webView.reload() } catch (_: Exception) { }
+                  // 0.14.1 D3：恢复动作（reload）失败此前**完全静默**——用户继续停在
+                  // ERR_CONNECTION_REFUSED 上，而现场没有任何一行说明「我们试过重载但没成功」。
+                  // 吞掉无害清理可以，吞掉用户正在等的那个恢复动作不行。
+                  try {
+                    activity.webView.reload()
+                  } catch (e: Exception) {
+                    Log.w("dsh-shell", "engine page reload failed", e)
+                  }
                 }
               }
             } else if (activity.webView.visibility == View.VISIBLE) {
@@ -105,7 +112,12 @@ internal class EngineStartFlow(private val activity: MainActivity) {
         }
         if (!freezeReloaded) {
           freezeReloaded = true
-          try { activity.webView.reload() } catch (_: Exception) {
+          // 0.14.1 D3：与上面的引擎页重载同族——冻结自愈的唯一动作失败时必须留下痕迹，
+          // 否则日志里只有「检测到冻结」，看不出「自愈没生效」。
+          try {
+            activity.webView.reload()
+          } catch (e: Exception) {
+            Log.w("dsh-shell", "freeze recovery reload failed", e)
           }
         }
         jsAckAt = now
@@ -296,16 +308,33 @@ internal class EngineStartFlow(private val activity: MainActivity) {
     activity.guideRenderer.chrome.updateButton.isEnabled = false
     activity.guideRenderer.chrome.updateButton.alpha = 0.55f
     activity.applyGuidePhase(GuidePhase.Updating, "检查更新…")
-    UpdateManager(activity).checkAndApply { status ->
+    UpdateManager(activity).checkAndApply { st ->
       activity.runOnUiThread {
-        val done = status.startsWith("更新完成") || status.startsWith("更新失败")
-        activity.applyGuidePhase(
-          if (status.startsWith("更新失败")) GuidePhase.Error
-          else if (status.startsWith("更新完成")) GuidePhase.Recovering
-          else GuidePhase.Updating,
-          status,
-        )
-        if (done) {
+        // 相位由**类型**决定（0.14.1 批 2 / P0-2）：旧实现按字符串前缀猜，于是「本版没配发布源」
+        // 被当失败渲染成满屏红字，而那串错误里写着 overrideManifestUrl（只存在于代码里的名字）。
+        // 现在 NotConfigured 走 Info（中性事实 + 下一步），只有真正的失败才是红。
+        //
+        // 但**不可打断的相位**（首启解压/启动/回滚）进行中不许抢占状态行：那时用户正盯着一件
+        // 不能中断的事，旁路结果只写 hint（设备实测：解压到 686MB 时点「检查更新」会把进度顶掉）。
+        val locked = activity.guideRenderer.phaseLocked()
+        val phase = when (st.outcome) {
+          UpdateManager.UpdateOutcome.NotConfigured -> GuidePhase.Info
+          UpdateManager.UpdateOutcome.Failed -> GuidePhase.Error
+          UpdateManager.UpdateOutcome.Done -> GuidePhase.Recovering
+          UpdateManager.UpdateOutcome.Working -> GuidePhase.Updating
+        }
+        if (locked) {
+          activity.guideRenderer.applyGuideHint(
+            if (phase == GuidePhase.Error) st.text else st.text + "（当前动作不受影响）",
+          )
+        } else {
+          activity.applyGuidePhase(
+            phase,
+            if (phase == GuidePhase.Error) "更新失败" else st.text,
+            if (phase == GuidePhase.Error) st.text.removePrefix("更新失败：") else null,
+          )
+        }
+        if (st.outcome != UpdateManager.UpdateOutcome.Working) {
           updateRunning.set(false)
           activity.guideRenderer.chrome.updateButton.isEnabled = true
           activity.guideRenderer.chrome.updateButton.alpha = 1f
@@ -358,14 +387,17 @@ internal class EngineStartFlow(private val activity: MainActivity) {
           WatchdogV2.reset()
           activity.runOnUiThread {
             if (!isCurrentEngineFlow(generation)) return@runOnUiThread
-            activity.applyGuidePhase(GuidePhase.Recovering, "回撤完成，正在重启引擎…", "已恢复到快照 " + (result.snapshotId ?: "?"))
+            // P3-6：快照 id 不上屏（用户看不懂也做不了什么）——正文说清「回到哪个状态 + 接下来会怎样」，
+            // id 进日志供排查。
+            LogCollector.log("dsh-guide", "undo applied snapshot=" + (result.snapshotId ?: "?"))
+            activity.applyGuidePhase(GuidePhase.Recovering, "回撤完成，正在重启引擎…", "已恢复到上一次可用的运行时状态。")
           }
           activity.engineManager.resetCooldown()
           if (isCurrentEngineFlow(generation)) activity.engineManager.startEngine()
         } else {
           activity.runOnUiThread {
             if (!isCurrentEngineFlow(generation)) return@runOnUiThread
-            activity.applyGuidePhase(GuidePhase.Error, "自动回撤不可用", result.summary.take(120))
+            activity.applyGuidePhase(GuidePhase.Error, "自动回撤不可用", undoUnavailableHint(result.summary))
           }
         }
       } catch (t: Throwable) {
@@ -446,59 +478,96 @@ internal class EngineStartFlow(private val activity: MainActivity) {
       if (!isCurrentEngineFlow(generation)) return@Thread
       if (!activity.engineManager.snapshotFresh()) {
         if (!isCurrentEngineFlow(generation)) return@Thread
-        activity.runOnUiThread {
-          if (!isCurrentEngineFlow(generation)) return@runOnUiThread
-          activity.applyGuidePhase(GuidePhase.Extracting, "正在解压运行时")
-          activity.guideRenderer.progressText.visibility = View.VISIBLE
-          activity.guideRenderer.progressText.text = "准备写入内嵌环境…"
-        }
-        val ok = activity.engineManager.refreshSnapshot(
-          onProgress = { done, _ ->
-            activity.runOnUiThread {
-              if (!isCurrentEngineFlow(generation)) return@runOnUiThread
-              // done 是解压后字节数，total 是压缩包字节数，口径不一致；只显示已解压量。
-              val mb = done / 1024 / 1024
-              activity.guideRenderer.progressText.visibility = View.VISIBLE
-              activity.guideRenderer.progressText.text = "已写入 " + mb + " MB"
-              if (activity.guideRenderer.lastGuidePhase != GuidePhase.Extracting) {
-                activity.applyGuidePhase(GuidePhase.Extracting, "正在解压运行时")
-              }
-            }
-          },
-          onStage = { stage ->
-            activity.runOnUiThread {
-              if (!isCurrentEngineFlow(generation)) return@runOnUiThread
-              activity.applyGuidePhase(GuidePhase.Extracting, "正在更新运行时")
-              activity.guideRenderer.progressText.visibility = View.VISIBLE
-              activity.guideRenderer.progressText.text = stage
-            }
-          },
-        )
-        if (!ok) {
-          // 任务 19：失败终态落盘（快照解压失败是「启动起不来」的已知成因之一）。
-          // 【0.14.1 升级路径 P0】必须带上**真因**：`refreshSnapshot` 只回布尔值，真因挂在
-          // `EngineManager.lastRefreshFailure`。旧实现此处不传 error → boot-fail.log 只有
-          // `error=none(boolean-failure-path)`，排障者拿不到 `Directory not empty` 那条真因。
-          val refreshCause = activity.engineManager.lastRefreshFailure
+        // 0.14.1 D2（issue #240 建议 2）：**降级闸门**。同一份快照上刷新已连续失败达阈、
+        // 且 live 运行时完整时，不再自动重跑那一次注定失败的刷新——以可用态启动，并显式留档。
+        //
+        // 为什么判据是 live 完整性而不是失败次数：refresh 失败的常见真因是快照缺失/解压不全，
+        // 那种情况下「放行」等于拉起一棵不完整的运行时（以「引擎能起但插件缺」的形态静默劣化），
+        // 比拦在引导页更坏。issue 现场的真正特征是 live 完整可用、缺的只是提交文件。
+        // 出口：换快照（App 升级 → fingerprint 变 → 账本自然失配）或用户手动点「重试」
+        // （GuidePageRenderer 的 onStartEngine 会 clearRefreshLedger，见那里）。
+        if (activity.engineManager.shouldDegradeRefresh()) {
           LogCollector.writeBootFail(
-            activity, "snapshot-refresh-failed",
-            "内嵌运行时快照解压/写入失败（refreshSnapshot 返回 false）"
-              + (refreshCause?.let { " cause=" + it.javaClass.name + ": " + (it.message ?: "无消息") } ?: ""),
-            refreshCause,
+            activity, "snapshot-refresh-degraded",
+            "自动刷新连续失败达阈且 live 运行时完整：跳过本次自动刷新，以现有运行时启动"
+              + "（手动点「重试」可强制再刷一次；升级到新快照后本闸门自然失效）",
           )
           activity.runOnUiThread {
             if (!isCurrentEngineFlow(generation)) return@runOnUiThread
-            // 0.13.1 W3：解压失败此前零落盘（engine.log 尚不存在、仅 logcat），镜像现场到共享目录。
-            // review C5：文案按**实际落点**回填（共享不可写时回落私有目录，不再写死 Documents 路径）。
-            val dir = activity.engineManager.mirrorDiagnosticsToShared("snapshot-refresh-failed")
-            activity.applyGuidePhase(GuidePhase.Error, "运行时更新失败（" + diagnosticsLocationHint(dir) + "）")
-            activity.showGuide()
+            activity.applyGuidePhase(GuidePhase.Starting, "运行时更新未完成，正以现有运行时启动…")
+            activity.guideRenderer.progressText.visibility = View.GONE
           }
-          return@Thread
-        }
-        activity.runOnUiThread {
-          if (!isCurrentEngineFlow(generation)) return@runOnUiThread
-          activity.applyGuidePhase(GuidePhase.Starting, "正在启动引擎…")
+        } else {
+          if (!isCurrentEngineFlow(generation)) return@Thread
+          activity.runOnUiThread {
+            if (!isCurrentEngineFlow(generation)) return@runOnUiThread
+            activity.applyGuidePhase(GuidePhase.Extracting, "正在解压运行时")
+            activity.guideRenderer.progressText.visibility = View.VISIBLE
+            activity.guideRenderer.progressText.text = "准备写入内嵌环境…"
+          }
+          val ok = activity.engineManager.refreshSnapshot(
+            onProgress = { done, _ ->
+              activity.runOnUiThread {
+                if (!isCurrentEngineFlow(generation)) return@runOnUiThread
+                // S1-4：进度**确定化 + 量纲统一**。旧实现只显示「已写入 N MB」且进度条恒为不确定态，
+                // 而状态副文案写的是「约 700MB」——两个数字对不上，用户无法判断还要多久。
+                // 现在 done 与 RUNTIME_UNCOMPRESSED_APPROX_BYTES 同量纲，进度条与文案一起走。
+                val pct = runtimeProgressPercent(done)
+                activity.guideRenderer.setDeterminateProgress(done, RUNTIME_UNCOMPRESSED_APPROX_BYTES)
+                activity.guideRenderer.progressText.visibility = View.VISIBLE
+                val mb = done / 1024 / 1024
+                val totalMb = RUNTIME_UNCOMPRESSED_APPROX_BYTES / 1024 / 1024
+                activity.guideRenderer.progressText.text =
+                  if (pct >= 0) "已写入 " + mb + " MB / 约 " + totalMb + " MB（" + pct + "%）"
+                  else "已写入 " + mb + " MB"
+                if (activity.guideRenderer.lastGuidePhase != GuidePhase.Extracting) {
+                  activity.applyGuidePhase(GuidePhase.Extracting, "正在解压运行时")
+                }
+              }
+            },
+            onStage = { stage ->
+              activity.runOnUiThread {
+                if (!isCurrentEngineFlow(generation)) return@runOnUiThread
+                activity.applyGuidePhase(GuidePhase.Extracting, "正在更新运行时")
+                activity.guideRenderer.progressText.visibility = View.VISIBLE
+                activity.guideRenderer.progressText.text = stage
+              }
+            },
+          )
+          if (!ok) {
+            // 任务 19：失败终态落盘（快照解压失败是「启动起不来」的已知成因之一）。
+            // 【0.14.1 升级路径 P0】必须带上**真因**：`refreshSnapshot` 只回布尔值，真因挂在
+            // `EngineManager.lastRefreshFailure`。旧实现此处不传 error → boot-fail.log 只有
+            // `error=none(boolean-failure-path)`，排障者拿不到 `Directory not empty` 那条真因。
+            val refreshCause = activity.engineManager.lastRefreshFailure
+            LogCollector.writeBootFail(
+              activity, "snapshot-refresh-failed",
+              "内嵌运行时快照解压/写入失败（refreshSnapshot 返回 false）"
+                + (refreshCause?.let { " cause=" + it.javaClass.name + ": " + (it.message ?: "无消息") } ?: ""),
+              refreshCause,
+            )
+            activity.runOnUiThread {
+              if (!isCurrentEngineFlow(generation)) return@runOnUiThread
+              // 0.13.1 W3：解压失败此前零落盘（engine.log 尚不存在、仅 logcat），镜像现场到共享目录。
+              // review C5：文案按**实际落点**回填（共享不可写时回落私有目录，不再写死 Documents 路径）。
+              val dir = activity.engineManager.mirrorDiagnosticsToShared("snapshot-refresh-failed")
+              // S1-5：**诊断包路径不进标题**。旧实现把 `diagnosticsLocationHint(dir)`
+              // （「诊断包已存至 /storage/emulated/0/Documents/dshdata/diagnostics/...」）拼进
+              // 18sp 的标题里，在窄屏上把标题撑成三行，而真正该一眼看到的是「失败了」。
+              // 现在标题只说事实，路径挪到 13sp 的副文案里（可换行，且不抢视觉重心）。
+              activity.applyGuidePhase(
+                GuidePhase.Error,
+                "运行时更新失败",
+                diagnosticsLocationHint(dir) + "。可复制该路径或打开控制台查看 engine.log。",
+              )
+              activity.showGuide()
+            }
+            return@Thread
+          }
+          activity.runOnUiThread {
+            if (!isCurrentEngineFlow(generation)) return@runOnUiThread
+            activity.applyGuidePhase(GuidePhase.Starting, "正在启动引擎…")
+          }
         }
       }
       if (!isCurrentEngineFlow(generation)) return@Thread
@@ -585,7 +654,12 @@ internal class EngineStartFlow(private val activity: MainActivity) {
         val dir = activity.engineManager.mirrorDiagnosticsToShared("engine-died-during-boot")
         activity.runOnUiThread {
           if (!isCurrentEngineFlow(generation)) return@runOnUiThread
-          activity.applyGuidePhase(GuidePhase.Error, "引擎启动失败（" + diagnosticsLocationHint(dir) + "）")
+          // S1-5：同上——标题只说事实，诊断包路径进副文案。
+          activity.applyGuidePhase(
+            GuidePhase.Error,
+            "引擎启动失败",
+            diagnosticsLocationHint(dir) + "。可复制该路径或打开控制台查看 engine.log。",
+          )
           activity.showGuide()
         }
         onEngineStartTimeout(generation)
@@ -646,18 +720,21 @@ internal class EngineStartFlow(private val activity: MainActivity) {
   fun runUpdate() {
     val statusFile = File(activity.filesDir, "update-status.txt")
     val manager = UpdateManager(activity)
-    manager.checkAndApply { status ->
+    manager.checkAndApply { st ->
       activity.runOnUiThread {
-        val phase = when {
-          status.startsWith("更新失败") -> GuidePhase.Error
-          status.startsWith("更新完成") -> GuidePhase.Recovering
-          else -> GuidePhase.Updating
+        // 与 startUpdateCheck 同口径（0.14.1 批 2 / P0-2）：相位由**类型**决定，不猜字符串前缀。
+        val phase = when (st.outcome) {
+          UpdateManager.UpdateOutcome.NotConfigured -> GuidePhase.Info
+          UpdateManager.UpdateOutcome.Failed -> GuidePhase.Error
+          UpdateManager.UpdateOutcome.Done -> GuidePhase.Recovering
+          UpdateManager.UpdateOutcome.Working -> GuidePhase.Updating
         }
-        activity.applyGuidePhase(phase, status)
+        activity.applyGuidePhase(phase, st.text)
         activity.showGuide()
       }
       try {
-        statusFile.appendText(status + "\n")
+        // 落盘仍是纯文本（adb 侧判据读它），保留原始状态串。
+        statusFile.appendText(st.text + "\n")
       } catch (_: Exception) {
       }
     }
@@ -688,8 +765,10 @@ internal class EngineStartFlow(private val activity: MainActivity) {
    * 流程守卫 → 1s 后重新走启动流程（EngineService 看门狗亦会拉起，
    * 进程级 CAS + 冷却保证双路径幂等）。防连点：in-flight 守卫。
    */
-  fun restart() {
-    if (!engineRestarting.compareAndSet(false, true)) return
+  fun restart(): Boolean {
+    // S3-15：返回「是否真的发起了重启」。页面侧旧实现无论成败都显示「重启中…」两秒后自己变回
+    // ——那是假忙碌。CAS 失败（已在重启中）同样属于「没发起」，如实回 false。
+    if (!engineRestarting.compareAndSet(false, true)) return false
     activity.userClosedEngine = false
     flowGeneration.incrementAndGet()
     EngineService.setUserShutdown(activity, false)
@@ -711,6 +790,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
         engineRestarting.set(false)
       }
     }.start()
+    return true
   }
 }
 

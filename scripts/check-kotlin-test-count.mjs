@@ -40,6 +40,7 @@ import { readFileSync, writeFileSync, existsSync, statSync, readdirSync } from '
 import { join, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { dirname } from 'node:path'
+import { spawnSync } from 'node:child_process'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = dirname(HERE)
@@ -115,6 +116,69 @@ function parseResults(dir) {
     }
   }
   return Object.keys(out).length > 0 ? out : null
+}
+
+/**
+ * 结果新鲜度的**仲裁**（H-2 处方：mtime 只作触发，最终由 gradle 自己的内容哈希裁决）。
+ *
+ * 为什么必须换：本门禁原先「结果 mtime 早于测试源码」即判红——而 gradle 的判据是**输入内容哈希**。
+ * 实测（`docs/0.14.1-WRAP-UP.md` §6.3）：只触碰（robocopy/检出/编辑器保存）测试源码、内容未变时，
+ * `./gradlew :app:testDebugUnitTest` 报 `UP-TO-DATE`，但 mtime 判据已经判红 61 项。
+ * 这条门禁是聚合链的**最后一条**，一红即整链中止——一个纯时间戳造成的假阳性会让整条发布链停摆。
+ *
+ * 仲裁逻辑（fail-closed）：
+ *  - 跑一次 `:app:testDebugUnitTest`；
+ *  - 该任务报 `UP-TO-DATE` / `FROM-CACHE` ⇒ gradle 认定输入未变 ⇒ 旧报告与当前源码**内容等价**，放行；
+ *  - 该任务真的执行过 ⇒ 报告已被刷新，重新读一遍结果（此时 mtime 自然新），放行；
+ *  - gradle 不可用 / 执行失败 / 输出无法判定 ⇒ **判红**（不放过，保持原姿态）。
+ * @returns {{ arbitrated: boolean, refreshed: object|null, note: string }}
+ */
+/**
+ * 纯判据：gradle 的任务收尾行 → 该任务是否「内容等价（UP-TO-DATE / FROM-CACHE）」。
+ *
+ * 抽成纯函数是为了让 `--self-test` 能覆盖这条分支（否则它只能靠真跑一次 gradle 来验证，
+ * 而 self-test 必须离线可跑）。
+ * @param line - `> Task :app:testDebugUnitTest ...` 那一行（缺省空串）。
+ * @returns `equivalent`（输入未变，报告内容等价）/ `executed`（真的跑过，报告已刷新）/ `unknown`。
+ */
+export function arbitrationFromTaskLine(line) {
+  if (typeof line !== 'string' || line === '') return 'unknown'
+  if (line.includes('UP-TO-DATE') || line.includes('FROM-CACHE')) return 'equivalent'
+  if (line.includes('Task :app:testDebugUnitTest')) return 'executed'
+  return 'unknown'
+}
+
+function arbitrateStaleness() {
+  const gradlew = process.platform === 'win32' ? 'gradlew.bat' : './gradlew'
+  const args = [':app:testDebugUnitTest', '--no-daemon', '--console=plain']
+  let r = spawnSync(gradlew, args, { cwd: APK, encoding: 'utf8', timeout: 15 * 60 * 1000 })
+  // Windows 上 `spawnSync('gradlew.bat')` 在无 shell 时直接 EINVAL（本机实测；与 check-plugin-tests
+  // 的 npm.cmd 同因）。先直调，spawn 失败再退到 shell:true 重试——只影响「怎么起 gradle」。
+  if (r.error !== undefined || r.status === null) {
+    r = spawnSync(gradlew, args, { cwd: APK, encoding: 'utf8', timeout: 15 * 60 * 1000, shell: true })
+  }
+  if (r.error !== undefined && r.error !== null) {
+    return { arbitrated: false, refreshed: null, note: 'gradle 不可用：' + String(r.error.code ?? r.error.message) }
+  }
+  const out = (r.stdout ?? '') + (r.stderr ?? '')
+  if (r.status !== 0) {
+    return { arbitrated: false, refreshed: null, note: 'gradle 执行失败（status=' + String(r.status) + '）' }
+  }
+  // 该任务的收尾行：UP-TO-DATE / FROM-CACHE / 真执行（无后缀）
+  const line = out.split('\n').find((l) => l.includes('Task :app:testDebugUnitTest')) ?? ''
+  const verdict = arbitrationFromTaskLine(line)
+  const refreshed = parseResults(RESULTS_DIR)
+  if (verdict === 'equivalent') {
+    return {
+      arbitrated: true, refreshed,
+      note: 'mtime 假阳性：gradle 判定 :app:testDebugUnitTest ' + (line.includes('UP-TO-DATE') ? 'UP-TO-DATE' : 'FROM-CACHE')
+        + '（输入未变 ⇒ 报告与当前源码内容等价），按新鲜继续校验',
+    }
+  }
+  if (verdict === 'executed') {
+    return { arbitrated: true, refreshed, note: 'mtime 命中后已重跑单测，报告已刷新（任务真的执行过）' }
+  }
+  return { arbitrated: false, refreshed: null, note: 'gradle 输出无法判定任务状态（既非 UP-TO-DATE/FROM-CACHE 也非执行行）' }
 }
 
 /**
@@ -257,12 +321,22 @@ function selfTest() {
     check('反向：存在失败用例 → 判红', r.failures.some((f) => f.includes('失败')), r.failures.join('; '))
   }
 
+  // H-2：仲裁判据的正/反向（纯函数；真跑 gradle 的分支由本轮实测覆盖）
+  check('仲裁：UP-TO-DATE ⇒ 内容等价（mtime 假阳性应放行）',
+    arbitrationFromTaskLine('> Task :app:testDebugUnitTest UP-TO-DATE') === 'equivalent')
+  check('仲裁：FROM-CACHE ⇒ 内容等价',
+    arbitrationFromTaskLine('> Task :app:testDebugUnitTest FROM-CACHE') === 'equivalent')
+  check('仲裁：真执行 ⇒ 已刷新（放行且重读报告）',
+    arbitrationFromTaskLine('> Task :app:testDebugUnitTest') === 'executed')
+  check('仲裁：输出无法判定 ⇒ unknown（调用方必须 fail-closed）',
+    arbitrationFromTaskLine('') === 'unknown' && arbitrationFromTaskLine('something else') === 'unknown')
+
   console.log('')
   if (failures.length > 0) {
     console.error('KOTLIN-TEST-COUNT SELF-TEST FAILED: ' + failures.join(' / '))
     process.exit(1)
   }
-  console.log('KOTLIN-TEST-COUNT SELF-TEST PASSED（6 条：1 正向 + 5 反向）')
+  console.log('KOTLIN-TEST-COUNT SELF-TEST PASSED（10 条：1 正向 + 5 反向 + 4 条仲裁判据）')
 }
 
 // ── main ──────────────────────────────────────────────────────────────────────
@@ -326,8 +400,24 @@ if (argv.includes('--self-test')) {
     if (t > srcMtimeMs) srcMtimeMs = t
   }
 
-  const { failures, notes } = evaluate({ results, classes, baseline, srcMtimeMs })
-  const totalNow = Object.values(results).reduce((s, r) => s + r.tests, 0)
+  // H-2：mtime 只是**触发**。一旦它说陈旧，先问 gradle（唯一权威的内容哈希判据）再决定红/绿。
+  const staleByMtime = Object.values(results).some((r) => r.mtimeMs < srcMtimeMs)
+  let adjudicated = null
+  if (staleByMtime && !SKIP_REASON) {
+    adjudicated = arbitrateStaleness()
+  }
+  // 仲裁放行（内容等价或已刷新）时，用仲裁结果替代 mtime 判据：把 srcMtimeMs 归零即「不按 mtime 判红」。
+  const effectiveSrcMtime = adjudicated !== null && adjudicated.arbitrated ? 0 : srcMtimeMs
+  const effectiveResults = adjudicated !== null && adjudicated.arbitrated && adjudicated.refreshed !== null
+    ? adjudicated.refreshed
+    : results
+
+  const { failures, notes } = evaluate({ results: effectiveResults, classes, baseline, srcMtimeMs: effectiveSrcMtime })
+  if (adjudicated !== null) {
+    if (adjudicated.arbitrated) console.log('NOTE  ' + adjudicated.note)
+    else failures.push('结果陈旧且无法仲裁：' + adjudicated.note)
+  }
+  const totalNow = Object.values(effectiveResults).reduce((s, r) => s + r.tests, 0)
 
   console.log('Kotlin 单测: 源测试类=' + classes.length + ' 有结果=' + Object.keys(results).length
     + ' 用例总数=' + totalNow + '（基线 ' + baseline.totalTests + '）')

@@ -10,6 +10,7 @@ import { apply } from '../lib/index.js'
 import {
   SessionNotifyState,
   TURN_END_KINDS,
+  boundReportBody,
   formatDuration,
   reportOutcomeLabel,
   sessionTag,
@@ -19,6 +20,9 @@ import {
   todoProgress,
   turnEndKind,
   turnEndOk,
+  visibleText,
+  REPORT_BODY_MAX,
+  REPORT_BODY_TRUNCATED,
 } from '../lib/notify-projection.js'
 
 const NOW = 1_800_000_000_000
@@ -275,4 +279,172 @@ test('未知 reason 时 kind 不得是 completed（防「把未知当成功」�
     assert.equal(line.kind, 'unknown', '未知 reason 的稳定占位是 unknown（T5 据此显示「结果未知」）')
     assert.equal(reportOutcomeLabel(line.kind), '结果未知', 'unknown 的文案不得是「已完成」')
   }
+})
+
+// ── 0.14.1 设备缺陷：汇报摘要必须只取可见正文（不得把思考块当回答）────────────────────
+//
+// 缺陷本体（设备实报：「长按查看详情」显示的不是最终输出，而是某一段的思考内容）：
+// 上游 `TextBlock { type:'text'; text }` 与 `ReasoningBlock { type:'reasoning'; text }`
+// **共用 `text` 字段名**（dsh/packages/llm/llm/src/types.ts:54-64）。投影层写的是
+// `content.map(c => c.text ?? '').join('')`——**按字段取值而不按类型过滤**；思考块在一条
+// assistant message 里通常排在最前，再经 `summarize(text, 120)` 硬截断，于是报告栏首行
+// 呈现的正是思考的开头。同一条 summary 还是通知展开正文与 `.live.ndjson` 的 `sum` 来源，
+// 故这组用例同时断言两个信道。
+//
+// 形为「行为测试」而非 grep：真的走 apply() 注册的 session/event 监听，再把文件读回来。
+
+/** 用桩 ctx 跑一次 apply()，emit 给定事件序列，回读两个信道的行。 */
+function notifyChannelsFrom(events) {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-d5-notify-'))
+  process.env.DSH_HOME = dir
+  const listeners = new Map()
+  const ctx = {
+    logger: () => ({ warn: () => {}, debug: () => {} }),
+    tools: { register: () => {} },
+    get: () => undefined,
+    provide: () => {},
+    effect: () => () => {},
+    on: (event, handler) => { listeners.set(event, handler); return () => {} },
+  }
+  apply(ctx)
+  const emit = listeners.get('session/event')
+  assert.equal(typeof emit, 'function', 'apply() 必须注册 session/event 监听')
+  for (const ev of events) emit({ id: 's1' }, ev)
+  const readLines = (name) => {
+    let raw = ''
+    try { raw = readFileSync(join(dir, name), 'utf8') } catch { return [] }
+    return raw.split('\n').filter((line) => line.trim() !== '').map((line) => JSON.parse(line))
+  }
+  return { notify: readLines('.notify.ndjson'), live: readLines('.live.ndjson') }
+}
+
+// 思考段刻意排在正文之前（上游常态），且带一个只属于思考的标记串供反证引用。
+const THINKING_TEXT = '先判断用户到底要什么，再决定用哪个工具，这段推理绝不该出现在汇报里'
+const VISIBLE_TEXT = '三处缺陷都已修好，门禁全绿。'
+
+/** 一轮：assistant/message（给定 content 块）+ turn/end，返回两个信道的行。 */
+function oneTurn(contentBlocks) {
+  return notifyChannelsFrom([
+    { type: 'turn/start', data: { turn: 1 } },
+    { type: 'assistant/message', data: { message: { content: contentBlocks } } },
+    { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } },
+  ])
+}
+
+test('D5：汇报摘要只取 type==="text"，思考块不得混入（报告栏与通知同源）', () => {
+  const { notify, live } = oneTurn([
+    { type: 'reasoning', text: THINKING_TEXT },
+    { type: 'text', text: VISIBLE_TEXT },
+  ])
+  const report = notify.find((e) => e.kind === 'report')
+  assert.ok(report, '必须写出 report 行（报告栏的数据源）')
+  assert.equal(report.summary, VISIBLE_TEXT, '摘要必须是可见正文本身')
+  assert.equal(report.summary.includes('绝不该出现'), false, '思考文本不得进入汇报摘要')
+  const textLine = live.find((e) => e.k === 'text')
+  assert.ok(textLine, '必须写出 .live.ndjson 的 text 行（工具行 chip 的数据源）')
+  assert.equal(textLine.sum, VISIBLE_TEXT)
+  assert.equal(textLine.sum.includes('绝不该出现'), false, '实时流不得把思考当回答')
+})
+
+test('D5 反证：思考块排在正文之后、或夹在中间，同样不得混入（顺序无关）', () => {
+  for (const blocks of [
+    [{ type: 'text', text: VISIBLE_TEXT }, { type: 'reasoning', text: THINKING_TEXT }],
+    [{ type: 'reasoning', text: THINKING_TEXT }, { type: 'text', text: VISIBLE_TEXT }, { type: 'reasoning', text: THINKING_TEXT }],
+  ]) {
+    const report = oneTurn(blocks).notify.find((e) => e.kind === 'report')
+    assert.equal(report.summary, VISIBLE_TEXT, JSON.stringify(blocks))
+  }
+})
+
+test('D5 退化：只产出思考时摘要为空，绝不把思考当回答顶上去', () => {
+  const report = oneTurn([{ type: 'reasoning', text: THINKING_TEXT }]).notify.find((e) => e.kind === 'report')
+  assert.equal(report.summary, '', '没有可见正文时摘要必须为空')
+  assert.equal(report.outcomeLabel, '已完成', '空摘要下首行退化为只有结果标签（可接受的结果退化，优于显示思考）')
+})
+
+test('D5 兼容分支：整条消息无任何块带 type 时才退化为取全部 text', () => {
+  // 上游恒定带 type；这条兜底只为「未知 provider 的旧形状」，避免从「显示思考」劣化成「什么都不显示」。
+  assert.equal(visibleText([{ text: 'A' }, { text: 'B' }]), 'AB')
+  assert.equal(visibleText([{ type: 'text', text: 'A' }, { type: 'reasoning', text: 'B' }]), 'A')
+  assert.equal(visibleText([{ type: 'tool-call', text: '不是正文' }]), '')
+  assert.equal(visibleText([{ type: 'reasoning', text: THINKING_TEXT }, undefined, 'not-an-object']), '')
+  assert.equal(visibleText(undefined), '')
+  assert.equal(visibleText('不是数组'), '')
+})
+
+test('D5 源码门禁：不得再出现「按字段取值拼 content」的写法', () => {
+  const src = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
+  const code = src
+    .split('\n')
+    .filter((l) => !l.trimStart().startsWith('//') && !l.trimStart().startsWith('*'))
+    .join('\n')
+  assert.equal(
+    /content\.map\(\s*\(\s*c\s*\)\s*=>\s*c\.text/.test(code),
+    false,
+    'D5：不得再按字段取值拼 content（思考块与正文块共用 text 字段名，必须按 type 过滤）',
+  )
+  assert.match(code, /visibleText\(content\)/, 'D5：两条 assistant/message 路径都必须走 visibleText')
+})
+
+// ── 0.14.1 D6：报告栏可滚动正文（摘要之外必须真的有可滚的内容）────────────────────
+//
+// 设备实报「长按查看详情…无法在不改变窗口大小的情况下滚动查看输出」。代码事实：
+//   ① 报告栏此前只渲染 head+summary / 用时·工具 / 产出 三行；
+//   ② summary 经单行化 + `summarize(text, 120)` 硬截断 → **恒不超高** → 滚动区间恒为 0。
+// 即「栏内可滚动」这条验收判据在 120 字上限下恒真而无意义：不是滚动坏了，是没有可滚的内容。
+// 修法是把该轮可见正文有界地一并落进 report 条目（8 KiB + 显式截断标记）。
+// 下面同时钉住「有界」这一半——无界落盘会把 512 KiB 的信道几十轮就撑爆、把历史汇报挤掉。
+
+test('D6：summary 截到 120 字，body 保留全文（二者同源不同用途）', () => {
+  const s = new SessionNotifyState()
+  s.startTurn('s1', 1, NOW)
+  const long = '正文段落。'.repeat(60)      // 300 字，远超 120
+  s.setSummary('s1', long)
+  const r = s.endTurn({ sessionId: 's1', turn: 1, reason: { kind: 'completed' }, now: NOW + 10 })
+  assert.equal(r.summary.length, 120, '摘要仍按既有口径硬截断')
+  assert.equal(r.body.length, long.length, '正文必须保留全文（这是「可滚动」的前提）')
+  assert.equal(r.body, long)
+  assert.equal(r.body.startsWith(r.summary.slice(0, 20)), true, '两者同源：正文以摘要开头')
+})
+
+test('D6：正文必须有界（8 KiB）+ 显式截断标记，不得静默截断', () => {
+  const s = new SessionNotifyState()
+  s.startTurn('s1', 1, NOW)
+  s.setSummary('s1', 'x'.repeat(REPORT_BODY_MAX * 2))
+  const r = s.endTurn({ sessionId: 's1', turn: 1, reason: { kind: 'completed' }, now: NOW + 10 })
+  assert.equal(r.body.length, REPORT_BODY_MAX + REPORT_BODY_TRUNCATED.length, '正文长度必须是上限 + 标记')
+  assert.equal(r.body.endsWith(REPORT_BODY_TRUNCATED), true, '截断必须显式，用户不得把截断处当全文结尾')
+  assert.equal(REPORT_BODY_MAX <= 16 * 1024, true, '单轮正文上限必须远小于信道轮转上限（512 KiB）')
+})
+
+test('D6：正文不得跨轮残留（新一轮开始即清空）', () => {
+  const s = new SessionNotifyState()
+  s.startTurn('s1', 1, NOW)
+  s.setSummary('s1', '第一轮正文')
+  s.endTurn({ sessionId: 's1', turn: 1, reason: { kind: 'completed' }, now: NOW + 10 })
+  s.startTurn('s1', 2, NOW + 20)
+  const r = s.endTurn({ sessionId: 's1', turn: 2, reason: { kind: 'completed' }, now: NOW + 30 })
+  assert.equal(r.body, '', '新一轮没有正文时不得把上一轮的正文带出来')
+  assert.equal(r.summary, '')
+})
+
+test('D6：只产出思考块时正文为空（与 D5 的过滤一致，不得把思考当正文落盘）', () => {
+  const report = oneTurn([{ type: 'reasoning', text: THINKING_TEXT }]).notify.find((e) => e.kind === 'report')
+  assert.equal(report.body, '')
+  assert.equal(JSON.stringify(report).includes('绝不该出现'), false, '思考文本不得进入任何落盘字段')
+})
+
+test('D6 行为面：report 行必须带 body 且等于可见正文全文', () => {
+  const report = oneTurn([
+    { type: 'reasoning', text: THINKING_TEXT },
+    { type: 'text', text: VISIBLE_TEXT },
+  ]).notify.find((e) => e.kind === 'report')
+  assert.equal(report.body, VISIBLE_TEXT, '.notify.ndjson 的 report 须携带正文供壳侧滚动区渲染')
+})
+
+test('D6 兼容分支：boundReportBody 对空值/非字符串安全', () => {
+  assert.equal(boundReportBody(undefined), '')
+  assert.equal(boundReportBody(''), '')
+  assert.equal(boundReportBody('   '), '')
+  assert.equal(boundReportBody('保留\n换行'), '保留\n换行', '正文必须保留换行（报告栏按原样多行渲染）')
 })

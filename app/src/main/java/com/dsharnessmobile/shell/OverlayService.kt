@@ -143,6 +143,9 @@ class OverlayService : Service() {
   override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
     super.onConfigurationChanged(newConfig)
     if (expanded) panel.applyThemeColors()
+    // P5-3：空闲态光环按主题取色，而 haloView 的 drawable 是手工构造的（不随 uiMode 自动更新）
+    // ——不在此重刷就会出现「切到深色后空闲光环仍是浅色主题的灰」。
+    halo.refreshTheme()
     // 旋转后旧的 x/y 可能超出新屏幕（竖屏拖到 y≈1400，转横屏 1600×900 后 y>900 → 球出屏消失）。
     val p = rootParams ?: return
     clampBallPos(p)
@@ -535,7 +538,11 @@ class OverlayService : Service() {
           // 块H-A1：完成态分支在 updateBallOnly 的分支链里**优先于** else 常态分支（详档 §5.1），
           // 而本处是绕过分支链的直接赋值——两者必须同口径，否则完成文案会被每 10s 的探活
           // tick 覆写成「引擎离线」。故有完成文案时交由分支链负责（详档 §6.3 回归面）。
-          if (completionLabel().isEmpty()) {
+          // S2-14（本批修）：**待答态同样要排除**。旧判据只看完成文案，于是球处在
+          // 「等待你的回答…」（question/approval 待处理）时，只要引擎此刻探活失败，
+          // 这句最要紧的话就被 tick 覆写成「引擎离线」——用户正要作答的提示被抹掉。
+          // 判据统一：有更具体的话要说（完成态 / 待答态）时，本处一律让位给分支链。
+          if (completionLabel().isEmpty() && pendingKind.isEmpty()) {
             panel.statusText?.let { ShimmerTextView::class.java.cast(it).setShimmering(false); it.setTextColor(0xFFE04848.toInt()); it.text = "引擎离线" }
           }
         }
@@ -597,9 +604,12 @@ class OverlayService : Service() {
     }.start()
   }
 
-  /** 停止当前轮次：仅工作中可用（无轮次时按钮已置灰，不再静默 return——P4）。 */
+  /** 停止当前轮次：仅工作中可用（无轮次时按钮已置灰，不再静默 return——P4/P0-6）。 */
   internal fun requestStop() {
-    if (!sessionBusy) return
+    // 注释此前就写着「不再静默 return」，而代码里这一行一直在静默返回（P0-6 复核发现：
+    // 注释说的修法与代码不一致）。按钮现已按忙态真正禁用，此支只剩「渲染与点击之间的竞态」，
+    // 仍要给出可见回执——用户视角里「点了没反应」正是这样产生的。
+    if (!sessionBusy) { flashStatus("当前没有正在运行的任务"); return }
     if (!engineRunning) { flashStatus("引擎离线，无法停止"); return }
     if (activeSessionId.isEmpty()) { flashStatus("无活动会话"); return }
     setHalo(Halo.WORKING)
@@ -721,7 +731,33 @@ class OverlayService : Service() {
       }
       startActivity(intent)
     } catch (e: Exception) {
+      // S2-2：失败不得只写日志（用户按了三下，什么都没发生）。面板此刻必然是展开态
+      // （该手势挂在展开面板的状态行上），故 flashStatus 一定可见。
       LogCollector.log("dsh-overlay", "jump to app failed: " + (e.message ?: e.javaClass.simpleName))
+      flashStatus("跳转失败，请手动切到 DSH")
+    }
+  }
+
+  /**
+   * 面板因自动化（`android_*` 工具）执行而被自动收起时的可见说明（S2-13）。
+   *
+   * 为什么用 Toast 而不是状态行：此刻面板**已经收起**，状态行没人看得到（这正是旧实现
+   * 「不给说明」的根因——它想说也没地方说）。Toast 不依赖任何窗口存活，正是这个场景的合适原语。
+   * 文案要回答三个问题：谁收的（自动化在执行）、为什么（面板会挡住被控应用）、怎么回来（点球）。
+   */
+  internal fun notifyAutoCollapsedForAutomation() {
+    main.post {
+      try {
+        android.widget.Toast.makeText(
+          this,
+          "自动化执行中，已临时收起面板（面板会挡住被控应用）。工具跑完后点球可再打开。",
+          android.widget.Toast.LENGTH_LONG,
+        ).show()
+      } catch (_: Exception) {
+        // Toast 在某些 ROM 的后台限制下会失败——失败不静默：留日志（这条提示是尽力而为的告知，
+        // 不影响自动化本身）。
+        LogCollector.log("dsh-overlay", "auto-collapse toast failed (automation hint dropped)")
+      }
     }
   }
 

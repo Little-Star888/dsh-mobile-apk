@@ -29,8 +29,19 @@ export interface VdisplayFace {
   /**
    * 控制队列调用面（与 dsh-android-bridge 的 androidPrivilege.controlExec 同形）。
    * `vd*` 是 neverA11y 的壳桥 op：本插件只借队列投递，绝不把 op 加进 A11Y_OPS。
+   *
+   * `auth.session` **不是可选装饰**：`vdInput` / `vdLaunch` / `vdLaunchApp` / `vdMoveTask` 在
+   * bridge 的 `TIER_REQUIRED_OPS` 内，服务面按「显式 auth > 异步上下文绑定 > 无」解析调用方会话，
+   * 解析不到即 fail-closed 拒绝。0.14.1 设备实测（W2 真实任务）：本插件从不传 auth、也不调
+   * `bindSession` ⇒ `android_vdisplay_input` **恒**被拒（回执「缺少调用方会话」），
+   * 模型只能退回 `android_shell_exec` 裸跑 `input -d`——能力被承诺而不可用。
    */
-  controlExec?(op: VdOp, args: Record<string, unknown>, timeoutMs?: number): Promise<VdControlReply>
+  controlExec?(
+    op: VdOp,
+    args: Record<string, unknown>,
+    timeoutMs?: number,
+    auth?: { session?: unknown; internal?: string },
+  ): Promise<VdControlReply>
 }
 
 /** 控制队列回执（逐字段收窄；失败一律带结构化 error）。 */

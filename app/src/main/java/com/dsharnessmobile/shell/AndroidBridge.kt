@@ -32,7 +32,7 @@ class AndroidBridge(
   private val onGetImmersiveMode: () -> Boolean = { ImmersiveMode.current() },
   private val onCopyTextRequest: (text: String) -> Boolean = { false },
   private val pickToken: String? = null,
-  private val onRestartEngine: () -> Unit = {},
+  private val onRestartEngine: () -> Boolean = { false },
   private val onShutdownToGuide: () -> Unit = {},
   private val onReloadWebUI: () -> Unit = {},
   private val onOpenConsole: () -> Unit = {},
@@ -84,6 +84,23 @@ class AndroidBridge(
   /** 0.13.5 W4：一键解锁受限设置（Android 13+ 侧载应用默认禁止开启无障碍）。返回 JSON {ok, message}。 */
   private val onUnlockRestrictedSettings: () -> String = { """{"ok":false,"message":"未接线"}""" },
   /**
+   * 0.14.1 设置页「手机控制」：外链唯一出口。页面只能传 key（`shizuku-download` /
+   * `shizuku-tutorial`），URL 表在壳侧 [ExternalLinks]——页面不得传任意地址。
+   */
+  private val onOpenExternalLink: (String) -> String =
+    { _ -> """{"ok":false,"reason":"bridge not wired"}""" },
+  /** 0.14.1 设置页「手机控制」：拉起 Shizuku 管理器界面（未安装 → `not-installed`）。 */
+  private val onOpenShizukuManager: () -> String =
+    { """{"ok":false,"reason":"bridge not wired"}""" },
+  /**
+   * 0.14.1 设置页「手机控制」：Shizuku 特权通道**真实状态**（[ShizukuTransport.status] 全文）。
+   *
+   * 此前该页面拿不到任何 Shizuku 事实：唯一的间接来源是 `vdisplayStatus()`——它只在虚拟屏处于
+   * blocked 时顺带透出 Shizuku 的 code/guidance，其余时候同一位置讲的是虚拟屏。于是标题写着
+   * 「Shizuku 特权通道」、内容却是虚拟屏状态（0.14.1 UI 审查 P0）。本方法是那个错位的正解。
+   */
+  private val onShizukuStatus: () -> String = { """{"ok":false,"code":"shizuku-not-wired"}""" },
+  /**
    * 0.14.1 块J FIX-4：通知设置**读**面（key 为空 = 全量快照）。
    *
    * 默认实现与 [onGetImmersiveMode] 同款：**直接读壳侧单一真源**（`ShellAppContext` 由
@@ -108,6 +125,33 @@ class AndroidBridge(
     val app = ShellAppContext.get()
     if (app == null) """{"ok":false,"reason":"no-shell-context"}"""
     else NotifyCenter.applySetting(app, key, value).toString()
+  },
+  /**
+   * 0.14.1 批 4：通知**自检**（`NotifyCenter.selfCheck` 的页面入口）。
+   *
+   * 此前 `selfCheck` / `appSettingsIntent` / `channelSettingsIntent` 三者在页面侧**零调用点**：
+   * 系统把渠道降级（用户关掉或 ROM 改了重要性）时，应用看得见、用户看不见，「系统已降级，
+   * 应用无法调回」这句提示永远到不了用户眼前。与 FIX-4 同款修法：默认实现钉在真源上，
+   * 不依赖 MainActivity 传参（漏接线这一失效形态从结构上消失）。
+   */
+  private val onNotifySelfCheck: () -> String = {
+    val app = ShellAppContext.get()
+    if (app == null) """{"ok":false,"reason":"no-shell-context"}"""
+    else NotifyCenter.selfCheck(app).toString()
+  },
+  /** 页面的「打开系统通知设置」入口（App 级）。 */
+  private val onOpenNotifyAppSettings: () -> Boolean = { false },
+  /** 页面的「打开该渠道的系统设置」入口（渠道级）。 */
+  private val onOpenNotifyChannelSettings: (String) -> Boolean = { _ -> false },
+  /**
+   * 页面的「发送测试通知」入口（0.14.1 批 8 / S3-26）。
+   *
+   * 默认实现同样钉在真源上（`NotifyCenter.sendTestAll`），不依赖 MainActivity 传参——`sendTest`
+   * 此前全仓零调用点的成因就是「能力在、没人接线」。返回实际投递条数（0 = 没发出去，页面如实提示）。
+   */
+  private val onNotifySendTest: () -> Int = {
+    val app = ShellAppContext.get()
+    if (app == null) 0 else NotifyCenter.sendTestAll(app)
   },
 ) {
 
@@ -204,11 +248,14 @@ class AndroidBridge(
   @JavascriptInterface
   fun getPickToken(): String? = pickToken
 
-  /** Restart the engine service process: kill the engine, the EngineService watchdog brings it back. */
+  /**
+   * Restart the engine service process: kill the engine, the EngineService watchdog brings it back.
+   *
+   * S3-15：返回**是否真的发起了**重启（false = 已在重启中或上下文缺失）。页面据此决定要不要进入
+   * 「重启中…」的忙碌态——旧实现是 void，页面只能假装忙碌两秒再自己变回。
+   */
   @JavascriptInterface
-  fun restartEngine() {
-    onRestartEngine()
-  }
+  fun restartEngine(): Boolean = onRestartEngine()
 
   /** Shut down the harness: stop the engine and fall back to the init (startup/test) screen (no auto-restart). */
   @JavascriptInterface
@@ -357,9 +404,33 @@ class AndroidBridge(
     onOpenA11ySettings()
   }
 
-  /** 0.13.5 W4：一键解锁受限设置（appops set … ACCESS_RESTRICTED_SETTINGS allow，走 ADB 通道）。 */
+  /** 0.13.5 W4：一键解锁受限设置（appops set … ACCESS_RESTRICTED_SETTINGS allow，走 Shizuku 特权 shell）。 */
   @JavascriptInterface
   fun unlockRestrictedSettings(): String = onUnlockRestrictedSettings()
+
+  /**
+   * 0.14.1 设置页「手机控制」：打开登记在册的外部链接。
+   * @param key 只能是 `shizuku-download` / `shizuku-tutorial`（[ExternalLinks.keys]）；未登记一律拒收。
+   * @return JSON `{ok, reason?}`；reason ∈ `unknown-key` / `insecure-url` / `no-handler` / 异常类名。
+   */
+  @JavascriptInterface
+  fun openExternalLink(key: String): String = onOpenExternalLink(key)
+
+  /**
+   * 0.14.1 设置页「手机控制」：拉起 Shizuku 管理器界面。
+   *
+   * 授权只能由用户在 Shizuku 内完成（被提权方不得自改授权），故壳侧只负责把人送到界面；
+   * 未安装时回 `{"ok":false,"reason":"not-installed"}`，由页面提示去下载。
+   */
+  @JavascriptInterface
+  fun openShizukuManager(): String = onOpenShizukuManager()
+
+  /**
+   * 0.14.1 设置页「手机控制」：Shizuku 特权通道状态（页面据此决定「打开 Shizuku」是否可点）。
+   * 字段：`installed` / `running` / `granted` / `bound` / `binding` / `code` / `guidance` / `ok`。
+   */
+  @JavascriptInterface
+  fun shizukuStatus(): String = onShizukuStatus()
 
   /**
    * 0.14.1 块J FIX-4：通知设置读回（设置页「开发者选项」的初始态与写后读回）。
@@ -379,6 +450,31 @@ class AndroidBridge(
    */
   @JavascriptInterface
   fun setNotifySetting(key: String, value: Boolean): String = onSetNotifySetting(key, value)
+
+  /**
+   * 0.14.1 批 4：通知自检（每个渠道的系统实际状态 + 是否被降级 + 该走哪个设置页）。
+   *
+   * 返回 `{ok, channels:[{category,label,channelId,importance,enabled,silenced?}], degraded:[...]}`
+   * ——页面据此显示「系统已降级，应用无法调回」并给出直达系统设置的入口（此前这条信息零调用点）。
+   */
+  @JavascriptInterface
+  fun notifySelfCheck(): String = onNotifySelfCheck()
+
+  /** 打开系统的「本应用通知设置」页；返回是否真的拉起（false = 该 ROM 无此页，页面须如实提示）。 */
+  @JavascriptInterface
+  fun openNotifyAppSettings(): Boolean = onOpenNotifyAppSettings()
+
+  /** 打开某个渠道的系统设置页（channelId 由 notifySelfCheck 给出）；返回是否真的拉起。 */
+  @JavascriptInterface
+  fun openNotifyChannelSettings(channelId: String): Boolean = onOpenNotifyChannelSettings(channelId)
+
+  /**
+   * 发送五类测试通知，返回实际投递条数（0..5）。
+   * 让用户自证「关掉某类提醒 / 系统降级渠道之后，任务完成还会不会提醒我」——渠道状态由
+   * `notifySelfCheck` 给出，本方法给的是**实际到达效果**。
+   */
+  @JavascriptInterface
+  fun notifySendTest(): Int = onNotifySendTest()
 
   companion object {
     /**

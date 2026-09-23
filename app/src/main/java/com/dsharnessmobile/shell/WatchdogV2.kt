@@ -337,8 +337,14 @@ object WatchdogV2 {
         dbg("line: " + line)
         try {
           val j = org.json.JSONObject(line)
-          // D14 同源约束：标题缺失时回落可区分标识（会话短哈希），不再回落字面量「任务完成」
-          val title = j.optString("title").ifBlank { "会话 " + markerTag(j.optString("sessionId")) }
+          // D14 同源约束：标题缺失时回落可区分标识，不再回落字面量「任务完成」。
+          // 0.14.1 批 3（P3-6）：**不再回落哈希片段**——旧实现是「会话 3f9a21」，那是内部 id 的哈希，
+          // 用户既认不出也搜不到（审查档 §4.1）。这里退回人类可读标题。
+          // 如实说明代价：旧信道**没有**会话可分性（本项目 `legacyFallback` 一律走 `kind="silent"`、
+          // dedupeKey 固定，所有帧覆盖同一条通知），所以哈希带来的「可区分」本来就只在**覆盖前后**可见，
+          // 不值得为它把机器码留在屏上。会话可分性由 `.notify.ndjson` 新信道（按会话分桶）提供。
+          val title = j.optString("title").ifBlank { "一轮任务已完成" }
+          dbg("legacy title fallback session=" + markerTag(j.optString("sessionId")))
           val snippet = j.optString("text").ifBlank { "引擎已完成一轮任务处理" }
           // NT-09 双读不双发：.notify.ndjson 已服役时旧信道只做回退（不在两处重复投递）
           val posted = NotifyStore.legacyFallback(context, title, snippet)

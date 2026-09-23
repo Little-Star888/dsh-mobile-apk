@@ -18,7 +18,11 @@ export interface AndroidShellBridge {
   /** H1: sync system-dark query (fallback for vendor WebViews whose matchMedia is stuck on light). */
   getSystemDark?: () => boolean
   /** Restart the engine service process (kill + watchdog relaunch). */
-  restartEngine?: () => void
+  /**
+   * 重启引擎；返回是否**真的发起了**（false = 已在重启中或上下文缺失）。
+   * S3-15：页面据此决定要不要进入「重启中…」的忙碌态——旧签名是 void，页面只能假装忙碌。
+   */
+  restartEngine?: () => boolean
   /** Shut down the harness: stop the engine and fall back to the init (startup/test) screen (no auto-restart). */
   shutdownToGuide?: () => void
   /** Refresh the Web UI (reload the engine page). */
@@ -51,6 +55,16 @@ export interface AndroidShellBridge {
   openA11ySettings?: () => void
   /** 0.14.0: 解锁 Android 13+ 受限设置（appops，经 Shizuku 特权 shell）。返回 JSON {ok, message}。 */
   unlockRestrictedSettings?: () => string
+  /** 0.14.1「手机控制」：打开登记在册的外部链接（系统浏览器/默认应用）。
+   *  key 只能是 `shizuku-download` / `shizuku-tutorial`——页面不传 URL，URL 表在壳侧。
+   *  返回 JSON `{ok, reason?}`（reason ∈ unknown-key / insecure-url / no-handler / 异常类名）。 */
+  openExternalLink?: (key: 'shizuku-download' | 'shizuku-tutorial') => string
+  /** 0.14.1「手机控制」：拉起 Shizuku 管理器界面（授权只能由用户在 Shizuku 内完成）。
+   *  未安装 → `{"ok":false,"reason":"not-installed"}`。 */
+  openShizukuManager?: () => string
+  /** 0.14.1「手机控制」：Shizuku 特权通道真实状态 JSON（installed/running/granted/bound/binding/code/guidance）。
+   *  这是「装没装」的事实判定来源——不是 vdisplayStatus()（后者是虚拟屏状态）。 */
+  shizukuStatus?: () => string
   /** Pre-0.13.7 implicit ACTION_VIEW on a single path (kept: the page's path clicks
    *  fall back to it when the chooser is unavailable). Returns whether it launched. */
   openNativePath?: (path: string) => boolean
@@ -97,6 +111,14 @@ export interface AndroidShellBridge {
   /** 0.14.1 块J FIX-4：通知设置写入（key = `suppressForeground` 或 `cat.<category>`）。
    *  返回写后读回的 JSON；`applied=false` 即未生效（未知 key / 读回不一致）。 */
   setNotifySetting?: (key: string, value: boolean) => string
+  /** 0.14.1 批 4：通知自检（每渠道的系统实际状态 + 是否被降级）。JSON 字符串。 */
+  notifySelfCheck?: () => string
+  /** 0.14.1 批 4：打开系统「本应用通知设置」；false = 该 ROM 无此页（页面须如实提示）。 */
+  openNotifyAppSettings?: () => boolean
+  /** 0.14.1 批 4：打开某渠道的系统设置页；false = 拉起失败。 */
+  openNotifyChannelSettings?: (channelId: string) => boolean
+  /** 发送五类测试通知，返回实际投递条数（0..5）；0 = 没发出去（权限/渠道不可用）。 */
+  notifySendTest?: () => number
 }
 
 declare global {

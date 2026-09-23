@@ -163,7 +163,10 @@ test('G-9④ 中途失败：该项标 failed、其余项照常、当前代与用
   const failed = report.items.filter((item) => item.status === 'failed')
   assert.equal(failed.length, 1)
   assert.equal(failed[0].id, 'home-cache-.node-compile-cache')
-  assert.match(failed[0].reason, /EBUSY/)
+  // 0.14.1 批 3（P3-1）：`reason` 一律是**稳定码**（页面按码翻译成人话），OS 错误串只进 `detail`
+  // ——旧断言要求 reason 里带 `EBUSY`，那正是「OS 串直接上屏」的形态，已按唯一真源反向。
+  assert.equal(failed[0].reason, 'remove-failed')
+  assert.match(failed[0].detail, /EBUSY/)
   // 其余项照常完成（不因单项失败中断）。
   assert.equal(report.removed, 2)
   assert.equal(existsSync(join(files, 'engine.log.1')), false)

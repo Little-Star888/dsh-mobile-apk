@@ -108,8 +108,8 @@ const POLYFILLS = [
 // The \\n escapes survive into the page, where the inner script resolves them at runtime.
 const BOOT_WATCHDOG_SCRIPT = `<script>(function(){
 if(window.__dshBootDiag){return}window.__dshBootDiag=true;
-var reloaded=false;
-try{reloaded=!!sessionStorage.getItem('dshBootReloaded')}catch(e){}
+// 0.14.1 批 3（S3-23）：原先这里还读 sessionStorage 的 dshBootReloaded，用来把「9 秒后自动
+// reload」限制成一次会话一次。自动 reload 已移除（用户自己点按钮），该标记随之退役。
 // 结果性判据（2026-09-18，0.14.1 块C §2.3）：原触发条件是「Loading plugins 文案在场」，而该文案由
 // 上游 boot 页创建、与失败原因**同在入口 chunk 里** —— 入口模块因语法错误（老内核 static{}）整体不执行时
 // 文案永不存在，循环每轮提前 return，诊断浮层永不出现（自我参照死角）。
@@ -312,11 +312,34 @@ function publish(report){
 function show(report){
   try{
     var d=document.createElement('div');d.id='dsh-boot-diag';
-    d.style.cssText='position:fixed;inset:0;z-index:2147483647;background:rgba(8,8,12,.97);color:#d7d7d7;font:12px/1.6 ui-monospace,Menlo,Consolas,monospace;padding:16px;overflow:auto;white-space:pre-wrap';
-    d.textContent='[dsh] 启动停留在 loading plugins（'+report.tookMs+'ms）\\n'+JSON.stringify(report,null,2)+'\\n\\n请截图本屏，或 设置→开发者选项→打开控制台 查看日志后反馈维护方。';
-    var b=document.createElement('button');b.textContent='重试加载';b.style.cssText='display:block;margin:14px auto 0;padding:8px 16px;border:1px solid #999;border-radius:8px;background:#222;color:#fff;font-size:13px;cursor:pointer';
+    d.style.cssText='position:fixed;inset:0;z-index:2147483647;background:rgba(8,8,12,.97);color:#e6e6e6;font:14px/1.7 system-ui,-apple-system,sans-serif;padding:20px;overflow:auto';
+    // 0.14.1 批 3（P3-2 / P3-3 / P3-6，同时收掉 S3-23）：旧实现把**整份英文 JSON** 铺满全屏，
+    // 并在 9 秒后自动 reload 打断阅读。现在按「人话 + 下一步 + 详情可展开」三层来：
+    // 摘要只说发生了什么与能做什么，机器细节收进折叠块（反馈时仍可截图），且不自动跳转。
+    var head=document.createElement('div');
+    head.style.cssText='font-size:15px;font-weight:600;margin-bottom:10px';
+    head.textContent='DeepCode 启动没有完成';
+    var summary=document.createElement('div');
+    summary.style.cssText='margin-bottom:6px';
+    summary.textContent='已经等待 '+Math.round(report.tookMs/1000)+' 秒，界面仍未显示出来。'
+      +'可以点下面的按钮重新加载；若反复出现，请展开详细信息截图反馈。';
+    var hint=document.createElement('div');
+    hint.style.cssText='opacity:.75;margin-bottom:14px';
+    hint.textContent='先确认网络可用；仍失败可在「设置 → 开发者选项 → 打开控制台」查看日志。';
+    var b=document.createElement('button');
+    b.textContent='重新加载';
+    b.style.cssText='display:block;margin:0 0 16px;padding:10px 20px;border:1px solid #999;border-radius:8px;background:#222;color:#fff;font-size:14px;cursor:pointer';
     b.onclick=function(){try{location.reload()}catch(e){}};
-    d.appendChild(b);document.body.appendChild(d);
+    var det=document.createElement('details');
+    var detSum=document.createElement('summary');
+    detSum.style.cssText='cursor:pointer;opacity:.85';
+    detSum.textContent='详细信息（反馈时请展开并截图）';
+    var pre=document.createElement('pre');
+    pre.style.cssText='white-space:pre-wrap;word-break:break-all;background:#111;border:1px solid #333;border-radius:8px;padding:10px;margin-top:8px;font:12px/1.6 ui-monospace,Menlo,Consolas,monospace';
+    pre.textContent=JSON.stringify(report,null,2);
+    det.appendChild(detSum);det.appendChild(pre);
+    d.appendChild(head);d.appendChild(summary);d.appendChild(hint);d.appendChild(b);d.appendChild(det);
+    document.body.appendChild(d);
   }catch(e){}
 }
 async function run(){
@@ -336,9 +359,10 @@ async function run(){
   // 壳侧解析的 k=v 口径，两边形对不上。
   try{var pub=publish(report);console.error(pub?pub.line:BOOT_STALL_PREFIX+' dsh-boot-diag source=page-stall pageSideRuntime=unavailable detail=unavailable')}catch(e){}
   show(report);
-  if(!reloaded){reloaded=true;try{sessionStorage.setItem('dshBootReloaded','1')}catch(e){}
-    setTimeout(function(){try{location.reload()}catch(e){}},9000)
-  }
+  // 0.14.1 批 3（S3-23）：**不再**在 9 秒后自动 location.reload。
+  // 旧实现的自我修复意图（issue #36「一次会话自愈一次」）代价是用户正在读的诊断浮层被整个抹掉，
+  // 且自愈重载会把「刚发生的失败现场」也一并清空（详见审查档 §3.3 第 23 行）。
+  // 现在由用户点浮层里的「重新加载」按钮决定何时重试；诊断内容与失败现场都留得住。
 }
 // 就绪快报（0.14.1 块L L-1）：**与 40s 卡住循环分开**，以 500ms 粒度在前 60s 内持续看
 // rendered()，一旦为真立刻报一条 [dsh-boot-ready] 并停止。壳侧的 stall 计时据此在产品开始
@@ -378,7 +402,20 @@ window.matchMedia=function(q){
     dispatchEvent:function(){return false}
   }
 }
-window.__dshThemeBridge={setDark:function(d){if(dark===d)return;dark=d;for(var i=0;i<listeners.length;i++){try{listeners[i]()}catch(e){}}}}
+// F1（0.14.1 白闪，issue #242）：把 uiMode 纠正还不够——入口 chunk 绘制之前，文档画布是
+// Chromium 的**默认白**，而上游页面模板的 html/body 没有任何背景声明（dsh/apps/web/index.html），
+// 于是深色主题下「引导页 → 引擎页」的切换瞬间是整屏纯白（设备录屏抽帧实测：0.37s、纯 255,255,255，
+// 不是浅色主题底色 241）。在 head 解析期就把文档底色写成主题色，第一帧即主题色；
+// 之后由上游 UI 自己接管（浅色主题同样处理，只是换成浅色底）。
+var CANVAS_DARK='#1e1e1e',CANVAS_LIGHT='#f1f3f1';
+function applyCanvasTheme(d){
+  try{
+    var de=document.documentElement;
+    de.style.background=d?CANVAS_DARK:CANVAS_LIGHT;
+    de.style.colorScheme=d?'dark':'light';
+  }catch(e){}
+}
+window.__dshThemeBridge={setDark:function(d){if(dark===d)return;dark=d;applyCanvasTheme(d);for(var i=0;i<listeners.length;i++){try{listeners[i]()}catch(e){}}}}
 try{
 // H1 (2026-08-16): pull the real uiMode synchronously on the first frame — when a vendor WebView's
 // matchMedia is stuck on light (vivo/Android 16), boot-theme and the upstream ui-theme would both get
@@ -389,6 +426,9 @@ var sysDark=false;
 if(window.androidBridge&&window.androidBridge.getSystemDark){sysDark=!!window.androidBridge.getSystemDark()}
 else{try{sysDark=!!native('(prefers-color-scheme: dark)').matches}catch(e){}}
 if(sysDark)window.__dshThemeBridge.setDark(true)
+// 读 dark 而非 sysDark：setDark 只在变化时写，且提前 return 时 dark 已是正确值，
+// 故此处恒为当前主题（两处取值相等）。
+applyCanvasTheme(dark)
 }catch(e){}
 })()</script>`;
 
@@ -400,7 +440,7 @@ onDirectoryPicked:function(callbackId,path){
 try{var h={'content-type':'application/json'};if(window.androidBridge&&window.androidBridge.getPickToken){h['x-dsh-pick-token']=window.androidBridge.getPickToken()}fetch('/api/android/dir-pick/result',{method:'POST',headers:h,body:JSON.stringify({requestId:callbackId,path:path})})}catch(e){}
 },
 onPermissionRequired:function(){
-try{alert('需要\u201c所有文件访问\u201d权限才能使用外部目录。请在系统设置中允许后重试。')}catch(e){}
+try{alert('需要\u300c所有文件访问\u300d权限才能使用外部目录。请在系统设置中允许后重试。')}catch(e){}
 },
 };
 // 2026-09-10 原生「打开方式」：壳新增 androidBridge.openPathChooser(path, mode)，
@@ -429,8 +469,14 @@ try{fetch('/api/android/dir-pick/poll',{headers:pickHeaders()}).then(function(r)
 if(j&&j.requestId&&window.androidBridge&&!requestedIds[j.requestId]){
 requestedIds[j.requestId]=true;window.androidBridge.pickDirectory(j.requestId)
 }
-}).catch(function(){}).then(function(){setTimeout(poll,500)})}catch(e){setTimeout(poll,500)}
+}).catch(function(){}).then(schedule)}catch(e){schedule()}
 }
+// S3-22：页面隐藏时暂停轮询（旧实现无条件每 500ms 打一次 /api/android/dir-pick/poll，
+// 应用切到后台/锁屏后照样打——纯耗电与日志噪声；可见时立即续上，不留空窗）。
+// 注意：本段位于模板串内，注释里不得出现反引号。
+var POLL_MS=500;
+function schedule(){if(document.hidden){return}setTimeout(poll,POLL_MS)}
+document.addEventListener('visibilitychange',function(){if(!document.hidden){schedule()}})
 poll()
 })();
 (function(){
@@ -502,6 +548,19 @@ function isPathText(text){
   if(/^https?:\\/\\//i.test(text))return false;
   return text.indexOf('/')>=0||text.indexOf('\\\\')>=0||/\\.[a-zA-Z0-9]{1,8}$/.test(text);
 }
+// 0.14.1 批 3（P3-1）：「/api/android/open-path」的**码 → 人话**表（只覆盖本端点会回的码）。
+// 本脚本是最先注入的一层，拿不到页面侧的 user-copy 模块，故自带一张最小表；
+// 注意：本段位于模板串内，注释里**不得出现反引号**（模板串会被提前截断，注入脚本整块失效，
+// 症状是引擎启动时报 SyntaxError: Unexpected identifier）——本轮踩过一次，别再踩。
+// 表外的码走兜底句，**绝不把码印给用户**（正文）。新增码时此处与页面侧表同批补。
+var OPEN_PATH_ERROR_TEXT={
+'empty-path':'没有拿到文件路径——请重新点一次文件名',
+'not-found':'这个文件不存在（可能已被删除或移动）——请刷新会话后重试',
+'not-found-in-session':'该会话的工作区里没有这个文件（可能已被删除或移动）',
+'session-unknown':'找不到该文件所属的会话——请先在会话里打开一次再试',
+'no-session':'页面没有提供会话身份——请更新应用后再试',
+'unsupported':'这种路径不支持直接打开——请在文件管理器里打开'
+};
 function openViaReader(text){
   if(text.charAt(0)==='/'){
     window.__dshOpenPath(text,'view');
@@ -518,8 +577,20 @@ function openViaReader(text){
       .then(function(result){
         var j=result.json;
         if(j&&j.abs){window.__dshOpenPath(j.abs,'view');return}
-        var detail=j&&(j.reason||j.error)?String(j.reason||j.error):('HTTP '+result.status);
-        showOpenPathNotice('无法打开该文件：'+detail+(j&&j.sessionId?'（会话 '+j.sessionId+'）':''));
+        // 0.14.1 批 3（P3-1 / P3-6）：正文只放人话。
+        //  1) 服务端已给中文 reason 时直接用；
+        //  2) 只给码（error）时按键查表，**不把码印给用户**；
+        //  3) 会话 id 与 HTTP 状态码只进 console（壳侧 LogCollector 会收走），不上屏。
+        var code=j&&(j.reason||j.error)?String(j.reason||j.error):'';
+        var known=j&&j.reason?String(j.reason):OPEN_PATH_ERROR_TEXT[code];
+        var text=known||('无法打开该文件（'+(code?'原因未在本版登记':'应用没有返回可读的原因')+'）——请重试；仍失败可复制日志反馈');
+        showOpenPathNotice('无法打开该文件：'+text);
+        try{
+          if(window.console&&console.warn){
+            console.warn('[dsh-open-path] detail code='+code+' status='+result.status
+              +' sessionId='+String((j&&j.sessionId)||''));
+          }
+        }catch(e){}
       })
       .catch(function(){showOpenPathNotice('无法打开该文件：本机端点不可达')});
   }catch(e){showOpenPathNotice('无法打开该文件：'+((e&&e.message)||'未知错误'))}
@@ -565,20 +636,44 @@ const POLYFILL_SCRIPT =
  * 也没有任何可报给维护方的信息。
  *
  * 本块的两个不变量：
- *  1. **不依赖任何上游产物**：纯内联 HTML + 内联脚本，在 `</head>` 前最先求值，故入口 chunk 全灭时
+ *  1. **不依赖任何上游产物**：纯内联 HTML + 内联脚本，在文档 head 末尾最先求值，故入口 chunk 全灭时
  *     它仍然生效（这正是「静态」二字的含义）。
- *  2. **只在失败时出现，成功后必须消失**：用 `visibility:hidden` + `#dsh-static-fallback`，并在
- *     `DOMContentLoaded` / 定时器里检查「页面是否真的渲染了」（`#root` 有子节点或 body 文本超阈值），
- *     渲染成功即移除此节点——否则健康的页面会被这层占位挡住，等于把白屏换成另一种坏。
+ *  2. **只在失败时出现，成功后必须消失**：占位**默认 `visibility:hidden`**，只有「超过阈值仍未渲染」
+ *     才现身（见下），渲染成功即移除此节点。
+ *
+ * **F2（0.14.1 白闪/误报修复，issue #242）**：上面第 2 条此前只实现了后半句——占位**没有**
+ * `visibility:hidden`，注入即可见，于是它实际被当成了「启动画面」：一次**健康但稍慢**的启动也会
+ * 先弹出一句「正在启动引擎界面…／若长时间停留在此页，请下拉退出后重新打开」的**失败**文案。
+ * 设备录屏抽帧实测：该文案与整屏纯白**同帧**出现 0.37s（`#1d1d1d` 占位带 + 纯 255 画布），
+ * 用户看到的是「先闪白再自己好了」。判据由「终态是否被移除」改为**过程性判据**：
+ * 注入后先不可见，`SHOW_DELAY_MS` 内渲染成功则一直是不可见（再移除）；超时仍未渲染才现身。
+ *
+ * 阈值取值依据：健康启动从「HTML 到达」到「#root 有子节点」的实测窗口是 0.37s 量级，
+ * 3s 留了 8 倍余量。该值**未经真机全面校准**，如需调整只改 `SHOW_DELAY_MS` 一处。
+ *
+ * **刻意不做的事**：不因 `window.onerror` 立即现身。致命失败（入口 chunk 整体不执行）**必然**
+ * 表现为「一直不渲染」，超时判据已经覆盖；而按报错现身会在「某个插件 bundle 解析失败但页面照常
+ * 渲染」这类**部分失败**上误报一次——那正是本缺陷的成因（把可疑信号当结论），不再引入。
  *
  * `window.onerror` 只**记录**（进 `window.__dshStaticErrors` 并 `console.error` 一条带
  * `[dsh-boot-stall]` 前缀的行），不吞异常、不改控制流；壳侧 `onConsoleMessage` 会把它落进
  * `boot-diag.log`（§2.3 的壳侧半边），于是「纯白下台」变成可诊断下台。
  */
-const STATIC_FALLBACK_SCRIPT = `<div id="dsh-static-fallback" style="position:fixed;z-index:2147483646;left:0;right:0;top:0;padding:12px 14px;background:#1e1e1e;color:#e8e8e8;font:13px/1.5 sans-serif">正在启动引擎界面…<br>若长时间停留在此页，请下拉退出后重新打开；仍失败请到「设置 → 开发者选项 → 打开控制台」查看日志。</div>
+const STATIC_FALLBACK_SCRIPT = `<div id="dsh-static-fallback" style="visibility:hidden;position:fixed;z-index:2147483646;left:0;right:0;top:0;padding:12px 14px;background:#1e1e1e;color:#e8e8e8;font:13px/1.5 sans-serif">正在启动引擎界面…<br>若长时间停留在此页，请下拉退出后重新打开；仍失败请到「设置 → 开发者选项 → 打开控制台」查看日志。</div>
 <script>(function(){
 if(window.__dshStaticFallback){return}window.__dshStaticFallback=true;
 window.__dshStaticErrors=[];
+// 超时现身阈值：健康启动的渲染窗口是 0.37s 量级（设备抽帧实测），3s 留 8 倍余量。
+// 该值未经真机全面校准——调整只改这一处。
+var SHOW_DELAY_MS=3000;
+var removed=false,revealed=false;
+function fallbackEl(){try{return document.getElementById('dsh-static-fallback')}catch(x){return null}}
+// F2：只有「确实卡住」才现身；现身时落一条可诊断行（壳侧 boot-diag.log 按前缀抓）。
+function revealFallback(){
+  if(removed||revealed)return;revealed=true;
+  try{var el=fallbackEl();if(el)el.style.visibility='visible'}catch(x){}
+  try{console.error('[dsh-boot-stall] dsh-boot-diag source=page-static-fallback reason=no-render-after-'+SHOW_DELAY_MS+'ms')}catch(x){}
+}
 // 记录渲染期错误（含入口 chunk 的解析/执行错误）；不吞异常、不改控制流。
 window.addEventListener('error',function(e){
   try{
@@ -590,7 +685,6 @@ window.addEventListener('error',function(e){
 },true);
 // 成功后必须移除占位：健康页面绝不能被它挡住。
 // 判据与 BOOT_WATCHDOG_SCRIPT 的 rendered() 同义（结果性判据，不依赖任何上游文案）。
-var removed=false;
 function clearStaticFallback(){
   if(removed)return;
   try{
@@ -598,13 +692,14 @@ function clearStaticFallback(){
     var body=(document.body&&document.body.textContent)||'';
     var rendered=(root&&root.children&&root.children.length>0)||body.replace(/\\s+/g,'').length>120;
     if(!rendered)return;
-    var el=document.getElementById('dsh-static-fallback');
+    var el=fallbackEl();
     if(el&&el.parentNode)el.parentNode.removeChild(el);
     removed=true;
   }catch(x){}
 }
 try{document.addEventListener('DOMContentLoaded',clearStaticFallback)}catch(x){}
 try{setInterval(clearStaticFallback,500)}catch(x){}
+try{setTimeout(function(){if(!removed)revealFallback()},SHOW_DELAY_MS)}catch(x){}
 })()</script>`;
 
 /**

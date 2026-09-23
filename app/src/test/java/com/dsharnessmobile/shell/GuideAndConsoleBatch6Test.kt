@@ -1,0 +1,309 @@
+package com.dsharnessmobile.shell
+
+import java.io.File
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+/**
+ * 0.14.1 批 6「引导页 / 权限 / 更新」的行为回归（纯 JVM，无 Robolectric）。
+ *
+ * 对应审查档 §3.1 的 S1-1…S1-18。做法与批 2/批 5 一致：
+ *  1. **纯函数判据**——语义直接可测（副文案仲裁、进度百分比、回撤文案、控制台状态契约）；
+ *  2. **源码级判据**——需要 View/Activity/WebView 的形态（按钮锁、Toast、通知渠道名、
+ *     JS 钩子接线）在 JVM 里跑不起来，就断言「修复形态在场 + 旧形态不在场」，撤掉修复即红。
+ *
+ * 设备层证据走三层验收的 B 轨（见 `docs/0.14.1-preview-UI-AUDIT.md` 的批 6 记录）。
+ */
+class GuideAndConsoleBatch6Test {
+
+  private fun source(name: String): String {
+    val candidates = listOf(
+      File("src/main/java/com/dsharnessmobile/shell", name),
+      File("app/src/main/java/com/dsharnessmobile/shell", name),
+    )
+    val f = candidates.firstOrNull { it.isFile }
+      ?: throw AssertionError("找不到壳侧源码 " + name + "（工作目录 = " + File(".").absolutePath + "）")
+    return f.readText()
+  }
+
+  private fun asset(name: String): String {
+    val candidates = listOf(File("src/main/assets", name), File("app/src/main/assets", name))
+    val f = candidates.firstOrNull { it.isFile }
+      ?: throw AssertionError("找不到前端资源 " + name + "（工作目录 = " + File(".").absolutePath + "）")
+    return f.readText()
+  }
+
+  /** 只留代码行（注释里会复述旧实现作为背景，直接对全文断言会被自己的说明判红）。 */
+  private fun codeOnly(src: String): String = src.lineSequence()
+    .filterNot {
+      val t = it.trimStart()
+      t.startsWith("//") || t.startsWith("*") || t.startsWith("/*")
+    }
+    .joinToString("\n")
+
+  // ── S1-2：副文案仲裁（旧实现五个来源无优先级抢写）──────────────────────────
+
+  @Test
+  fun `不可打断的副文案只能被同级或更高优先级顶掉`() {
+    // 锁定期（正在解压/启动/回滚）：旁路回执与流程进度都不得顶掉相位文案。
+    assertFalse(
+      "旁路回执不得顶掉「正在更新运行时」",
+      hintAccepted(HintSource.PHASE, currentSticky = true, incoming = HintSource.SIDE),
+    )
+    assertFalse(
+      "流程进度也不得顶掉不可打断的相位文案",
+      hintAccepted(HintSource.PHASE, currentSticky = true, incoming = HintSource.FLOW),
+    )
+    assertTrue(
+      "相位文案之间可以互相顶（后一个相位就是新事实）",
+      hintAccepted(HintSource.PHASE, currentSticky = true, incoming = HintSource.PHASE),
+    )
+    // 非锁定期：后写者赢（正常路径不受影响）。
+    assertTrue(hintAccepted(HintSource.PHASE, currentSticky = false, incoming = HintSource.SIDE))
+    assertTrue("还没有人写过时一律接受", hintAccepted(null, currentSticky = false, incoming = HintSource.SIDE))
+    // 优先级顺序必须是 PHASE > FLOW > SIDE（改了这里必须连带想清文案归属）。
+    assertTrue(HintSource.PHASE.priority > HintSource.FLOW.priority)
+    assertTrue(HintSource.FLOW.priority > HintSource.SIDE.priority)
+  }
+
+  @Test
+  fun `所有副文案写入都必须经唯一漏斗`() {
+    val code = codeOnly(source("GuidePageRenderer.kt"))
+    // 唯一一处直接写 statusHint.text（漏斗内部），其余一律走 pushHint。
+    val direct = Regex(Regex.escape("chrome.statusHint.text =")).findAll(code).count()
+    assertEquals("statusHint.text 只允许在 pushHint 里出现一次（旧实现有 5 处各自写）", 1, direct)
+    assertTrue("必须存在仲裁漏斗", code.contains("private fun pushHint(text: String, source: HintSource"))
+    assertTrue("相位文案走 PHASE", code.contains("pushHint(resolvedHint, HintSource.PHASE"))
+    assertTrue("旁路回执走 SIDE", code.contains("pushHint(text, HintSource.SIDE)"))
+  }
+
+  // ── S1-3：自动恢复期间主按钮必须锁住 ─────────────────────────────────────
+
+  @Test
+  fun `自动恢复期间主按钮必须锁住且文案不是重试`() {
+    val code = codeOnly(source("GuidePageRenderer.kt"))
+    assertTrue(
+      "lockPrimary 必须包含 Recovering——否则用户会去点一个与自动流程打架的「重试」",
+      Regex("""phase == GuidePhase\.Recovering\s*$""", RegexOption.MULTILINE).containsMatchIn(code) ||
+        code.contains("phase == GuidePhase.Recovering"),
+    )
+    assertTrue("Recovering 的按钮文案必须是「正在自动恢复」", code.contains("GuidePhase.Recovering -> activity.getString(R.string.ds_recovering)"))
+    assertFalse(
+      "不得再把 Recovering 归到 ds_retry（旧形态：Error, Recovering -> ds_retry）",
+      code.contains("GuidePhase.Error, GuidePhase.Recovering -> activity.getString(R.string.ds_retry)"),
+    )
+  }
+
+  // ── S1-4：进度确定化 + 口径统一 ──────────────────────────────────────────
+
+  @Test
+  fun `解压进度百分比有上限且与文案同口径`() {
+    assertEquals("0%", 0, runtimeProgressPercent(0))
+    assertEquals("半程", 50, runtimeProgressPercent(RUNTIME_UNCOMPRESSED_APPROX_BYTES / 2))
+    assertEquals(
+      "**不得宣称 100%**（不知道精确总量，100% 是「已完成」的意思）",
+      99,
+      runtimeProgressPercent(RUNTIME_UNCOMPRESSED_APPROX_BYTES),
+    )
+    assertEquals("超过估算值也只到 99", 99, runtimeProgressPercent(RUNTIME_UNCOMPRESSED_APPROX_BYTES * 2))
+    assertEquals("无法判定时回 -1（调用方据此保持不确定态）", -1, runtimeProgressPercent(1234, 0))
+    assertEquals("负数输入按 0 处理", 0, runtimeProgressPercent(-5))
+    // 副文案里的体量必须由同一常量渲染出来（不得再写死「约 700MB」）。
+    val code = codeOnly(source("GuidePageRenderer.kt"))
+    assertTrue(code.contains("RUNTIME_UNCOMPRESSED_APPROX_BYTES / 1024 / 1024"))
+    assertFalse("解压文案里不得再出现写死的 700MB", code.contains("约 700MB"))
+  }
+
+  @Test
+  fun `进度条必须能切确定态且文案含总量`() {
+    val code = codeOnly(source("GuidePageRenderer.kt"))
+    assertTrue("必须提供确定档入口", code.contains("fun setDeterminateProgress(doneBytes: Long, totalBytes: Long)"))
+    assertTrue("百分比 <0 时回不确定态", code.contains("progressBar.isIndeterminate = pct < 0"))
+    val flow = codeOnly(source("EngineStartFlow.kt"))
+    assertTrue("解压流程必须真的调它", flow.contains("setDeterminateProgress(done, RUNTIME_UNCOMPRESSED_APPROX_BYTES)"))
+    assertTrue("进度行必须同时给已写入量与总量", flow.contains("MB / 约 "))
+  }
+
+  // ── S1-5：诊断包路径不得进标题 ───────────────────────────────────────────
+
+  @Test
+  fun `错误标题不得拼诊断包绝对路径`() {
+    val flow = codeOnly(source("EngineStartFlow.kt"))
+    assertFalse(
+      "标题里不得再拼 diagnosticsLocationHint（旧形态把绝对路径塞进 18sp 标题，窄屏撑成三行）",
+      flow.contains("\"运行时更新失败（\" + diagnosticsLocationHint(dir) + \"）\""),
+    )
+    assertFalse(
+      "引擎启动失败的标题同样",
+      flow.contains("\"引擎启动失败（\" + diagnosticsLocationHint(dir) + \"）\""),
+    )
+    assertTrue("标题只说事实", flow.contains("GuidePhase.Error,\n                \"运行时更新失败\",") || flow.contains("\"运行时更新失败\","))
+    assertTrue("路径挪到副文案", flow.contains("diagnosticsLocationHint(dir) + \"。可复制该路径或打开控制台查看 engine.log。\""))
+  }
+
+  // ── S1-6：回撤文案不再是内部判定句 ───────────────────────────────────────
+
+  @Test
+  fun `回撤不可用的副文案必须是用户口径`() {
+    val internal = "插件清单已变化但点名不出失败插件：不做整份回滚（避免连用户其它插件一起回退）"
+    val shown = undoUnavailableHint(internal)
+    assertFalse("不得把内部判定句原样当副文案", shown.contains("点名不出失败插件"))
+    assertTrue("必须说清「没有回滚」这件事（用户要知道自己的插件没被动）", shown.contains("没有"))
+    assertTrue("必须给下一步", shown.contains("控制台"))
+    assertTrue("超时与「无快照」必须给出不同的说法", undoUnavailableHint("急救 CLI 超时：快照清单状态未知（非「无快照可回滚」）").contains("超时"))
+    assertTrue("无快照可回滚", undoUnavailableHint("无快照可回滚").contains("回滚点"))
+    assertTrue("未知摘要必须落到兜底句而不是空", undoUnavailableHint("??? ").contains("自动回撤没能完成"))
+    val flow = codeOnly(source("EngineStartFlow.kt"))
+    assertFalse("调用点不得再用 summary.take(120)", flow.contains("result.summary.take(120)"))
+    assertTrue(flow.contains("undoUnavailableHint(result.summary)"))
+  }
+
+  // ── S1-1：复制日志不得静默 ───────────────────────────────────────────────
+
+  @Test
+  fun `日志不存在时复制必须有回执`() {
+    val code = codeOnly(source("GuidePageRenderer.kt"))
+    assertTrue("必须给出「没有可复制的日志」回执", code.contains("R.string.ds_copy_log_empty"))
+    assertFalse("不得再静默 return", code.contains("if (text.isNullOrBlank()) return"))
+    assertTrue("成功也要回执", code.contains("R.string.ds_log_copied"))
+  }
+
+  // ── S1-7 / S1-8 / S1-9：存储 chip 的观感与动作 ───────────────────────────
+
+  @Test
+  fun `可点 chip 与纯事实 chip 必须外观可分`() {
+    val chrome = codeOnly(source("GuideChrome.kt"))
+    assertTrue("必须有按状态切换观感的入口", chrome.contains("internal fun styleStorageChip("))
+    assertTrue("可动作用强调色描边", chrome.contains("DsUi.roundRect(activity.getColor(R.color.ds_chip), pill, ink, hairline)"))
+    assertTrue("纯事实用中性色无描边", chrome.contains("DsUi.roundRect(activity.getColor(R.color.ds_chip), pill)"))
+    assertFalse(
+      "构建期不得再无条件绑定 onGrantStorage（旧形态：任何状态点它都弹授权页）",
+      chrome.contains("setOnClickListener { callbacks.onGrantStorage() }"),
+    )
+    val renderer = codeOnly(source("GuidePageRenderer.kt"))
+    assertTrue("动作随状态走", renderer.contains("runStorageChipAction(action)"))
+    assertTrue("未探测时重新探测", renderer.contains("StorageChipAction.PROBE_AGAIN"))
+    assertTrue("写入失败时复制失败详情", renderer.contains("StorageChipAction.COPY_FAILURE_DETAIL"))
+  }
+
+  // ── S1-10：授权页拉不起来不得谎报 ────────────────────────────────────────
+
+  @Test
+  fun `授权页拉起结果必须如实回报`() {
+    val checker = codeOnly(source("UpdateChecker.kt"))
+    assertTrue(
+      "requestInstallPermission 必须返回 Boolean（旧实现 void：两级 catch 都失败也不吭声）",
+      checker.contains("fun requestInstallPermission(activity: android.app.Activity): Boolean"),
+    )
+    assertTrue("两条路径都成功才回 true", checker.contains("return true") && checker.contains("return false"))
+    val renderer = codeOnly(source("GuidePageRenderer.kt"))
+    assertTrue("调用方必须按结果分支", renderer.contains("if (opened)"))
+    assertTrue("拉不起来时给可执行的替代路径", renderer.contains("R.string.ds_apk_permission_page_failed"))
+  }
+
+  // ── S1-11 / S1-12：通知权限 ──────────────────────────────────────────────
+
+  @Test
+  fun `冷启动不得弹通知权限且渠道名不得是 dsh`() {
+    val activity = codeOnly(source("MainActivity.kt"))
+    assertFalse(
+      "onCreate 里不得再直接 launch 通知权限（旧形态：应用刚打开、用户还不知道这是干什么的就弹窗）",
+      activity.contains("registerNotificationAsync"),
+    )
+    assertTrue("冷启动只记录状态", activity.contains("noteNotificationPermissionState()"))
+    assertTrue("到需要时才请求", activity.contains("fun ensureNotificationPermission(rationale: String): Boolean"))
+    assertTrue("前提说明必须在请求之前给出", activity.contains("Toast.makeText(this, rationale, Toast.LENGTH_LONG).show()"))
+    assertTrue("一次会话只请求一次", activity.contains("notifPermissionAsked"))
+    assertTrue(
+      "渠道名必须来自字符串资源（旧形态 NotificationChannel(\"dsh\", \"dsh\", …) 在系统里就显示 dsh）",
+      activity.contains("getString(R.string.ds_notify_channel_name)"),
+    )
+    assertFalse("不得再把渠道名写成 dsh", activity.contains("NotificationChannel(\"dsh\", \"dsh\""))
+    assertTrue("渠道 ID 必须仍是 dsh（保留用户既有渠道设置）", activity.contains("private const val NOTIF_CHANNEL_ID = \"dsh\""))
+  }
+
+  @Test
+  fun `通知权限缺失时内容不得被吞掉`() {
+    val activity = codeOnly(source("MainActivity.kt"))
+    assertTrue(
+      "内容必须先在应用内落地（Toast title+text）再退出——这是「不丢」的实现",
+      activity.contains("Toast.makeText(this, title + \"：\" + text, Toast.LENGTH_LONG).show()"),
+    )
+    assertFalse(
+      "不得再只 launch 然后 return（旧形态：内容消失，而调用点都是引擎重启/导出结果这类必须知道的事）",
+      activity.contains("notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)\n      return"),
+    )
+  }
+
+  // ── S1-13 / S1-14 / S1-15：首屏解释、版本号、最大宽度 ────────────────────
+
+  @Test
+  fun `首屏必须解释这是什么与为什么授权`() {
+    val chrome = codeOnly(source("GuideChrome.kt"))
+    assertTrue("品牌区必须有解释行", chrome.contains("R.string.ds_brand_explain"))
+    val renderer = codeOnly(source("GuidePageRenderer.kt"))
+    assertTrue(
+      "Idle 副文案必须说明存储权限的用途（不是劝，是说清为什么）",
+      renderer.contains("首次使用需授予存储权限"),
+    )
+  }
+
+  @Test
+  fun `版本号 pill 必须单行省略且宽度受限`() {
+    val chrome = codeOnly(source("GuideChrome.kt"))
+    assertTrue("单行", chrome.contains("maxLines = 1"))
+    assertTrue("省略号", chrome.contains("ellipsize = TextUtils.TruncateAt.END"))
+    assertTrue("宽度上限（否则长版本号把标题挤成两行）", chrome.contains("maxWidth = (res.displayMetrics.widthPixels * 0.34f).toInt()"))
+  }
+
+  @Test
+  fun `ds_guide_max_width 必须真的被引用`() {
+    val chrome = codeOnly(source("GuideChrome.kt"))
+    assertTrue("必须引用该 dimen（旧形态：全仓零引用，平板/折叠屏上卡片拉满整屏）", chrome.contains("R.dimen.ds_guide_max_width"))
+    assertTrue("必须同时用上 gutter", chrome.contains("R.dimen.ds_guide_gutter"))
+    assertTrue("宽度变化时要重算（旋转/分屏）", chrome.contains("addOnLayoutChangeListener"))
+  }
+
+  // ── S1-16 / S1-17 / S1-18：控制台 ────────────────────────────────────────
+
+  /** 剥掉 HTML/JS 注释（注释里会复述旧实现作为背景，直接对全文断言会被自己的说明判红）。 */
+  private fun htmlCode(src: String): String =
+    src.replace(Regex("""/\*[\s\S]*?\*/"""), "")
+      .lineSequence()
+      .filterNot { it.trimStart().startsWith("//") }
+      .joinToString("\n")
+
+  @Test
+  fun `控制台状态是显式契约而不是文案正则`() {
+    val html = htmlCode(asset("console.html"))
+    assertFalse(
+      "不得再对文案做子串正则判就绪（旧形态 /已启动/ 与 /退出|失败|缺失/）",
+      html.contains("/已启动/") || html.contains("退出|失败|缺失"),
+    )
+    assertTrue("必须按显式状态判", html.contains("window.__consoleState = function (state, text)"))
+    assertTrue("快照缺失必须是独立状态", html.contains("missingState"))
+    assertTrue("缺失时按钮换语义而不是留一个必然失败的重连", html.contains("restartBtn.textContent = missingState ? '返回应用' : '重连'"))
+    assertTrue("缺失时必须说清怎么办", html.contains("快照缺失：控制台依赖运行时里的 bash"))
+    val act = codeOnly(source("ConsoleActivity.kt"))
+    assertTrue("壳侧必须推状态+文案两个参数", act.contains("window.__consoleState && window.__consoleState("))
+    // 状态 wire 字符串是两侧共享契约：改名即与页面失配。
+    assertEquals("starting", ConsoleSession.State.STARTING.wire)
+    assertEquals("ready", ConsoleSession.State.READY.wire)
+    assertEquals("failed", ConsoleSession.State.FAILED.wire)
+    assertEquals("exited", ConsoleSession.State.EXITED.wire)
+    assertEquals("missing", ConsoleSession.State.MISSING.wire)
+    val wires = ConsoleSession.State.entries.map { it.wire }
+    assertEquals("状态 wire 必须互不相同", wires.size, wires.toSet().size)
+  }
+
+  @Test
+  fun `引擎离线必须给动作`() {
+    val html = asset("console.html")
+    assertTrue("离线文案要指向可点的动作", html.contains("引擎离线（点此重试）"))
+    assertTrue("必须有一行说清出路", html.contains("setEngineHint("))
+    assertTrue("引擎栏必须可点重试", html.contains("document.getElementById('enginePill').addEventListener('click'"))
+    assertTrue("必须有承载说明的元素", html.contains("id=\"engineHint\""))
+  }
+}

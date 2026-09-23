@@ -48,13 +48,13 @@ function strictFace() {
         },
       }),
     },
-    async controlExec(op, args, timeoutMs) {
+    async controlExec(op, args, timeoutMs, auth) {
       // 与生产实现同构：先读 this.controlQueue。this 丢失时就是设备上那句真实报错。
       const queue = this.controlQueue
       if (queue === undefined) {
         throw new TypeError("Cannot read properties of undefined (reading 'controlQueue')")
       }
-      calls.push({ op, args, timeoutMs })
+      calls.push({ op, args, timeoutMs, auth })
       return queue.enqueue(op)
     },
   }
@@ -186,6 +186,67 @@ test('android_vdisplay_input：text 直传不过 shell（中文可用），长�
   assert.equal(tooLong.ok, false)
   assert.equal(tooLong.code, 'invalid-arguments')
   assert.equal(calls.length, 1, '超长文本本地拦下，不再打一发')
+})
+
+// ── 0.14.1 批 2（W2 真实任务设备实测）：`vdInput` **从未成功过一次** ──────────────
+//
+// 设备证据（不是推断）：壳侧桥审计 `files/audit/audit.ndjson` 里
+//   {"action":"privileged","op":"vdInput","result":"denied-no-session"}
+// 从 0.14.1 引入本工具起，每次调用都是这一条（2026-09-20 四次、2026-09-22 一次）。
+//
+// 真因：`vdInput`/`vdLaunch`/`vdLaunchApp`/`vdMoveTask` 在 bridge 的 `TIER_REQUIRED_OPS` 内，
+// 服务面按 `resolveAuth`（**显式 auth > AsyncLocalStorage 绑定 > 无**）解析调用方会话；
+// 本插件此前只把会话放进 `payload.session`（那是壳侧**归属**校验用的），既不传 auth 也不调
+// `bindSession` ⇒ 服务面恒判「缺少调用方会话」并 fail-closed 拒绝。
+// 症状：工具描述与三处指引都承诺「虚拟屏按键/文本走 android_vdisplay_input」，模型照做只得
+// 「会话问题」，退回 `android_shell_exec` 裸跑 `input -d`——能力被承诺而不可用。
+//
+// 判据：**会话必须以 auth 形参下行**（不是只挂在 payload 上）。反证方式 = 把第 4 个实参去掉，
+// 本测试立即变红（而 payload.session 仍在，故只查 payload 的写法抓不到这个缺陷）。
+test('android_vdisplay_input：会话必须以 auth 形参**原样传对象**（vdInput 属档位门 op）', async () => {
+  const { face, calls } = strictFace()
+  const input = loadTools(face).find((t) => t.name === 'android_vdisplay_input')
+  // 会话对象（与引擎下发形态一致：`exec.agent.session` 是对象，`id` 只是它的一个字段）。
+  const session = { id: 'sess-A', snapshotEvents: () => [] }
+  const value = await input.execute({ verb: 'tap', x: 5, y: 6 }, { agent: { session } })
+  assert.equal(value.ok, true)
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].args.session, 'sess-A', 'payload.session 带的是 **id 字符串**（壳侧归属校验用）')
+  assert.ok(calls[0].auth !== undefined, 'auth 必须显式传出——否则服务面按 fail-closed 拒绝（denied-no-session）')
+  assert.equal(calls[0].auth.session, session, 'auth.session 必须是**会话对象本身**，不得降级成 id 字符串')
+})
+
+test('android_vdisplay_input：会话对象缺 id 时仍走 auth（归属键可缺、档位门不能缺）', async () => {
+  const { face, calls } = strictFace()
+  const input = loadTools(face).find((t) => t.name === 'android_vdisplay_input')
+  const session = { snapshotEvents: () => [] }   // 无 id 字段
+  await input.execute({ verb: 'tap', x: 1, y: 1 }, { agent: { session } })
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].args.session, undefined, '取不到 id 时不编造归属键')
+  assert.equal(calls[0].auth?.session, session, '档位门仍要拿到对象（否则又被 fail-closed 拒）')
+})
+
+test('android_vdisplay_create/destroy 同样带 auth（同一解析路径，不许只修一条）', async () => {
+  const { face, calls } = strictFace()
+  const tools = loadTools(face)
+  const session = { id: 'sess-B', snapshotEvents: () => [] }
+  for (const name of ['android_vdisplay_create', 'android_vdisplay_destroy']) {
+    const tool = tools.find((t) => t.name === name)
+    await tool.execute({}, { agent: { session } })
+  }
+  assert.equal(calls.length, 2)
+  for (const c of calls) {
+    assert.equal(c.auth?.session, session, c.op + ' 的会话必须走 auth（对象），而不是只挂 payload')
+  }
+})
+
+test('没有会话来源时不得伪造 auth（如实让服务面 fail-closed）', async () => {
+  const { face, calls } = strictFace()
+  const input = loadTools(face).find((t) => t.name === 'android_vdisplay_input')
+  await input.execute({ verb: 'tap', x: 1, y: 2 }, {})
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].auth, undefined, '会话缺席时必须是 undefined（编一个假会话等于绕过档位门）')
+  assert.equal(calls[0].args.session, undefined, 'payload 里同样不得凭空造会话')
 })
 // ── 0.14.0 用户实报回归：序号复用 / 空闲回收 / 销毁权限 ──────────────────────
 

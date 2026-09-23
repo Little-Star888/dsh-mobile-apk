@@ -17,6 +17,27 @@ import org.json.JSONObject
 class UpdateManager(private val context: Context) {
 
   /**
+   * 状态回执的**类型**（0.14.1 批 2 / P0-2）。
+   *
+   * 真因：旧实现把「本版没配发布源」当成**异常**抛出（`IllegalStateException`，消息里带着
+   * `overrideManifestUrl` 这个只存在于代码里的名字），调用方只能靠**字符串前缀**猜相位，于是
+   * 界面上出现「点一次检查更新 → 先弹『APK 已是最新』→ 半秒后满屏红字 + 内部术语」。
+   * 「本版不提供这项能力」与「这项能力失败了」是两回事：前者是中性事实，用户的下一步动作
+   * 也不同（前者无需处理，后者要看日志/重试）。故把结论做成**类型**，界面按类型决定相位，
+   * 不再靠前缀匹配。
+   */
+  enum class UpdateOutcome { Working, Done, Failed, NotConfigured }
+
+  /** 一次状态回执：类型 + **用户可见**文案（不允许出现内部标识符）。 */
+  data class UpdateStatus(val outcome: UpdateOutcome, val text: String)
+
+  /** 未配置可信发布源时的文案（中性事实 + 下一步，不含内部术语）。 */
+  val notConfiguredStatus = UpdateStatus(
+    UpdateOutcome.NotConfigured,
+    "本版不提供在线更新",
+  )
+
+  /**
    * Manifest URL override for testing (emulator reaches the host via
    * 10.0.2.2). Production builds point at a real release server.
    */
@@ -24,17 +45,17 @@ class UpdateManager(private val context: Context) {
 
   /**
    * Run the update flow on a background thread.
-   * @param onStatus progress text callback (any thread).
+   * @param onStatus 进度与终态回执（任意线程；**终态**由 `outcome` 判定，调用方不再猜前缀）。
    */
-  fun checkAndApply(onStatus: (String) -> Unit) {
+  fun checkAndApply(onStatus: (UpdateStatus) -> Unit) {
     Thread {
       try {
-        onStatus("检查更新…")
+        onStatus(UpdateStatus(UpdateOutcome.Working, "检查更新…"))
         // S-10：未配置可信发布源 = 未启用（不再对着模拟器别名超时，也不再给出「可用」的错觉）。
+        // 0.14.1 批 2（P0-2）：这是**能力缺失**，不是故障——如实回一个中性终态，界面据此走 Info 相位。
         if (manifestUrl.isBlank()) {
-          throw IllegalStateException(
-            "在线更新未启用：未配置可信发布源（需 HTTPS + 签名；本地联调用 overrideManifestUrl 打开）",
-          )
+          onStatus(notConfiguredStatus)
+          return@Thread
         }
         val manifest = JSONObject(fetch(manifestUrl))
         val url = manifest.getString("url")
@@ -43,18 +64,18 @@ class UpdateManager(private val context: Context) {
         val expectedSha = manifest.getString("sha256")
         val declaredSize = manifest.optLong("size", 0)
 
-        onStatus("下载快照（" + (declaredSize / 1024 / 1024) + " MB）…")
+        onStatus(UpdateStatus(UpdateOutcome.Working, "下载快照（" + (declaredSize / 1024 / 1024) + " MB）…"))
         val tmp = File(context.filesDir, "update.tar.xz")
         download(url, tmp, declaredSize)
 
-        onStatus("校验…")
+        onStatus(UpdateStatus(UpdateOutcome.Working, "校验…"))
         val actual = sha256(tmp)
         if (!actual.equals(expectedSha, ignoreCase = true)) {
           tmp.delete()
           throw IllegalStateException("SHA256 不匹配: " + actual.take(12) + "…")
         }
 
-        onStatus("解压新快照…")
+        onStatus(UpdateStatus(UpdateOutcome.Working, "解压新快照…"))
         // The archive holds a usr/ prefix; stage it OUTSIDE the live tree.
         val stage = File(context.filesDir, "update-stage")
         SnapshotFs.deletePath(stage)
@@ -65,7 +86,7 @@ class UpdateManager(private val context: Context) {
         val newUsr = File(stage, "usr")
         if (!File(newUsr, "bin/node").exists()) throw IllegalStateException("新快照缺少 node")
 
-        onStatus("切换运行时…")
+        onStatus(UpdateStatus(UpdateOutcome.Working, "切换运行时…"))
         val usr = File(context.filesDir, "usr")
         val old = File(context.filesDir, "usr-old")
         SnapshotFs.deletePath(old)
@@ -96,11 +117,52 @@ class UpdateManager(private val context: Context) {
         if (expectedSha.isNotEmpty()) {
           File(context.filesDir, ".snapshot-fingerprint").writeText(expectedSha)
         }
-        onStatus("更新完成，引擎已自动重启")
+        onStatus(UpdateStatus(UpdateOutcome.Done, "更新完成，引擎已自动重启"))
       } catch (t: Throwable) {
-        onStatus("更新失败：" + (t.message ?: t.javaClass.simpleName))
+        // 失败文案也要能读懂：异常自带的内部措辞（HTTP 码、Java 类名）不上屏，只进日志。
+        Log.w("dsh-update", "update failed: " + t.message)
+        onStatus(UpdateStatus(UpdateOutcome.Failed, "更新失败：" + UpdateFailures.humanize(t)))
       }
     }.start()
+  }
+
+  /**
+   * 更新失败 → **用户可读**的原因（0.14.1 批 2 §4.1：机器码/内部标识一律不上屏）。
+   *
+   * 每条都必须说清「发生了什么 + 你现在能做什么」，且不得出现 Java 类名、URI、内部字段名。
+   * 无法归类时如实说「未完成」并指向日志——不编造原因，也不把内部错误串直接倒给用户。
+   * 纯函数（不碰 context / 网络），可直接 JVM 单测。
+   */
+  internal object UpdateFailures {
+    fun humanize(t: Throwable): String {
+      val m = (t.message ?: "").trim()
+      val code = Regex("HTTP (\\d{3})").find(m)?.groupValues?.get(1)
+      return when {
+        m.startsWith("manifest HTTP") ->
+          "暂时无法连接更新服务（服务返回 $code）——可能是发布源已下线或网络被拦截，请稍后再试"
+        m.startsWith("下载 HTTP") ->
+          "下载被中断（服务返回 $code）——请重试；多次失败可换网络后再试"
+        m.startsWith("下载体积超限") ->
+          "下载到的文件体积异常（与声明的体积不符）——已丢弃，请重试"
+        m.startsWith("SHA256 不匹配") ->
+          "下载到的文件校验不通过（内容与发布方声明不一致）——已删除，请重试"
+        m.startsWith("新快照缺少") ->
+          "新版本运行时包不完整（缺少关键组件）——本次更新已放弃，当前版本不受影响"
+        m.startsWith("切换失败") ->
+          "运行时切换失败，已自动回退到原版本——可稍后重试，或打开控制台查看日志"
+        isNetworkError(t) ->
+          "网络不可达——请检查网络后重试"
+        else ->
+          "更新未完成（详细原因已写入日志）——可重试，或复制日志反馈"
+      }
+    }
+
+    /** 连接类异常（含 DNS 解析失败 / 连接被拒 / 超时）：文案统一成「网络不可达 + 下一步」。 */
+    fun isNetworkError(t: Throwable): Boolean {
+      val name = t.javaClass.name
+      return name.contains("UnknownHost") || name.contains("Connect") ||
+        name.contains("SocketTimeout") || name.contains("NoRouteToHost")
+    }
   }
 
   private fun fetch(url: String): String {

@@ -163,6 +163,26 @@ const provisionEsbuild = async () => {
   }
   return null
 }
+/**
+ * tar 可执行文件的**显式定位**（0.14.1 W1 补：不靠 PATH 里先碰见哪个）。
+ *
+ * 真因（本轮实锤，Git Bash 复现）：Windows 上 PATH 里的 `tar` 可能是 Git 自带的 **GNU tar**，它把
+ * `-tf D:\...\snapshot.tar.xz` 里的 `D:` 当**远端主机名**解析，报
+ * 「tar: Cannot connect to D: resolve failed」→ 本门禁 `die()` 退 2 → 聚合链在倒数第三条中止
+ * （同一条链在 PowerShell 下正常，因为那边解析到的是 System32 的 bsdtar）。判据本身与调用 shell 无关，
+ * 就不该由「哪个 tar 先被 PATH 命中」决定它能不能跑完。
+ *
+ * win32 优先系统 bsdtar（绝对路径），Linux/CI 仍用 PATH 里的 tar。两者都支持 `-T` 成员清单与 xz。
+ */
+const resolveTar = () => {
+  if (process.platform === 'win32') {
+    const sys = 'C:\\Windows\\System32\\tar.exe'
+    if (existsSync(sys)) return sys
+  }
+  return 'tar'
+}
+const TAR = resolveTar()
+
 /** 从 npm registry 取 metadata → 下 tgz → sha512 校验 → 解包（机制与 build-snapshot-013.mjs:196-217 同款；不依赖 npm CLI）。 */
 const extractNpmTgz = async (registry, name, version, targetDir) => {
   const res = await fetch(registry + '/' + name, { signal: AbortSignal.timeout(60000) })
@@ -179,7 +199,7 @@ const extractNpmTgz = async (registry, name, version, targetDir) => {
   writeFileSync(tgz, buf)
   rmSync(targetDir, { recursive: true, force: true })
   mkdirSync(targetDir, { recursive: true })
-  const r = spawnSync('tar', ['-xzf', tgz, '-C', targetDir, '--strip-components=1'], { encoding: 'utf8' })
+  const r = spawnSync(TAR, ['-xzf', tgz, '-C', targetDir, '--strip-components=1'], { encoding: 'utf8' })
   if (r.status !== 0) throw new Error('解包失败: ' + (r.stderr ?? '').trim().split('\n')[0])
   rmSync(tgz, { force: true })
 }
@@ -251,7 +271,7 @@ const walkDir = (base, rel, out) => {
 }
 const tarMembers = (tar) => {
   try {
-    return execFileSync('tar', ['-tf', tar], { encoding: 'utf8', maxBuffer: 1024 * 1024 * 1024 })
+    return execFileSync(TAR, ['-tf', tar], { encoding: 'utf8', maxBuffer: 1024 * 1024 * 1024 })
       .split('\n').map((s) => s.trim()).filter(Boolean)
   } catch (e) { die('tar 不可读（' + tar + '）：' + e.message) }
 }
@@ -272,7 +292,7 @@ const materialize = (input) => {
     const listFile = join(tmp, '__members.txt')
     writeFileSync(listFile, rels.join('\n') + '\n')
     try {
-      execFileSync('tar', ['-xf', input, '-C', tmp, '-T', listFile], { stdio: ['ignore', 'inherit', 'inherit'] })
+      execFileSync(TAR, ['-xf', input, '-C', tmp, '-T', listFile], { stdio: ['ignore', 'inherit', 'inherit'] })
     } catch (e) { die('tar 解清单成员失败（' + input + '）：' + e.message) }
   }
   return { root: tmp, rels, cleanup: () => rmSync(tmp, { recursive: true, force: true }) }

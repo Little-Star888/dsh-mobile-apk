@@ -4,6 +4,7 @@ import java.io.File
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
+import java.nio.file.Path
 import java.nio.file.StandardCopyOption.ATOMIC_MOVE
 import java.nio.file.attribute.BasicFileAttributes
 
@@ -37,38 +38,47 @@ internal object SnapshotFs {
    * 由调用方决定是否致命。清理阶段的残余不影响后续解压到干净的 staging 目录——
    * 反过来，因一个残余就让整条升级链永久瘫痪，是远比残留更严重的问题。
    *
-   * @param onFailure 单条删除失败时的回调（收集诊断用）；不抛异常。
+   * **容错契约的覆盖面（0.14.1 加固，issue #240 的剩余缺口）**：本方法同时是刷新的第一步
+   * （`EngineManager` 清理残留）与回滚路径的公共原语（`SnapshotTransaction.rollbackEntry`），
+   * 而此前这里只兜 `Exception`。issue #240 现场那个形状正是「`Error` 打穿整条链」：
+   * `NoSuchMethodError`（`Stream.toList()` 在 API < 34 上的形态）是 `Error` 而非 `Exception`，
+   * 它既绕过本方法的逐项容错，又绕过 `EngineManager` 紧随其后的「残渣改名挪开」兜底，
+   * 一路打穿到刷新失败的 `catch (t: Throwable)` 去走回滚——而回滚走的是同一个原语。
+   * 故判定交给 [isTolerableDeletionFailure]：**容忍 `Exception` + `LinkageError`，重抛 `VirtualMachineError`**。
+   * 不写成裸 `catch (Throwable)` 是刻意的：`OutOfMemoryError` / `StackOverflowError` 在一个递归删除里
+   * 被降级成「继续删」只会放大失败，那不是容错而是掩盖。
+   *
+   * @param onFailure 单条删除失败时的回调（收集诊断用）；不抛异常。签名收 `Throwable`——
+   *   被上报的失败不再限于 `Exception`（见上）。**刻意放在最后一个参数**：本仓既有调用点
+   *   一律写作 `deletePath(x) { f, e -> … }` 的尾随 lambda 形式（EngineManager 与各单测共 5 处），
+   *   放在最后才能继续绑定到它、不逼着所有调用点改名传参。
+   * @param listChildren 列目录的实现。默认即生产用法（`newDirectoryStream` + Kotlin stdlib 的
+   *   `toList()`，**无 API 级别依赖**）。显式传参是为了让「列目录时抛 `Error`」这种场景能在
+   *   JVM 单测里**行为对照**地判红，而不是只能靠静态扫描（本仓纪律：测试改为显式传参，
+   *   生产面不留测试缝）。
    */
-  fun deletePath(path: File, onFailure: (File, Exception) -> Unit = { _, _ -> }) {
+  fun deletePath(
+    path: File,
+    listChildren: (Path) -> List<Path> = { dir -> Files.newDirectoryStream(dir).use { it.toList() } },
+    onFailure: (File, Throwable) -> Unit = { _, _ -> },
+  ) {
     val nioPath = path.toPath()
     try {
       if (!Files.exists(nioPath, NOFOLLOW_LINKS)) return
       val attrs = Files.readAttributes(nioPath, BasicFileAttributes::class.java, NOFOLLOW_LINKS)
       if (attrs.isDirectory) {
-        // 目录项本身读取失败（元数据损坏）也要能继续：记下并跳过，不要让它中断整棵树。
-        //
-        // 0.14.1 P0（真机崩溃实锤）：这里原为 `Files.list(nioPath).use { it.toList() }`。
-        // `java.util.stream.Stream.toList()` 是 **Java 16 引入、Android API 34 才提供**的接口方法，
-        // 而本项目 minSdk = 26 —— 在 API < 34 设备上抛 `NoSuchMethodError`。
-        // 关键：`NoSuchMethodError` 是 **Error 而非 Exception**，外层 `catch (e: Exception)` 抓不住，
-        // 于是直接打穿 `SnapshotTransaction.finish` → 事务恢复**永远无法完成**（marker retained），
-        // 快照刷新/恢复在 Android < 34 上卡死（华为 NOH-AN00 / Android 31 实测：12:55/12:56/12:57
-        // 三时点、主线程与工作线程均崩于此行）。
-        // 改用 `Files.newDirectoryStream`：`DirectoryStream<Path>` 是 `Iterable` + `Closeable`，
-        // Kotlin 的 `toList()` 是自带的 stdlib 扩展（**无 API 级别依赖**），语义等价：
-        // 只列直接子项、不跟随符号链接（调用方已按 NOFOLLOW 判定 attrs.isDirectory，
-        // 符号链接到目录者不会进本分支）、`use` 保证关闭。
-        val children = try {
-          Files.newDirectoryStream(nioPath).use { stream -> stream.toList() }
-        } catch (e: Exception) {
-          onFailure(path, e)
-          return
-        }
-        for (child in children) deletePath(child.toFile(), onFailure)
+        // 目录项本身读取失败（元数据损坏）也由下面的兜底接住：记下并跳过，不中断整棵树。
+        // 注意 `Files.newDirectoryStream` 而非 `Files.list`：后者返回的 Stream 是 Java 16 /
+        // Android API 34 才有的面，在 API < 34 上列目录本身就抛 `NoSuchMethodError`
+        // （0.14.1 P0 真机实锤，本方法历史上正是崩在这里）。
+        for (child in listChildren(nioPath)) deletePath(child.toFile(), listChildren, onFailure)
       }
       Files.deleteIfExists(nioPath)
-    } catch (e: Exception) {
-      onFailure(path, e)
+    } catch (t: Throwable) {
+      // 非容忍类（VirtualMachineError / ThreadDeath / AssertionError …）必须原样抛出：
+      // 把它们降级成「继续删」等于用一个更坏的失败掩盖当前失败。
+      if (!isTolerableDeletionFailure(t)) throw t
+      onFailure(path, t)
     }
   }
 
@@ -99,4 +109,25 @@ internal object SnapshotFs {
   fun createDirectories(dir: File) {
     Files.createDirectories(dir.toPath())
   }
+}
+
+/**
+ * 删除路径的容错边界：哪些 `Throwable` 可以「记下并继续」，哪些必须原样抛出。
+ *
+ * 策略只声明一处，便于单测逐条钉住（`SnapshotFsTest`）。**不写成裸 `catch (Throwable)`**：
+ *
+ *  - `Exception` —— 既有的容错面（元数据损坏的目录、EACCES、并发删除等），保持原语义。
+ *  - `LinkageError` —— 0.14.1 加固的核心。缺 API 的类错误全在这一支：
+ *    `NoSuchMethodError`（`Stream.toList()` 在 API < 34 上）、`NoClassDefFoundError`、
+ *    `IncompatibleClassChangeError`。issue #240 现场正是被这一类打穿整条刷新+回滚链。
+ *  - `VirtualMachineError` —— **必须重抛**。`OutOfMemoryError` / `StackOverflowError` 出现在一个
+ *    递归删除里时，「继续删下一个」只会让已经耗尽的资源继续被消耗，把一次可诊断的失败
+ *    放大成一片静默的坏状态。同理 `ThreadDeath` / `AssertionError` 等其余 `Error` 也一律重抛：
+ *    非 `LinkageError` 的 `Error` 表示 JVM 层已经不可信，不是「某个条目删不掉」。
+ */
+internal fun isTolerableDeletionFailure(t: Throwable): Boolean = when (t) {
+  is VirtualMachineError -> false
+  is Exception -> true
+  is LinkageError -> true
+  else -> false
 }
