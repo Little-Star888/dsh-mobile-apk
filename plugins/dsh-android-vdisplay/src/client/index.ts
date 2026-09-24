@@ -13,7 +13,7 @@
  * 数据面纪律：状态经只读 GET（与 ADB 授权块同风格）；本 Tab **不经 window.androidBridge 写面**
  * 之外的控制面、不合成像素（源文档 §9.2）。状态源不可达 = blocked（fail-closed，不假装可用）。
  */
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import { createElement, useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
 import {
   mapStatusPayload,
@@ -24,11 +24,33 @@ import {
   type VdPanelState,
 } from '../status.ts'
 
+import type {} from '@deepseek-ai/dsh-client-ui-slots'
+
 /** SlotMap 本地 augmentation：与上游 keyed/session 语义一致（临时性见文件头注释）。 */
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface SlotMap {
     'sidebar.right.pane.tab': { kind: 'keyed'; scope: 'session' }
     'sidebar.right.pane.tab.title': { kind: 'keyed'; scope: 'session' }
+  }
+}
+
+/**
+ * `ctx.slots` 服务面：上游由 `@deepseek-ai/dsh-client-ui-renderer/client` 声明这个
+ * Context merge（dsh/packages/client/ui-renderer/src/client/index.ts:43-45，
+ * `slots: SlotRegistry`），但 renderer 包不在本插件 client 半的依赖面上（运行时由宿主
+ * 注入），因此按 `dsh-client-ui-responsive/src/client/slots-augment.d.ts:29-42` 的同款
+ * 做法在本地镜像其签名（registry.ts:209 inject / :741 register，均返回 dispose）。
+ */
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    /** Slot registry: register()/inject() composition face. */
+    slots: {
+      register(options: object, component: unknown): () => void;
+      inject(
+        key: keyof import('@deepseek-ai/dsh-client-ui-slots').SlotMap & string,
+        callback: () => () => void,
+      ): () => void;
+    };
   }
 }
 
@@ -39,13 +61,15 @@ export const VD_TAB_KIND = 'android-vdisplay'
 /** 状态轮询间隔（毫秒）：只读、低频；面板打开时才有请求。 */
 export const VD_POLL_MS = 10_000
 
-/** 结构化定义（上游 SidebarRightTabDefinition 的最小面）。 */
+/** 结构化定义（上游 SidebarRightTabDefinition 的最小面）。
+ *  0.1.7 起 guide 条目新增必填 `id`（上游按 [providerId, entry.id] 键控），此处随版补齐——
+ *  少了它本地最小面会比上游宽，编译期看不出漂移。 */
 interface TabDefinition {
   id: string
   kind: string
   priority?: 'extension' | 'builtin' | 'fallback'
   title: () => string
-  guide?: Array<{ order: number; title: () => string; description: () => string }>
+  guide?: Array<{ id: string; order: number; title: () => string; description: () => string }>
 }
 /** 结构化注册面（上游 SidebarRightTabRegistry 的最小面）。 */
 interface TabRegistry {
@@ -401,6 +425,8 @@ export function apply(ctx: ClientContext): void {
       priority: 'extension',
       title: () => '虚拟屏',
       guide: [{
+        // 0.1.7 起 guide 条目必填 id（上游按 [providerId, entry.id] 键控，唯一性只在 provider 内判定）
+        id: 'open',
         order: 40,
         title: () => '虚拟屏',
         description: () => '在独立屏幕上运行第三方 App（Shizuku 特权通道），不挤占用户前台。',

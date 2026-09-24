@@ -5,7 +5,7 @@
 //   2. packages 逐包在场且版本精确一致（220 包）
 //   3. vendorTop / pins / nested 同上
 //   4. keepUnpublished 包仍在树内（任意版本）
-//   5. dsh-agent-presets 内置 presets/ 非空（0.1.2-rc.1 新载体）
+//   5. 内置预设载体非空：agent-preset 的 skills/ 与 web-app 的 presets/（0.14.2 起，见 CARRIERS）
 // 退出 0 = PASS；1 = FAIL（拒绝打包）。双仓同版（雷点 10）。
 //
 // 用法：node scripts/check-engine-overlay.mjs <snapshot.tar.xz> [--manifest scripts/snapshot-config/engine-overlay.json]
@@ -44,8 +44,16 @@ for (const entry of M.keepUnpublished ?? []) {
   const name = entry.replace(/ \(.+\)$/, '')
   put(`node_modules/${name}/package.json`, 'keep', name, null)
 }
-put('node_modules/@deepseek-ai/dsh-agent-presets/package.json', 'presets-carrier', '@deepseek-ai/dsh-agent-presets', null)
-const presetsPrefix = NM + 'node_modules/@deepseek-ai/dsh-agent-presets/presets/'
+/* 内置预设载体（0.14.2 追版重锚）。旧断言盯 `@deepseek-ai/dsh-agent-presets/presets/`，该包在
+ * 0.1.7 被拆成 agent-preset + agent-preset-registry（gen-engine-overlay 的孤儿段实测删除），
+ * 载体形态也变了——0.1.7-rc.1 的 tarball 实测：agent-preset 出 `skills/`（15 项），
+ * web-app 出 `presets/*.patch.yml`（4 项：cordis/minimal/ptc/standard）。
+ * 两条都继续断言：只断「包在场」会被 overlay 覆盖（冗余），断「目录非空」才挡得住
+ * 「发布了包但内容没打进去」（files 漏项 = 上游发布回归）。 */
+const CARRIERS = [
+  { label: 'agent-preset skills/', prefix: NM + 'node_modules/@deepseek-ai/dsh-agent-preset/skills/' },
+  { label: 'web-app presets/', prefix: NM + 'node_modules/@deepseek-ai/dsh-web-app/presets/' },
+]
 let presetsEntries = 0
 // 引擎树补丁 marker 随门禁抽验（0.13.5 起登记表驱动）：scripts/patches/registry.json
 // 内每个 scope=engine 补丁，其 target 文件必须带该补丁的 marker——防「补丁未施加/版本漂移」
@@ -59,16 +67,19 @@ for (const patch of PATCH_REGISTRY.patches.filter((p) => p.scope === 'engine' &&
 const py = `
 import tarfile, json, sys
 want = json.loads(open(sys.argv[2], 'r', encoding='utf-8').read())
+prefixes = json.loads(sys.argv[5])   # 内置预设载体目录（可多个，见 CARRIERS）
 nm = sys.argv[4]
 hits = {}
 present = {}
-presets = 0
+carriers = [0] * len(prefixes)
 looked_non_pkg = 0
 with tarfile.open(sys.argv[1], 'r|xz') as t:
     for m in t:
         n = m.name
-        if n.startswith(sys.argv[3]) and m.isfile():
-            presets += 1
+        if m.isfile():
+            for idx, pre in enumerate(prefixes):
+                if n.startswith(pre):
+                    carriers[idx] += 1
         if not m.isfile():
             continue
         # 关键（0.13.8-b 实锤回归）：want 里既有 package.json，也有 .js/.ts 目标（patch-marker）——
@@ -92,7 +103,7 @@ with tarfile.open(sys.argv[1], 'r|xz') as t:
                       'deps': list((j.get('dependencies') or {}).keys())
                               + list((j.get('optionalDependencies') or {}).keys())
                               + list((j.get('peerDependencies') or {}).keys())}
-print(json.dumps({'hits': hits, 'presets': presets, 'present': present, 'lookedNonPkg': looked_non_pkg}))
+print(json.dumps({'hits': hits, 'carriers': carriers, 'present': present, 'lookedNonPkg': looked_non_pkg}))
 `
 let res
 try {
@@ -100,10 +111,10 @@ try {
   const tmpPy = join(dirname(snap), `.engine-overlay-scan-${process.pid}.py`)
   const wantFile = join(dirname(snap), `.engine-overlay-want-${process.pid}.json`)
   writeFileSync(tmpPy, py)
-  writeFileSync(wantFile, JSON.stringify([...want.keys(), presetsPrefix]))
+  writeFileSync(wantFile, JSON.stringify([...want.keys(), ...CARRIERS.map(c => c.prefix)]))
   try {
     const snapWin = snap.replace(/\\/g, '/')
-    res = JSON.parse(execSync(`${process.platform === 'win32' ? 'python' : 'python3'} ${JSON.stringify(tmpPy)} ${JSON.stringify(snapWin)} ${JSON.stringify(wantFile)} ${JSON.stringify(presetsPrefix)} ${JSON.stringify(NM)}`, { encoding: 'utf8', maxBuffer: 128 * 1024 * 1024 }))
+    res = JSON.parse(execSync(`${process.platform === 'win32' ? 'python' : 'python3'} ${JSON.stringify(tmpPy)} ${JSON.stringify(snapWin)} ${JSON.stringify(wantFile)} ${JSON.stringify(CARRIERS[0].prefix)} ${JSON.stringify(NM)} ${JSON.stringify(CARRIERS.map(c => c.prefix))}`, { encoding: 'utf8', maxBuffer: 128 * 1024 * 1024 }))
   } finally {
     rmSync(tmpPy, { force: true })
     rmSync(wantFile, { force: true })
@@ -163,7 +174,6 @@ for (const [path, meta] of want) {
   for (const name of Object.keys(M.vendorTop ?? {})) declared.add(name)
   for (const name of Object.keys(M.pins ?? {})) declared.add(name)
   for (const entry of M.keepUnpublished ?? []) declared.add(entry.replace(/ \(.+$/, '').trim())
-  declared.add('@deepseek-ai/dsh-agent-presets')
   for (const name of M.extraPresent ?? []) declared.add(name)
   // name -> tarPath（同名多副本时取第一个：闭包判定只需可达性）
   // 只统计「顶层包目录」：路径 = <NM>node_modules/<pkg|@scope/pkg>/package.json。
@@ -209,8 +219,11 @@ for (const [path, meta] of want) {
       + '——若为上游新增依赖请登记进 engine-overlay.json，若是被塞入的包请移除')
   }
 }
-if (res.presets < 1) fails.push(`dsh-agent-presets 内置 presets/ 为空（${res.presets} 项）——0.1.2-rc.1 预设载体缺席`)
-else console.log(`  dsh-agent-presets presets/ 条目: ${res.presets}`)
+CARRIERS.forEach((c, idx) => {
+  const count = res.carriers?.[idx] ?? 0
+  if (count < 1) fails.push(`内置预设载体为空：${c.label} 命中 ${count} 项（包在但内容没发布 = 上游 files 漏项，产品面「没有可用预设」）`)
+  else console.log(`  预设载体 ${c.label}: ${count} 项`)
+})
 
 if (fails.length) {
   console.error(`ENGINE-OVERLAY CHECK FAILED（${fails.length} 项）:`)

@@ -712,8 +712,10 @@ function runContractSelfTest() {
     { label: '§8 行面判红：上游行登记集漏一条', mutate: c => { c.upstreamRows.entries = c.upstreamRows.entries.filter(e => e.key !== 'timer') }, expect: /上游新增未判定的行/ },
     { label: '§7 幽灵插行判红：profile 挂了一个仓库里不存在的包', profile: t => t.replace("'@dsh-android/dsh-host-web-compat'", "'@dsh-android/dsh-nope'"), expect: /profile patch 挂了仓库里不存在的包/ },
     { label: '§7 fail-open 判红：抹掉无 peer 行的显式判定', mutate: c => { c.runtimeCompat.noPeerRows = [] }, expect: /没有任何 @deepseek-ai\/dsh\* peer/ },
-    { label: '§7 静默禁用判红：把运行时装成 0.1.7-rc.1（peer 精确钉旧必被拒）', extra: ['--runtime', '0.1.7-rc.1'], expect: /会被\*\*静默禁用\*\*/ },
-    { label: '§9 文档同源判红：文档里的基线停在上一版', doc: t => t.replace('0.1.5-rc.1', '0.1.4-rc.9'), expect: /不含当前基线/ },
+    /* 反证要钉在「未来的运行时」上没有意义（抬版后它就变成现状）；这里装一个任何 peer
+     * 都不可能满足的版本，判据必须逐行判红——这才与追版进度无关。 */
+    { label: '§7 静默禁用判红：运行时装成不可满足的 0.0.1-rc.1（每行 peer 都必须被拒）', extra: ['--runtime', '0.0.1-rc.1'], expect: /会被\*\*静默禁用\*\*/ },
+    { label: '§9 文档同源判红：文档里的基线字样被抹掉', doc: t => t.split(contract.baseline).join('0.0.0-stale'), expect: /不含当前基线/ },
     { label: '§9 文档同源判红：文档删掉「非权威源」声明（漂移比缺席更危险的那种）', doc: t => t.replace(/非权威源/g, '参考'), expect: /必须显式声明/ },
   ]
   let bad = 0

@@ -16,7 +16,8 @@ import { readFileSync, appendFileSync, mkdirSync, statSync, writeFileSync, renam
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { join, dirname } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
-import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
+import { defineTool } from '@deepseek-ai/dsh-tools'
+import { type JsonValue } from '@deepseek-ai/dsh-util-values'
 import { A11Y_OPS, decideControl, type ControlDecision, type ControlOp } from './control-policy.js'
 import {
   currentScreenScope,
