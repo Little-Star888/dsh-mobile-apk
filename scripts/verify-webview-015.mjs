@@ -15,9 +15,12 @@ const checks = [
   ['顶栏含侧栏开关按钮', "!!document.querySelector('[data-dsh-mobile-topbar] button')", true],
   ['左栏 position 与 viewport 形态一致', "getComputedStyle(document.querySelector('[data-dsh-frame] > [class*=sidebarCol]')).position === 'fixed'", !wide],
   ['拖拽手柄可见性与 viewport 形态一致', "[...document.querySelectorAll('[data-dsh-frame] [class*=handle]')].every(h => getComputedStyle(h).display === 'none')", (v) => wide ? typeof v === 'boolean' : v === true],
-  ['会话头部 corner 座位在手机形态存在', "!!document.querySelector('[data-conversation-header-corner]')", (v) => wide ? typeof v === 'boolean' : v === true],
-  ['右栏展开键在手机形态存在', "!!document.querySelector('[data-conversation-header-corner] button')", (v) => wide ? typeof v === 'boolean' : v === true],
-  ['我们的「在文件中打开」入口在手机形态存在', "!!document.querySelector('[aria-label=\"在文件中打开\"]')", (v) => wide ? typeof v === 'boolean' : v === true],
+  // 2026-09-24 基线实测（.deploy-tmp/0142-verify-1/probe-table.md）：这三项在竖屏 16416 与
+  // 横屏 16384 **都渲染**（corner=true / corner 内 button=true / 在文件中打开=true），
+  // 所以不再按 --wide 降级成「只要是个布尔就过」——降级写法等于横屏不判，上游哪天不渲染了也不会红。
+  ['会话头部 corner 座位存在（两方向都判）', "!!document.querySelector('[data-conversation-header-corner]')", true],
+  ['右栏展开键存在（两方向都判）', "!!document.querySelector('[data-conversation-header-corner] button')", true],
+  ['我们的「在文件中打开」入口存在（两方向都判）', "!!document.querySelector('[aria-label=\"在文件中打开\"]')", true],
   ['桥 openPathChooser 已注入', "typeof window.androidBridge?.openPathChooser === 'function'", true],
   ['桥 downloadDebugLogs 已退役', "typeof window.androidBridge?.downloadDebugLogs === 'undefined'", true],
   ['桥 pickImage 已退役', "typeof window.androidBridge?.pickImage === 'undefined'", true],
@@ -65,12 +68,16 @@ const checks = [
   ['返回层栈上行桥 dshBackBridge 成对在场（set/get）',
     "typeof window.dshBackBridge?.setAvailable === 'function' && typeof window.dshBackBridge?.getBackAvailable === 'function'", true],
   // 判据：抽屉必须被登记为层、且壳侧同步缓存为真（层数增减由下一条「消费」断言覆盖，避免点击幂等性带来的噪声）。
-  ['抽屉成为层（kinds 含 drawer）且壳侧同步缓存为真',
+  // 横屏不再整条放过（2026-09-24 两方向基线实测：桌面分支没有 drawer，但「点入口 → 注册成层 →
+  // 壳侧缓存为真 → 消费后层数下降」这条链横屏同样成立，读数 kinds=["dialog","menu"] depth=2 cached=true）。
+  // 所以横屏只放弃 `kinds.includes("drawer")` 这一项形态差异，其余全判。
+  ['抽屉/浮层成为返回层且壳侧同步缓存为真（drawer 形态项仅手机方向判）',
     "(async () => { const sleep = (ms) => new Promise(r => setTimeout(r, ms)); const kinds = () => Array.isArray(window.__dshBackKinds) ? window.__dshBackKinds : []; if (!kinds().includes('drawer')) { const b = document.querySelector('[data-dsh-mobile-topbar] button'); if (!b) return 'no-topbar'; b.click(); await sleep(500); } return { depth: window.__dshBackDepth, kinds: kinds(), cached: window.dshBackBridge?.getBackAvailable?.() }; })()",
-    (v) => wide ? true : (v && v.depth >= 1 && v.cached === true && Array.isArray(v.kinds) && v.kinds.includes('drawer'))],
+    (v) => v && v.depth >= 1 && v.cached === true && Array.isArray(v.kinds)
+      && (wide ? true : v.kinds.includes('drawer'))],
   ['层栈消费（__dshBack 弹出该层）→ 层数下降且壳侧缓存回读 false',
     "(async () => { const before = window.__dshBackDepth; const consumed = typeof window.__dshBack === 'function' ? window.__dshBack() : 'no-entry'; await new Promise(r => setTimeout(r, 400)); return { before, consumed, depth: window.__dshBackDepth, cached: window.dshBackBridge?.getBackAvailable?.() }; })()",
-    (v) => wide ? true : (v && v.consumed === true && v.before >= 1 && v.depth === v.before - 1 && v.cached === (v.depth > 0))],
+    (v) => v && v.consumed === true && v.before >= 1 && v.depth === v.before - 1 && v.cached === (v.depth > 0)],
   // ── 0.14.0-preview 追加：壳侧状态 getter 在场（计划 §4.3 ST-10/ST-11）──
   ['桥 getImmersiveMode 在场（ST-10 壳侧唯一真源）', "typeof window.androidBridge?.getImmersiveMode === 'function'", true],
   ['getImmersiveMode 返回布尔（回读壳侧偏好真值）', "typeof window.androidBridge?.getImmersiveMode?.() === 'boolean'", true],
