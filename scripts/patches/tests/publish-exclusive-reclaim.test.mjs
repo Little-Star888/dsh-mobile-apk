@@ -22,11 +22,12 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { versionedFixture } from './lib/fixture.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(here, '..', '..', '..')
 const TARGET = 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js'
-const FIXTURE = join(here, 'fixtures', 'dsh-session-persistence-jsonl-0.1.5-rc.1', 'lib', 'index.js')
+const FIXTURE = versionedFixture('dsh-session-persistence-jsonl', 'lib', 'index.js')
 const assetIdx = process.argv.indexOf('--asset')
 const ASSET = assetIdx >= 0 ? process.argv[assetIdx + 1] : null
 // F7 v1 双占位形态（0.14.0-preview 坏资产）：publish 站内联 open("wx") 后又调 helper → 恒 EEXIST → 恒 false。

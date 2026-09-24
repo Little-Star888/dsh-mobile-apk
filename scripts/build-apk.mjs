@@ -60,6 +60,8 @@ const market = externalNamed('dshmarketplace-plugin')
 // 门禁集（唯一声明处；check-release-gates.mjs 断言与 build-apk-013.ps1 的差集 = 0）
 const GATE_SCRIPTS = [
   'check-patch-mirror.mjs',
+  // 0.14.2 T6：补丁测试夹具必须与 contract.baseline 同代（夹具停在上一代 = 补丁回归结构性假绿）。
+  'check-patch-fixtures.mjs',
   // review C6：适配层契约（bundle 行/构建产物/版本钉）。上游 dsh/ 与基线 node_modules 是本机只读
   // 产物（gitignore）——本链（云端自包含）对应小节 SKIP 计数；发布链以 --require 强制齐全。
   'check-contract.mjs',
@@ -156,6 +158,8 @@ try {
   // ---- 2. 门禁（注入前；与 build-apk-013.ps1 同一份门禁集，0.13.8-b ST-06）----
   log('门禁：补丁镜像一致性…')
   run('node', [gate('check-patch-mirror.mjs')])
+  log('门禁：补丁测试夹具随版（夹具代 == contract.baseline）…')
+  run('node', [gate('check-patch-fixtures.mjs')])
   // review C6：适配层契约（上游 bundle 行引用 / 注入包 lib 产物 / 客户端槽位 / 版本钉台账）。
   log('门禁：适配层契约（bundle/构建产物/版本钉）…')
   run('node', [gate('check-contract.mjs')])

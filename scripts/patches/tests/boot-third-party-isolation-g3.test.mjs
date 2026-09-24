@@ -3,16 +3,16 @@
 // 真因（真实用户反馈 报错反馈/0.14.0/20260919-125714-engine-died-during-boot）：用户自装的
 // dsh-live2d-pets 在 import 期抛 SyntaxError（上游 @deepseek-ai/dsh-settings 不再导出
 // settingsNamespace）→ 整树 boot 失败、engine exit=1。
-// boot-pending-G1 结构上无法覆盖：G1 锚点在 assertEntriesActivated（dsh-app-boot:1472-1505），
-// 而 import 失败在更早的 boot:1552 → mountRootInclude:553 → loader EntryTree.update
-// （cordis-plugin-loader:86/97）→ updateError('import')（:309）抛出，assertEntriesActivated:1555 不可达。
+// 条目断言层（assertEntriesActivated）结构上覆盖不到：import 失败在更早的链路就冒泡——
+// boot() → mountRootInclude() → loader.create() → EntryTree.update（cordis-plugin-loader）
+// → updateError('import') 抛出，assertEntriesActivated 根本不会被执行。故容错只能做在挂载点。
 //
 // 本测试：
 //   ① 补丁幂等 / marker / node --check / 反 no-op（boot() 不再直接挂载 root include）；
 //   ② 用抽取出的隔离器 + 桩 mountRootInclude 驱动全部判定分支：
 //      第三方失败→隔离重试并点名；官方包与出厂移动侧包失败→仍响亮失败；无法识别→仍失败；
 //      超过上限→仍失败并给完整清单；disabled patch 形状正确；被跳过清单挂到 globalThis；
-//   ③ 与 G1 共存（同一文件里 G1 的 marker 与 deferred 逻辑不被破坏）。
+//   ③ boot 期容错只有一个真源：产物里除 G3 之外不得再有别的容错标记（0.14.2 撤销 G1 后的口径）。
 //
 // 用法：node scripts/patches/tests/boot-third-party-isolation-g3.test.mjs
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
@@ -20,11 +20,12 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { versionedFixture } from './lib/fixture.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(here, '..', '..', '..')
 const TARGET = 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js'
-const FIXTURE = join(here, 'fixtures', 'dsh-app-boot-0.1.5-rc.1', 'lib', 'index.js')
+const FIXTURE = versionedFixture('dsh-app-boot', 'lib', 'index.js')
 
 const failures = []
 function check(label, ok, detail) {
@@ -77,27 +78,28 @@ const scratch = mkdtempSync(join(tmpdir(), 'g3-test-'))
 try {
   const target = join(scratch, TARGET)
   mkdirSync(dirname(target), { recursive: true })
-  // fixture 里 G1 已施加（存量形态）；本测试据此同时验证共存。
+  // 夹具是**未打补丁**的真产物字节（随版，见 tests/lib/fixture.mjs）——G3 的判据必须建立在
+  // 「上游原样」之上，拿打过补丁的树测补丁等于什么也没测。
   writeFileSync(target, readFileSync(FIXTURE, 'utf8').replace(/\r\n/g, '\n'))
   const beforePatch = readFileSync(target, 'utf8')
-  check('前置：fixture 已含 boot-pending-G1（G3 必须与它共存）',
-    beforePatch.includes('dsh-mobile boot tolerance (G1)') && beforePatch.includes('const deferred = [];'))
+  check('前置：fixture 是未施加任何本方补丁的真产物', !beforePatch.includes('dsh-mobile'))
 
   const apply = () => spawnSync(process.execPath,
     [join(repoRoot, 'scripts', 'patches', 'apply-patches.mjs'), scratch, '--apply', '--scope', 'engine', '--only', 'boot-third-party-isolation-G3'],
     { encoding: 'utf8' })
   const applied = apply()
-  check('apply-patches exits 0（仅 G3，requires 为空所以不牵连 G1）', applied.status === 0,
+  check('apply-patches exits 0（仅 G3）', applied.status === 0,
     (applied.stdout || applied.stderr || '').trim().split('\n').slice(-2).join(' | '))
   const patched = readFileSync(target, 'utf8')
   check('G3 marker 在场', patched.includes('dsh-mobile third-party boot isolation (G3)'))
   check('隔离器与收集器在场',
     patched.includes('dshMobileMountRootIncludeTolerant') && patched.includes('dshMobileCollectEntryFailures'))
   check('反 no-op：boot() 不再直接挂载 root include',
-    !patched.includes('\t\tawait mountRootInclude(ctx, absoluteConfigPath, patches, bareModuleBaseUrl);')
+    !patched.includes('\t\tawait mountRootInclude(ctx, absoluteConfigPath, patches, bareModuleBaseUrl, binName);')
     && patched.includes('await dshMobileMountRootIncludeTolerant(ctx, binName, absoluteConfigPath, patches, bareModuleBaseUrl);'))
-  check('与 G1 共存未被破坏（G1 marker 与 deferred 仍在）',
-    patched.includes('dsh-mobile boot tolerance (G1)') && patched.includes('const deferred = [];'))
+  check('boot 期容错唯一真源（无第二种容错标记混在产物里）',
+    (patched.match(/dsh-mobile third-party boot isolation \(G3\)/g) || []).length >= 1
+    && !patched.includes('dsh-mobile boot tolerance'))
   const parse = spawnSync(process.execPath, ['--check', target], { encoding: 'utf8' })
   check('patched file parses', parse.status === 0, (parse.stderr || '').split('\n')[0])
   apply()

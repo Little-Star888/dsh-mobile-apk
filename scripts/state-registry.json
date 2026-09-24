@@ -91,11 +91,11 @@
       }
     },
     {
-      "id": "profile-patch-reload",
-      "holder": "构建链（快照出厂清单）+ 引擎树补丁",
-      "writePath": "scripts/lib/profile-seed.mjs + scripts/patches/registry.json:perf-patch-reload-N1",
-      "sourceOfTruth": "出厂 profile 清单 home/.dsh/profiles/<name>/package.json",
-      "syncPath": "全新安装 = 构建期 seed 写 startup；存量升级 = N1 补丁在 installation-owned 元组下把旧默认 live 归一化（P-AC-23/24）",
+      "id": "shipped-profile-manifest",
+      "holder": "构建链（快照出厂清单）",
+      "writePath": "scripts/lib/profile-seed.mjs",
+      "sourceOfTruth": "出厂 profile 清单 home/.dsh/profiles/<name>/package.json 的 dsh.profile.bundles",
+      "syncPath": "0.14.2 起该状态只剩「清单形状」：bundles 非空 + 无上游已不读的死键。原 profile-patch-reload（patchReload 出厂值 + N1 存量归一化）随上游删除该机制而退役——live reload 改由常驻空转的 dsh-client-hmr 承担，构建期不再写任何 reload 旋钮",
       "evidence": {
         "kind": "gate",
         "file": "scripts/check-perf-instrumentation.mjs"

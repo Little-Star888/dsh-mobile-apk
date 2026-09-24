@@ -13,11 +13,12 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { versionedFixture } from './lib/fixture.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(here, '..', '..', '..')
 const TARGET = 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-atomic-write/lib/index.js'
-const FIXTURE = join(here, 'fixtures', 'dsh-atomic-write-0.1.5-rc.1', 'lib', 'index.js')
+const FIXTURE = versionedFixture('dsh-atomic-write', 'lib', 'index.js')
 
 const failures = []
 /** Assert one condition, recording the failure instead of throwing so every check reports. */

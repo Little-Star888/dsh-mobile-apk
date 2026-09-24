@@ -8,13 +8,14 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { versionedFixture } from './lib/fixture.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(here, '..', '..', '..')
 const targetArg = process.argv.indexOf('--target')
 const stageTarget = targetArg >= 0 ? process.argv[targetArg + 1] : undefined
 const targetRel = 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-resources/lib/client.js'
-const fixture = join(here, 'fixtures', 'dsh-client-resources-0.1.5-rc.1', 'lib', 'client.js')
+const fixture = versionedFixture('dsh-client-resources', 'lib', 'client.js')
 const patchRunner = join(repoRoot, 'scripts', 'patches', 'apply-patches.mjs')
 const failures = []
 

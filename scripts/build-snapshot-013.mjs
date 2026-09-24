@@ -52,7 +52,7 @@ const PYTHON = process.platform === 'win32' ? 'python' : 'python3'
 // 清单/模板与编排逻辑分离：预装包、镜像链、剥离清单、瘦身清单、seed 模板、apt.conf、
 // install-clang.sh 均在本目录维护；编排器只读数据 + 走流程。@@PREFIX@@ 为模板占位
 // （构建期替换为设备端前缀，本地 stage 路径不可烧入）。
-import { seedProfilePatchReload } from './lib/profile-seed.mjs'
+import { checkShippedProfileManifests } from './lib/profile-seed.mjs'
 const CFG_DIR = join(ROOT, 'scripts', 'snapshot-config')
 const readCfg = (f) => readFileSync(join(CFG_DIR, f), 'utf8')
 const PREINSTALL = JSON.parse(readCfg('preinstall.json'))
@@ -141,15 +141,14 @@ for (const leaf of STRIP.secretLeaves) {
 const seedSettingsPath = join(DH, 'settings.yaml')
 writeFileSync(seedSettingsPath, SEED_SETTINGS)
 log(`settings.yaml seed template written (zero-secret): ${seedSettingsPath}`)
-// 性能 A1 seed（0.13.8 §7.2）：出厂 profile 清单写 dsh.profile.patchReload=startup——上游在 live
-// 档额外挂 cordis-plugin-timer/hmr 并在启动期反复现场重算客户端 combo（实测冷启动 24.9s -> 16.6s）。
-// Android 无 live reload 收益（坑 19），故出厂即 startup；dev 档用 DSH_PROFILE_PATCH_RELOAD=live 覆写。
-// 存量升级路径由引擎树补丁 perf-patch-reload-N1 归一化（旧引擎已把 live 显式写进设备清单）。
-const profileSeed = seedProfilePatchReload(join(STAGE, 'root'), {
-  reload: process.env.DSH_PROFILE_PATCH_RELOAD || 'startup',
-})
-for (const r of profileSeed) {
-  log(`profile seed: ${r.profile} patchReload=${r.value ?? '<profile 缺席>'} ${r.changed ? '(updated)' : '(unchanged)'} previous=${r.previous ?? 'none'}`)
+// 出厂 profile 清单体检（0.14.2 起）：剥掉上游已不读的死键并断言 bundles 非空。历史上的
+// 性能 A1 seed（dsh.profile.patchReload=startup，实测冷启动 24.9s -> 16.6s）随 0.1.7-rc.1 失效：
+// 上游删掉了整个 patchReload 机制，reload 链改为常驻但空转的 dsh-client-hmr 一行 ⇒ 启动收益由
+// 上游结构本身提供，出厂清单里再躺一个没人读的键只会误导后续判断（含门禁）。
+const profileCheck = checkShippedProfileManifests(join(STAGE, 'root'))
+for (const r of profileCheck) {
+  if (r.missing) throw new Error(`出厂 profile 清单缺席: ${r.profile}（${r.path}）——快照不可发布`)
+  log(`profile 体检: ${r.profile} bundles=${String(r.bundles)} 死键剥除=[${r.stripped.join(', ')}]${r.changed ? ' (已改写)' : ''}`)
 }
 // F4 安装链（2026-08-23）：清陈旧 pnpm 状态记录——base-dsh 提取自运行设备，其
 // .modules.yaml / .pnpm-workspace-state / pnpm-lock 指向旧 store（含 com.dshmobile 残留路径），
@@ -1032,17 +1031,17 @@ if (termuxLinks !== 0) {
   process.exit(1)
 }
 log('归档内软链自检通过（0 条旧 Termux 前缀软链）')
-// A1 出厂声明值对账（P-AC-01，--require 严格档）：归档内 profiles/{web,headless}/package.json 必须带
-// patchReload=出厂值。seed 步在归档之前（本文件 0 段），此处是对**产物**的复核——stage 正确而归档缺件
+// 出厂 profile 清单对账（P-AC-01，--require 严格档）：归档内 profiles/{web,headless}/package.json 必须
+// bundles 非空且无死键。stage 段已体检过，此处是对**产物**的复核——stage 正确而归档缺件
 // 的同型缺陷此前在 LICENSES 上实锤过一次。
 const perfGate = spawnSync(process.execPath,
   [join(ROOT, 'scripts', 'check-perf-instrumentation.mjs'), '--require', '--snapshot', archive, '--abi', ABI],
   { encoding: 'utf8' })
 if (perfGate.status !== 0) {
-  console.error('A1 出厂声明值对账失败（归档内 profile 清单缺 patchReload 出厂值）——拒绝出快照')
+  console.error('出厂 profile 清单对账失败（归档内 profile 缺 bundles 或带上游已不读的死键）——拒绝出快照')
   console.error((perfGate.stdout + perfGate.stderr).split('\n').filter((l) => l.startsWith('FAIL')).join('\n'))
   process.exit(1)
 }
-log('A1 出厂声明值对账通过（归档内 profiles/{web,headless} patchReload=出厂值）')
+log('A1 出厂 profile 清单对账通过（归档内 profiles/{web,headless} bundles 非空、无死键）')
 log(`完成: ${archive} (${(statSync(archive).size / 1024 / 1024).toFixed(1)} MB, sha256=${sha.slice(0, 12)}…)`)
 log('后续步骤：注入插件（inject-snapshot.py）→ 门禁（elf-check/ci-verify-snapshot 语义）→ 打包装入 APK')

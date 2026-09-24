@@ -38,6 +38,12 @@ Write-Host "== 补丁镜像一致性门禁 =="
 node (Join-Path $Root "scripts\check-patch-mirror.mjs") 2>&1
 if ($LASTEXITCODE -ne 0) { Write-Host "补丁镜像不一致，拒绝打包（先同步镜像 scripts/patches 到对端树）"; exit 1 }
 
+# 补丁测试夹具随版门禁（0.14.2 T6）：夹具停在上一代引擎时，「补丁回归」证明的是补丁对旧字节
+# 仍成立——rc.1 实锤：真树断 9 条而补丁测试全绿。夹具代必须等于 contract.baseline。
+Write-Host "== 补丁测试夹具随版门禁 =="
+node (Join-Path $Root "scripts\check-patch-fixtures.mjs") 2>&1
+if ($LASTEXITCODE -ne 0) { Write-Host "夹具未随版，拒绝打包（跑 node scripts\probe-engine-anchors.mjs --fixtures 重生成）"; exit 1 }
+
 # 适配层契约门禁（review C6）：上游 bundle 行引用 / 注入包 lib 产物 / 客户端槽位 / 版本钉台账。
 # 本地链 --require 严格档（上游 dsh/ 与本机 node_modules 都在场）；云端自包含链无这些本机产物，
 # 对应小节按 SKIP 计数（check-release-gates --run --require 在发布链上强制齐全）。

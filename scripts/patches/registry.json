@@ -159,14 +159,6 @@
       "marker": "dsh-mobile link->rename fallback (F8)"
     },
     {
-      "id": "perf-patch-reload-N1",
-      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js",
-      "scope": "engine",
-      "summary": "patchReload=startup 出厂默认 + 存量升级归一化：web 模板默认 live->startup（上游 live 档额外挂 timer/hmr 反复重算客户端 combo），并把 installation-owned 当前元组下已显式写入的旧默认 live 一并归一化（上游只在键缺失时写回模板默认，存量用户永不归一化）",
-      "provenance": "0.13.8 性能 A1（docs/ANDROID-RUNTIME-PERF-2026-09-12.md §A1，实测冷启动 24.9s -> 16.6s）；验收 P-AC-23 全新安装 + P-AC-24 存量升级",
-      "marker": "dsh-mobile patchReload normalization (N1)"
-    },
-    {
       "id": "combo-lazy-A4",
       "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-modules/lib/index.js",
       "scope": "engine",
@@ -263,14 +255,6 @@
       "summary": "移动形态（html[data-dsh-mobile-form]）下目录行的落定动作改为下钻：点行体进子目录而不是把文件夹变成引用；桌面行为不变",
       "provenance": "2026-09-11 apk #163（用户拍板交互）；上游把「下钻」只绑在行尾 chevron/Tab 上，手机上点不到",
       "marker": "dsh-mobile mobile-folder-drill (F6)"
-    },
-    {
-      "id": "boot-pending-G1",
-      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js",
-      "scope": "engine",
-      "summary": "web boot 容错：非官方包 pending 降级为告警并继续启动；FAILED 与官方包 pending 仍致命",
-      "provenance": "0.13.5 W1b；apk issue #126 P3（第三方插件 inject 了 client-only 服务 uiConversation → 永久 pending → 整树 boot 失败）",
-      "marker": "dsh-mobile boot tolerance (G1)"
     },
     {
       "id": "pi-toolcall-G2",

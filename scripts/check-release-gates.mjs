@@ -39,6 +39,9 @@ const rel = (p) => relative(ROOT, p).replace(/\\/g, '/')
  */
 const GATES = [
   { script: 'check-patch-mirror.mjs', ciApk: true, ciCoord: true, needsSnapshot: false },
+  // 0.14.2 T6：补丁测试的夹具必须与 contract.baseline 同代——夹具停在上一代时「补丁回归」是结构性假绿
+  // （rc.1 实测：真树断 9 条而 16 个补丁测试全绿）。
+  { script: 'check-patch-fixtures.mjs', ciApk: true, ciCoord: true, needsSnapshot: false },
   { script: 'check-manifest-hardening.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
   { script: 'check-bounded-io.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
   // #222：所有 mobile-owned /api exact/prefix 路由必须在登记表中，并有本地 auth guard 或窄公开白名单。

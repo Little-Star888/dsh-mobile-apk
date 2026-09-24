@@ -968,74 +968,24 @@ const IMPLS = {
     },
   },
 
-  // ── boot-pending-G1：web boot 容错（0.13.5 W1b，引擎树补丁 scope=engine）──
-  // issue #126 P3：第三方插件声明 inject 了 client-only 服务（uiConversation 只存在于
-  // dsh-client-ui-*/lib/client.js），宿主永远不 provide → fiber 永久 pending →
-  // assertEntriesActivated 抛错 → 整树 boot 失败、用户看到「Failed to load plugins」。
-  // 不变量：非官方包的 pending 降级为告警（等不到的服务不会因等待而出现），
-  // FAILED 与官方包（@deepseek-ai/*）pending 仍然致命——核心 bundle 坏掉必须响亮失败。
-  'boot-pending-G1': {
-    file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js',
-    scope: 'engine',
-    check: (s) => s.includes('dsh-mobile boot tolerance (G1)'),
-    apply: (s) => {
-      const DECL_OLD = '\tconst failures = [];'
-      const DECL_NEW = '\tconst failures = [];\n'
-        + '\t// dsh-mobile boot tolerance (G1): entries that stay pending are collected here\n'
-        + '\t// instead of failing the boot, unless they are official packages.\n'
-        + '\tconst deferred = [];'
-      const PENDING_OLD = '\t\t\tfailures.push(`${entry.options.name}: pending (waiting for ${subject}: ${missing.join(", ") || "unknown"})`);'
-      const PENDING_NEW = '\t\t\tconst pendingLine = `${entry.options.name}: pending (waiting for ${subject}: ${missing.join(", ") || "unknown"})`;\n'
-        + '\t\t\t// dsh-mobile boot tolerance (G1): a missing service a third-party entry waits for\n'
-        + '\t\t\t// never appears on the host, so waiting cannot succeed; keep it pending and boot on.\n'
-        + '\t\t\tif (String(entry.options.name ?? "").startsWith("@deepseek-ai/")) failures.push(pendingLine);\n'
-        + '\t\t\telse deferred.push(pendingLine);'
-      const THROW_OLD = '\tif (failures.length > 0) {'
-      const THROW_NEW = '\tif (deferred.length > 0) {\n'
-        + '\t\tconst deferredNoun = deferred.length === 1 ? "entry" : "entries";\n'
-        + '\t\tconsole.warn(`${binName}: ${String(deferred.length)} ${deferredNoun} did not activate and stays pending; boot continues (dsh-mobile boot tolerance (G1))\\n${deferred.join("\\n")}`);\n'
-        + '\t}\n'
-        + '\tif (failures.length > 0) {'
-      const REPL = [
-        { old: DECL_OLD, neu: DECL_NEW },
-        { old: PENDING_OLD, neu: PENDING_NEW },
-        { old: THROW_OLD, neu: THROW_NEW },
-      ]
-      let changed = 0
-      for (const { old, neu } of REPL) {
-        if (s.includes(neu)) continue
-        if (!s.includes(old)) throw new Error('boot-pending 锚点未命中：' + old.slice(0, 90) + '…——引擎升级后请人工核对 assertEntriesActivated')
-        s = s.replace(old, neu)
-        changed++
-      }
-      if (!s.includes('dsh-mobile boot tolerance (G1)') || !s.includes('const deferred = [];')) {
-        throw new Error('boot-pending 复核失败——不写回')
-      }
-      console.log(`  boot-pending-G1: ${changed} 处锚点替换`)
-      return s
-    },
-  },
-
   // ── boot-third-party-isolation-G3：第三方插件 boot 期失败隔离（0.14.1，scope=engine）──
   // 真因（真实用户反馈 报错反馈/0.14.0/20260919-125714-engine-died-during-boot，华为 NOH-AN00 /
   // Android 31 / arm64 / 0.14.0 vc39）：用户自装的 dsh-live2d-pets 在 **import 期**抛 SyntaxError
   // （`The requested module '@deepseek-ai/dsh-settings' does not provide an export named
   // 'settingsNamespace'`）→ 整树 boot 失败、engine exit=1。
-  // **boot-pending-G1 结构上无法覆盖这一形态**：G1 的锚点全在 `assertEntriesActivated` 内
-  // （dsh-app-boot/lib/index.js:1472-1505），而 import 失败的抛出点在**更早**的调用链上——
-  //   boot(:1543) → mountRootInclude(:1552) → loader.create(:553) → EntryTree.update
-  //   (cordis-plugin-loader/lib/index.js:86) → Promise.allSettled(:97) → Entry._init → import 失败
-  //   → updateError("import", …)（loader:309/524）→ failures.length === 1 → `throw failures[0]`（loader:100）
-  // 该异常在 mountRootInclude 处就冒泡进 boot 的 catch(:1557)，**assertEntriesActivated(:1555) 根本
-  // 不会被执行** ⇒ 不是「锚点漏了分支」，而是 G1 的函数在这条路径上不可达。
-  // 修法：在 boot() 里把挂载 root include 换成**隔离式挂载**——失败时若失败条目属于「用户自装第三方」，
+  // **为什么必须在 boot() 的挂载点拦，而不是在启动后的条目断言里容错**：import 失败的抛出点在
+  // **更早**的调用链上——boot() → mountRootInclude() → loader.create() → EntryTree.update
+  //   (cordis-plugin-loader) → Promise.allSettled → Entry._init → import 失败 → updateError("import", …)
+  //   → 单条失败即 `throw failures[0]`
+  // 该异常在 mountRootInclude 处就冒泡进 boot 的 catch，**assertEntriesActivated 根本不会被执行**
+  // ⇒ 条目断言层的容错对这条路径不可达（不是漏了分支，是那个函数不在路径上）。
+  // 修法：把挂载 root include 换成**隔离式挂载**——失败时若失败条目属于「用户自装第三方」，
   // 则用既有 patch 机制给它加 `disabled: true` 后重试；成功后在 engine.log 里**点名**被跳过的插件。
-  //   - 复用 `applyEntryPatches` 的 `disabled` 覆盖（cordis-plugin-include/lib/index.js:100），
+  //   - 复用 `applyEntryPatches` 的 `disabled` 覆盖（cordis-plugin-include），
   //     loader 的 `Entry._disabled()` 对新条目跳过 `init()` ⇒ 不再 import 坏插件。不改 loader/vendor。
   //   - **官方包与出厂移动侧插件失败仍然响亮失败**（@deepseek-ai/*、@dsh-android/* 及出货具名插件），
-  //     核心坏掉必须可见——这条不变量与 G1 同口径且更强。
+  //     核心坏掉必须可见。
   //   - **有上限**：最多隔离 8 个，超过即响亮失败并给出完整清单（不允许无限容忍）。
-  //   - 与 G1 **anchor 互不相交、顺序无关**（各自函数不同），故不设 requires 以免假耦合。
   'boot-third-party-isolation-G3': {
     file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js',
     scope: 'engine',
@@ -1046,7 +996,7 @@ const IMPLS = {
       // （只按前缀判归属，会把不可证的 path/URL 条目也隔离掉）→ 必须判为未应用并重新施加。
       && s.includes('dshMobileIsIsolatableEntry')
       // 反 no-op：boot() 仍直接挂载 root include 就说明隔离没接上。
-      && !s.includes('\t\tawait mountRootInclude(ctx, absoluteConfigPath, patches, bareModuleBaseUrl);'),
+      && !s.includes('\t\tawait mountRootInclude(ctx, absoluteConfigPath, patches, bareModuleBaseUrl, binName);'),
     apply: (s) => {
       if (s.includes('dsh-mobile third-party boot isolation (G3)') && s.includes('dshMobileMountRootIncludeTolerant') && s.includes('dshMobileIsIsolatableEntry')) return s
       // ① 隔离式挂载器 + 判据（插在 boot() 定义之前）
@@ -1146,7 +1096,7 @@ const IMPLS = {
         '\tconst disabled = [];',
         '\tfor (;;) {',
         '\t\ttry {',
-        '\t\t\tawait mountRootInclude(ctx, absoluteConfigPath, [...(patches ?? []), ...disabled], bareModuleBaseUrl);',
+        '\t\t\tawait mountRootInclude(ctx, absoluteConfigPath, [...(patches ?? []), ...disabled], bareModuleBaseUrl, binName);',
         '\t\t\tif (disabled.length > 0) {',
         '\t\t\t\tconst noun = disabled.length === 1 ? "plugin" : "plugins";',
         '\t\t\t\tconsole.warn(`${binName}: ${String(disabled.length)} third-party ${noun} failed to load during boot and will be skipped; the engine continues. Broken: ${disabled.map((entry) => entry.name).join(", ")} (dsh-mobile third-party boot isolation (G3)). Update or remove the plugin to clear this warning.`);',
@@ -1176,14 +1126,14 @@ const IMPLS = {
       if (!s.includes(BOOT_FN_ANCHOR)) throw new Error('boot-third-party-isolation 锚点未命中：boot() 函数头（引擎升级后请人工核对 dsh-app-boot）')
       s = s.replace(BOOT_FN_ANCHOR, HELPERS)
       // ② boot() 调用点改为隔离式挂载
-      const CALL_OLD = '\t\tawait mountRootInclude(ctx, absoluteConfigPath, patches, bareModuleBaseUrl);'
+      const CALL_OLD = '\t\tawait mountRootInclude(ctx, absoluteConfigPath, patches, bareModuleBaseUrl, binName);'
       const CALL_NEW = '\t\tawait dshMobileMountRootIncludeTolerant(ctx, binName, absoluteConfigPath, patches, bareModuleBaseUrl); /* dsh-mobile third-party boot isolation (G3) */'
       if (!s.includes(CALL_OLD)) throw new Error('boot-third-party-isolation 锚点未命中：boot() 内 mountRootInclude 调用点')
       s = s.replace(CALL_OLD, CALL_NEW)
       if (!s.includes('dsh-mobile third-party boot isolation (G3)')
         || !s.includes('dshMobileMountRootIncludeTolerant')
         || !s.includes('__dshMobileBootSkippedPlugins')
-        || s.includes('\t\tawait mountRootInclude(ctx, absoluteConfigPath, patches, bareModuleBaseUrl);')) {
+        || s.includes('\t\tawait mountRootInclude(ctx, absoluteConfigPath, patches, bareModuleBaseUrl, binName);')) {
         throw new Error('boot-third-party-isolation 复核失败——不写回')
       }
       return s
@@ -1313,55 +1263,6 @@ const IMPLS = {
       return s
     },
   },
-  // ── perf-patch-reload-N1：patchReload=startup 出厂默认 + 存量升级归一化（0.13.8 性能 A1，scope=engine）──
-  // 背景（docs/ANDROID-RUNTIME-PERF-2026-09-12.md §A1/R2，实测 24.9s -> 16.6s 冷启动）：
-  // 出厂 web profile 的 patchReload 是 "live"，上游在 live 档额外挂 cordis-plugin-timer 与
-  // cordis-plugin-hmr，启动期反复现场重算客户端 combo（36 -> 16 次）。Android 上 live reload
-  // 本就不可用（坑 19：改 cordis.patch.yml 必须冷启动才生效），保留它纯亏启动时间。
-  // 两处一起改才算修好（P-AC-23 全新安装 + P-AC-24 存量升级）：
-  //   ① web 模板默认 "live" -> "startup"：initProfile（全新安装）与「键缺失」的升级用户都拿到 startup；
-  //   ② normalizeShippedProfile 的 needsReloadDefault：上游只在键**缺失**时写回模板默认，而存量设备上
-  //      旧引擎早已把 "live" 显式写进 profiles/web/package.json -> 永不归一化。改为「installation-owned
-  //      当前元组下把旧默认 live 一并归一化」，只动安装方拥有的元组，用户自建 profile 元组不受影响。
-  'perf-patch-reload-N1': {
-    file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js',
-    scope: 'engine',
-    check: (s) => (s.match(/dsh-mobile patchReload normalization \(N1\)/g) || []).length === 2,
-    apply: (s) => {
-      if ((s.match(/dsh-mobile patchReload normalization \(N1\)/g) || []).length === 2) return s
-      const TEMPLATE_OLD = '\tweb: {\n\t\tbundles: ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"],\n\t\tpatchReload: "live"\n\t},'
-      const TEMPLATE_NEW = [
-        '\tweb: {',
-        '\t\tbundles: ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"],',
-        '\t\t/* dsh-mobile patchReload normalization (N1): the shipped web profile starts in',
-        '\t\t * "startup" mode — Android cannot use live patch reload (a cordis.patch.yml change',
-        '\t\t * never takes effect without a restart, gotcha 19) and live costs 8s of cold start. */',
-        '\t\tpatchReload: "startup"',
-        '\t},',
-      ].join('\n')
-      if (!s.includes(TEMPLATE_OLD)) throw new Error('perf-patch-reload 锚点未命中：web 模板 patchReload: "live"')
-      s = s.replace(TEMPLATE_OLD, TEMPLATE_NEW)
-      const NORMALIZE_OLD = '\tconst needsReloadDefault = manifest.dsh?.profile?.patchReload === void 0 && isCurrentTuple;'
-      const NORMALIZE_NEW = [
-        '\t/* dsh-mobile patchReload normalization (N1): resident installs already carry the old',
-        '\t * installation default "live" explicitly, so the upstream fill-a-missing-key rule never',
-        '\t * reaches them; an installation-owned tuple is normalized to the shipped default. */',
-        '\tconst staleReloadDefault = manifest.dsh?.profile?.patchReload === "live";',
-        '\tconst needsReloadDefault = isCurrentTuple && (manifest.dsh?.profile?.patchReload === void 0 || staleReloadDefault);',
-      ].join('\n')
-      if (!s.includes(NORMALIZE_OLD)) throw new Error('perf-patch-reload 锚点未命中：needsReloadDefault（引擎升级后请人工核对 normalizeShippedProfile）')
-      s = s.replace(NORMALIZE_OLD, NORMALIZE_NEW)
-      const ASSIGN_OLD = '\t\t\t\tpatchReload: manifest.dsh?.profile?.patchReload ?? template.patchReload'
-      const ASSIGN_NEW = '\t\t\t\tpatchReload: staleReloadDefault ? template.patchReload : (manifest.dsh?.profile?.patchReload ?? template.patchReload)'
-      if (!s.includes(ASSIGN_OLD)) throw new Error('perf-patch-reload 锚点未命中：patchReload 回写表达式')
-      s = s.replace(ASSIGN_OLD, ASSIGN_NEW)
-      if ((s.match(/dsh-mobile patchReload normalization \(N1\)/g) || []).length !== 2) {
-        throw new Error('perf-patch-reload 复核失败——不写回')
-      }
-      return s
-    },
-  },
-
   // ── combo-lazy-A4：compose() 延迟 + 去重（0.14.0 启动性能 P1-1，scope=engine）──
   // 背景（docs/ANDROID-RUNTIME-PERF-2026-09-12.md §R1/§4.A4）：装配期每次 internal/plugin 事件
   // 都触发 flush → compose() 全表重建 90 条 combo（单次 1.8-3.1 s，启动期 9-14 次，占 LISTEN
@@ -1430,8 +1331,8 @@ const IMPLS = {
       const INJECT_NEW = '\t\t\ttable.push(...bootInjections(this.ensureComposed()));'
       if (!s.includes(INJECT_OLD)) throw new Error('combo-lazy 锚点未命中：index-inject 行')
       s = s.replace(INJECT_OLD, INJECT_NEW)
-      const RESOURCE_OLD = '\tbundleResource(method, url) {\n\t\tif (method !== "GET" && method !== "HEAD") return { status: 405 };'
-      const RESOURCE_NEW = '\tbundleResource(method, url) {\n\t\tthis.ensureComposed();\n\t\tif (method !== "GET" && method !== "HEAD") return { status: 405 };'
+      const RESOURCE_OLD = '\tasync bundleResource(method, url) {\n\t\tif (method !== "GET" && method !== "HEAD") return { status: 405 };'
+      const RESOURCE_NEW = '\tasync bundleResource(method, url) {\n\t\tthis.ensureComposed();\n\t\tif (method !== "GET" && method !== "HEAD") return { status: 405 };'
       if (!s.includes(RESOURCE_OLD)) throw new Error('combo-lazy 锚点未命中：bundleResource')
       s = s.replace(RESOURCE_OLD, RESOURCE_NEW)
       const REBUILT_OLD = '\t\tthis.composed = this.compose();\n\t\tfor (const notify of this.rebuildListeners) try {'
@@ -1544,8 +1445,11 @@ const IMPLS = {
         '\tconsole.log(`client-modules: combo cache (A3) state=${stats.state} entries=${stats.entries} hits=${stats.hits} misses=${stats.misses}`);',
         '}',
       ].join('\n')
-      const HELPERS_ANCHOR = '/** sha1 content hash shortened to 12 hex chars (combo / graph / rebuilt-artifact rev). */'
-      if (!s.includes(HELPERS_ANCHOR)) throw new Error('combo-cache 锚点未命中：shortHash JSDoc（引擎升级后请人工核对 dsh-client-modules）')
+      // 锚 = shortHash 的函数头本身，不是它上面的 JSDoc：rc.1 把注释从 "content hash (combo / graph /
+      // rebuilt-artifact rev)" 改成 "metadata hash"，而函数签名与全文件唯一性都没变——锚在会被上游
+      // 随手改写的散文上，等于把补丁挂在别人的备忘录上。
+      const HELPERS_ANCHOR = 'function shortHash(input) {'
+      if (!s.includes(HELPERS_ANCHOR)) throw new Error('combo-cache 锚点未命中：shortHash 函数头（引擎升级后请人工核对 dsh-client-modules）')
       s = s.replace(HELPERS_ANCHOR, HELPERS + '\n' + HELPERS_ANCHOR)
       const LOOP_OLD = [
         '\tfor (const record of records) {',
@@ -2147,7 +2051,10 @@ const IMPLS = {
     check: (s) => s.includes('dsh-mobile compile cache flush (N2)') && s.includes('dshMobileFlushCompileCacheQuietly'),
     apply: (s) => {
       if (s.includes('dsh-mobile compile cache flush (N2)') && s.includes('dshMobileFlushCompileCacheQuietly')) return s
-      const IMPORT_OLD = 'import { readFileSync } from "node:fs";'
+      // 锚 = bin.js 的最后一条顶层 import（rc.1 起 node:util 那行；此前是 node:fs 的 readFileSync，
+      // 上游把根包改成只用 fs/promises 后旧锚逐字符消失）。插在 import 之后、`//#region` 之前，
+      // 保证定时器与 exit 兜底在任何命令逻辑跑起来之前就注册。
+      const IMPORT_OLD = 'import { inspect } from "node:util";'
       const BLOCK = [
         'import { flushCompileCache as dshMobileFlushCompileCache } from "node:module";',
         '/* dsh-mobile compile cache flush (N2): Node persists NODE_COMPILE_CACHE entries only when the',
