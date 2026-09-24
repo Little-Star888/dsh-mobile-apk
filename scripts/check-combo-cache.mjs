@@ -29,13 +29,19 @@ const ROOT = dirname(HERE)
 const argv = process.argv.slice(2)
 const DEAD_PATCH_IDS = ['combo-cache-A3', 'combo-single-lazy-A5', 'combo-parallel-C3']
 
+/** 只留可执行行：撤销说明里提一句文件名是合法的，判全文会把自己变成假红（0.14.2 已踩过两次）。 */
+const codeOnly = (text) => text.split('\n')
+  .filter((l) => !l.trim().startsWith('//') && !l.trim().startsWith('#') && !l.trim().startsWith('<#'))
+  .join('\n')
+
 /** 纯判据：喂成员清单 + 构建脚本源码 + 登记表 id，返回失败列表（--self-test 直接驱动它）。 */
 function audit(memberNames, buildScriptsText, registryIds) {
   const out = []
   const dead = memberNames.filter((n) => n.includes('/.combo-cache/'))
   if (dead.length > 0) out.push(`快照内含 combo 死缓存条目 ${String(dead.length)} 个: [${dead.slice(0, 3).join(', ')}]——A3 已撤销（上游 rc.1 懒构造后预计算净亏）`)
-  if (/combo-precompute\.mjs/.test(buildScriptsText)) out.push('构建链仍在调用 combo-precompute.mjs')
-  if (/--combo-cache-delta/.test(buildScriptsText)) out.push('inject-all 仍接受 --combo-cache-delta（死缓存的回流口）')
+  const code = codeOnly(buildScriptsText)
+  if (/combo-precompute\.mjs/.test(code)) out.push('构建链仍在调用 combo-precompute.mjs')
+  if (/--combo-cache-delta/.test(code)) out.push('inject-all 仍接受 --combo-cache-delta（死缓存的回流口）')
   for (const id of DEAD_PATCH_IDS) if (registryIds.includes(id)) out.push(`补丁登记表复活了 ${id}`)
   return out
 }
@@ -52,6 +58,8 @@ if (argv.includes('--self-test')) {
     audit([], 'elif argv[i] == "--combo-cache-delta":', ids).length === 1)
   push('反证：登记表复活 A3 判红',
     audit([], '', ['combo-cache-A3']).length === 1)
+  push('反证：注释里提文件名不误判（撤销说明本身就是合法文案）',
+    audit([], '// 链路面不得再调 combo-precompute.mjs\n  run(\'node\', [gate(\'check-something.mjs\')])', ids).length === 0)
   push('对照组：干净输入不判红', audit(['home/.dsh/profiles/web/package.json'], '', ids).length === 0)
   if (fails.length) { console.error(`COMBO-CACHE SELF-TEST FAILED（${fails.length} 项）`); process.exit(1) }
   console.log('COMBO-CACHE SELF-TEST PASSED')
