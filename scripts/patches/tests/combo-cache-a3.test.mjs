@@ -51,8 +51,9 @@ const scriptFn = src.slice(src.indexOf('function buildComboScript('), src.indexO
 const mapFn = src.slice(src.indexOf('function buildComboSourceMap('), src.indexOf('function buildCombo('))
 check('boot 路径（buildComboScript）不构造 identity map', !scriptFn.includes('identitySectionMap') && !scriptFn.includes('newlineCount'))
 check('identity map 只在 .map 端点路径上构造', mapFn.includes('identitySectionMap') && mapFn.includes('newlineCount'))
-check('A3 清单形态确实内联全量 source（5 MiB 死重的来源可核）',
-  readFileSync(join(repoRoot, 'scripts', 'lib', 'combo-precompute.mjs'), 'utf8').includes('source: '))
+check('A3 的预计算模块已随补丁一并移除（不留无人调用的死代码）',
+  !existsSync(join(repoRoot, 'scripts', 'lib', 'combo-precompute.mjs'))
+  && !existsSync(join(repoRoot, 'dsh-mobile-apk', 'scripts', 'lib', 'combo-precompute.mjs')))
 
 // ④ 回流门禁自身可判红（新语义：产物里出现 .combo-cache 即红）
 const gate = spawnSync(process.execPath, [join(repoRoot, 'scripts', 'check-combo-cache.mjs'), '--self-test'], { encoding: 'utf8' })

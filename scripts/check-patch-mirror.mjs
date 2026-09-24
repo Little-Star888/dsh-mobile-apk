@@ -252,7 +252,6 @@ if (peer) {
     'scripts/check-strip-noop.mjs',
     // combo 缓存（0.14.0 启动性能 P1-2 / A3）：预计算模块与覆盖门禁是双仓构建链的同一执行面——
     // 云端自包含构建会用 apk 仓副本（单边演进 = 云端算出的缓存与协调仓门禁口径不一致）。
-    'scripts/lib/combo-precompute.mjs',
     'scripts/check-combo-cache.mjs',
     // 云端链与 CI 都跑它（build-apk.mjs GATE_SCRIPTS），此前不在镜像面 = 单边演进可绕过（ST-17 顺路收口）
     'scripts/check-engine-overlay.mjs',

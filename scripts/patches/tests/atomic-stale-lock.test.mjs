@@ -1,6 +1,7 @@
 // atomic-stale-lock.test.mjs — F4 补丁回归：锚点命中 + 行为正确 + 幂等。
 //
-// 用 devices/引擎树同一版本的只读 fixture（fixtures/dsh-atomic-write-0.1.5-rc.1/lib/index.js）在临时
+// 用与引擎同代的只读 fixture（fixtures/dsh-atomic-write-<contract.baseline>/lib/index.js，见
+// tests/lib/fixture.mjs）在临时目录里跑补丁，验 F4 的判定分支。
 // 根目录复现「引擎树」形态，跑 apply-patches --apply --scope engine --only atomic-stale-lock-F4，
 // 然后直接 import 打过补丁的 ESM 产物做行为断言：孤儿锁回收、活锁仍超时、垃圾内容不动锁。
 //

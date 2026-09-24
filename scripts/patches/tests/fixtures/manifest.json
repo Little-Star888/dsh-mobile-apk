@@ -96,41 +96,6 @@
       "files": [
         "dist/api/openai-completions.js"
       ]
-    },
-    "dsh-app-boot-0.1.5-rc.1": {
-      "source": "superseded",
-      "engine": "0.1.5-rc.1",
-      "reason": "上一代（0.1.5-rc.1）夹具，已由 0.1.7-rc.1 随版副本取代；等文件删除口令（本轮 rm/git rm 被安全策略拦下）。任何测试重新引用它都会被 check-patch-fixtures 判红。"
-    },
-    "dsh-atomic-write-0.1.5-rc.1": {
-      "source": "superseded",
-      "engine": "0.1.5-rc.1",
-      "reason": "上一代（0.1.5-rc.1）夹具，已由 0.1.7-rc.1 随版副本取代；等文件删除口令（本轮 rm/git rm 被安全策略拦下）。任何测试重新引用它都会被 check-patch-fixtures 判红。"
-    },
-    "dsh-client-modules-0.1.5-rc.1": {
-      "source": "superseded",
-      "engine": "0.1.5-rc.1",
-      "reason": "上一代（0.1.5-rc.1）夹具，已由 0.1.7-rc.1 随版副本取代；等文件删除口令（本轮 rm/git rm 被安全策略拦下）。任何测试重新引用它都会被 check-patch-fixtures 判红。"
-    },
-    "dsh-client-resources-0.1.5-rc.1": {
-      "source": "superseded",
-      "engine": "0.1.5-rc.1",
-      "reason": "手写最小 protocolOf 复现，已被 0.1.7-rc.1 真产物夹具取代（arkweb 测试现读真字节，10 条断言全过）；等文件删除口令。"
-    },
-    "dsh-fs-local-0.1.5-rc.1": {
-      "source": "superseded",
-      "engine": "0.1.5-rc.1",
-      "reason": "上一代（0.1.5-rc.1）夹具，已由 0.1.7-rc.1 随版副本取代；等文件删除口令（本轮 rm/git rm 被安全策略拦下）。任何测试重新引用它都会被 check-patch-fixtures 判红。"
-    },
-    "dsh-root-0.1.5-rc.1": {
-      "source": "superseded",
-      "engine": "0.1.5-rc.1",
-      "reason": "上一代（0.1.5-rc.1）夹具，已由 0.1.7-rc.1 随版副本取代；等文件删除口令（本轮 rm/git rm 被安全策略拦下）。任何测试重新引用它都会被 check-patch-fixtures 判红。"
-    },
-    "dsh-session-persistence-jsonl-0.1.5-rc.1": {
-      "source": "superseded",
-      "engine": "0.1.5-rc.1",
-      "reason": "上一代（0.1.5-rc.1）夹具，已由 0.1.7-rc.1 随版副本取代；等文件删除口令（本轮 rm/git rm 被安全策略拦下）。任何测试重新引用它都会被 check-patch-fixtures 判红。"
     }
   }
 }
