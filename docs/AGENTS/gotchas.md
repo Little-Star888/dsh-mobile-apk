@@ -641,3 +641,20 @@
 172. **上游 peer 门禁与 npm 解析用的是两套 semver 判据，caret 地板留在旧代会在安装期就炸（2026-09-24 追 0.1.7-rc.1 实锤）**：上游 `app-boot/src/plugin-compatibility.ts:77` 判兼容用 `semver.satisfies(runtime, range, { includePrerelease: true })`，而 **npm 自己解析 peer 时不带 `includePrerelease`** ⇒ 同一个 `^0.1.1-rc.2` 在运行时门禁里放行 0.1.7-rc.1、在 `npm install` 里却判不满足。叠上冻结载体就更狠：`@deepseek-ai/dsh-client-runtime` 只发到 **0.1.1-rc.2**（引擎主版本线从来不含它），它自带 16 条 `^0.1.1-rc.2` peer，把它拽进来的仓装 rc.1 时直接 `ERESOLVE`（实测 `plugins/dsh-android-vdisplay`），错误文案指向的却是「dsh-tools 的 peer dsh-agent」——真因在传递图上，不在被点名的那条边。
     **修法（两件，都不许留）**：① 追版时 caret **地板随版抬**（`scripts/bump-plugin-pins.mjs` 按 `contract.json` 一次性抬，形态保留），别只改精确钉；② 只为拿一个类型而依赖冻结载体 = 把一个时代的引擎图拽进安装面 —— 客户端类型按上游自身写法拿：`import type { Context as ClientContext } from '@deepseek-ai/cordis'`（见 `dsh/packages/client/locale/src/client/index.ts:7`），本仓 `dsh-client-ui-responsive` 一直就是这么写的，只有 bridge/vdisplay 两个入口当年抄了 `dsh-client-runtime/client`。
     **判据**：`scripts/check-contract.mjs` §7 拿**设备侧同一个 semver 库**在构建前复刻上游判定（`--runtime <不可满足版本>` 是它的反证档），§6 的 `contract-pin-gaps.json` 让「钉未对齐」必须显式声明、一旦对齐不删条目即红。教训半条：**写死版本号的反例会在抬版后静默失效**——本轮 `--self-test` 就有 2 例这么失效（§7 反例从「装成 0.1.7-rc.1」改成「装成 0.0.1-rc.1」，§9 反例改从 `contract.baseline` 取值），反证必须与进度无关才可重跑。
+
+173. **面板宽度有两份公式而其中一份是死代码，转屏又没人重算——横屏体验与「窗口比内容宽」两类假象同源（2026-09-24）**
+    **现象**：横屏（1600x900）上面板看起来「没用上多出来的宽度」；反过来在竖屏打开面板再转横屏，面板保持竖屏宽度；
+    而代码里 `OverlayPanel.buildUnit()` 开头明明也算了一次 `width`（屏宽 - 64dp - 32dp，封顶 400dp）。
+    **真因**：① 那个 `val width` 在 `buildUnit()` 全文**无人消费**（实测：`buildUnit` 作用域内 `width` 只出现在声明行），
+    面板宽的唯一生效口径是 `OverlayService.showPanel()` 里给窗口的 `panelW`——两份公式（还互不相同）只有一份生效，
+    留着会让后来人以为改它能改面板宽；② 两个 Activity 都声明 `configChanges="orientation|screenSize|screenLayout"`
+    （不重建），`OverlayService.onConfigurationChanged()` 只重刷主题 + 球坐标 + `positionPanel()`，
+    **从不重算窗口宽度**（`panelW` 是 `showPanel()` 的一次性局部量），`hidePanel()` 也不清 `unitView`，
+    所以没有任何路径会在转屏后替它换宽——不是概率问题，是结构性无人负责。
+    **修法**：① 删掉 `buildUnit()` 里的死 `val width`，宽度口径收敛到 `OverlayService.panelWindowWidth()` 单一函数；
+    ② `onConfigurationChanged()` 在面板展开时按新屏幕重算 `pp.width` 并 `updateViewLayout` + 重定位。
+    **同类**：抽屉/浮层窗口高度若只按 `heightPixels` 取比例，横屏会被压没（本条同批处理：
+    `OverlayReport` 汇报栏与 `OverlayPanel` 会话选择器加了 dp 地板并以「屏高 - 边距」封顶，
+    保证比例假设在横屏不再等于「可用高度被腰斩」）。
+    **判据**：几何类改动必须过竖屏 16416 与横屏 16384 两个方向的 tap 级实测（AGENTS §2.1.6）——
+    DOM/CDP 断言看不见这类缺陷（§2.1.4）。

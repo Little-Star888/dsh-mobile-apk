@@ -151,6 +151,15 @@ class OverlayService : Service() {
     clampBallPos(p)
     try { rootView?.let { wm.updateViewLayout(it, p) } } catch (_: Exception) {}
     syncHalo()
+    // 展开中的面板要按新屏幕重算窗口宽度（只重定位不改宽 = 竖屏宽带到横屏、或横屏宽溢出竖屏）。
+    if (expanded) {
+      val pp = panelParams
+      val u = panel.unitView
+      if (pp != null && u != null) {
+        pp.width = panelWindowWidth()
+        try { wm.updateViewLayout(u, pp) } catch (_: Exception) {}
+      }
+    }
     positionPanel()
     emitFrame()
   }
@@ -269,6 +278,19 @@ class OverlayService : Service() {
     if (expanded) hidePanel() else showPanel()
   }
 
+  /**
+   * 面板窗口宽度：屏宽减去悬浮球与两侧留白，封顶 400dp。
+   *
+   * 必须是**每次都要重算的函数**而不是 showPanel() 里的一次性局部量：本服务的两个 Activity 都声明了
+   * `configChanges="orientation|screenSize|screenLayout"`（不重建），所以「转屏时还开着的面板」
+   * 没有任何人替它换宽度——竖屏开的 354dp 面板转到横屏仍是 354dp（白送 2/3 屏幕不用），
+   * 横屏开的 400dp 面板转到竖屏则直接超出可用宽（`displayMetrics.widthPixels - 球 - 边距`）。
+   */
+  private fun panelWindowWidth(): Int {
+    val dp = resources.displayMetrics.density
+    return (resources.displayMetrics.widthPixels - ballSizeDp - (64 * dp).toInt()).coerceAtMost((400 * dp).toInt())
+  }
+
   private fun showPanel() {
     if (expanded) return
     val dp = resources.displayMetrics.density
@@ -282,8 +304,8 @@ class OverlayService : Service() {
     // 球窗口贴顶时与键盘零相交（实测 ime bottom=0 visible=false），自监听原理性收不到。
     // 改面板独立窗口：focusable + ADJUST_PAN（默认），系统原生把面板整体顶到键盘上方、
     // 收起自动回位（v1「球+面板一起上跳」因两者分离而根治）；球窗口恒 NOT_FOCUSABLE 不动。
-    // 面板宽度显式给窗口（WRAP_CONTENT + 子级 weight 会塌陷成最小宽）：屏宽减球与边距、封顶 400dp。
-    val panelW = (resources.displayMetrics.widthPixels - ballSizeDp - (64 * dp).toInt()).coerceAtMost((400 * dp).toInt())
+    // 面板宽度显式给窗口（WRAP_CONTENT + 子级 weight 会塌陷成最小宽）：见 panelWindowWidth()。
+    val panelW = panelWindowWidth()
     val pp = WindowManager.LayoutParams(
       panelW, ViewGroup.LayoutParams.WRAP_CONTENT,
       WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,

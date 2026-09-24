@@ -889,6 +889,25 @@ log('瘦身扩展：global node_modules 孤儿重复包…')
 }
 log('瘦身扩展完成（global 孤儿重复包已剔除）')
 
+// ── 基座引擎树的上一代残留剔除（0.14.2；由 check-engine-overlay 的反向面抓到）──
+// 反向门禁要求「快照内每个包要么逐条登记、要么可由登记包经依赖闭包到达」。这 4 个 0.1.1-rc.2 的包
+// 两者都不是：上游 0.1.7-rc.1 全仓已无此名（被改名/删除），而设备基座的引擎树还带着它们
+// ——overlay 只覆盖登记表内的包，从不删树里的旧包，于是每个快照都在发死代码。
+// 清单 = snapshot-config/slim.json 的 engineStalePackages；门禁同时反向断言这些包**缺席**。
+for (const entry of SLIM.engineStalePackages ?? []) {
+  const declared = OVERLAY.packages[entry.name] !== undefined
+    || (OVERLAY.keepUnpublished ?? []).some((x) => String(x).replace(/ \(.+\)$/, '').trim() === entry.name)
+  if (declared) {
+    console.error(`[基座残留剔除中止] ${entry.name} 已在 overlay 登记表内——上游重新引入了同名包。`
+      + '请把该条从 slim.json 的 engineStalePackages 删掉，否则这里会把真依赖删掉。')
+    process.exit(1)
+  }
+  const dir = overlayPkgDir(entry.name)
+  if (!existsSync(join(dir, 'package.json'))) continue
+  wsl(`rm -rf "${wslPath(dir)}"`)
+  log(`  剔除基座残留 ${entry.name}（${entry.lastSeenVersion ?? '?'}，登记表与依赖闭包都不认）`)
+}
+
 // ── 8a3. 权限归一化：不在本步做 ───────────────────────────────────────────
 // 实测（2026-09-08）：WSL 的 /mnt/d 9p 挂载未启用 metadata，chmod 恒被忽略（stat 仍 777），
 // 因此「归档前 chmod 整棵树」在 Windows 侧是无效步骤，只会白走 6 万文件。归档权限的唯一

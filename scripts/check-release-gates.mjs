@@ -12,7 +12,7 @@
 //   node scripts/check-release-gates.mjs --list               # 打印声明的门禁集合
 //   node scripts/check-release-gates.mjs --run [--snapshot-dir <dir>]   # 顺序执行门禁集（发布链用）
 // 退出码：0 = 通过；1 = 接线缺口 / 门禁失败 / 树定位失败。
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { join, dirname, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
@@ -231,6 +231,23 @@ for (const f of ['scripts/build-release.ps1', 'scripts/build-apk-013.ps1']) {
   if (!existsSync(b)) { check('两树同版: ' + f, true, '（对端缺席，跳过）'); continue }
   const same = readFileSync(a).equals(readFileSync(b))
   check('两树同版: ' + f, same, '逐字节不一致（autocrlf 噪声也会计入——请同步镜像）')
+}
+
+// ── 3a. 构建/门禁脚本必须可被 node 解析（0.14.2 补线）─────────────────────
+// 真因（本轮实锤）：`check-patch-mirror` 只判**逐字节相等**，一份语法坏掉的 build-snapshot
+// 会「镜像一致 PASSED」地同步到两棵树，而所有静态门禁都不解析它——直到真正跑构建才炸，
+// 于是本地一次、CI 一次、发布链一次，三处都白等。语法是最廉价的判据，放在这里当自动挡。
+{
+  const scriptDirs = [join(ROOT, 'scripts'), join(ROOT, 'scripts', 'lib')]
+  const candidates = scriptDirs.flatMap((d) =>
+    existsSync(d) ? readdirSync(d).filter((f) => f.endsWith('.mjs')).map((f) => join(d, f)) : [])
+  const broken = []
+  for (const p of candidates) {
+    const r = spawnSync(process.execPath, ['--check', p], { encoding: 'utf8' })
+    if (r.status !== 0) broken.push(rel(p) + ': ' + ((r.stderr || '').split('\n').find((l) => l.includes('Error')) ?? '解析失败'))
+  }
+  check('构建/门禁脚本全部可解析（node --check，' + String(candidates.length) + ' 个）', broken.length === 0,
+    broken.join(' | '))
 }
 
 // ── 3b. 两份编排器门禁集差集 = 0（0.13.8-b ST-06 / F-ENV-04 ④）────────────────

@@ -215,7 +215,8 @@ class OverlayPanel(private val svc: OverlayService) {
   /** 展开合体圆角矩形（上区状态 + 下区输入，radius 30dp）。 */
   internal fun buildUnit(): View {
     val dp = svc.resources.displayMetrics.density
-    val width = (svc.resources.displayMetrics.widthPixels - (64 * dp).toInt() - (32 * dp).toInt()).coerceAtMost((400 * dp).toInt())
+    // 面板宽度不在这里算：它是**窗口**属性，唯一权威在 OverlayService.panelWindowWidth()
+    // （这里曾有一个同样公式的局部 val，实测全文无人消费——两份口径只有一份生效，留着就是谎）。
     val c = themeColors()
 
     // 目标会话选择器（0.13.8 G2 重构）：一行式目标显示，点击弹出**独立顶层 overlay

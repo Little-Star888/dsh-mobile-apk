@@ -228,6 +228,21 @@ CARRIERS.forEach((c, idx) => {
   else console.log(`  预设载体 ${c.label}: ${count} 项`)
 })
 
+// ── 基座残留剔除的反向断言（0.14.2）：slim.json 声明「已剔掉」的包必须真的不在树里 ──
+// 与构建期的剔除步互为镜像：清单说了不算，产物说了算。剔除步失效（基座换代 / 路径变更）时
+// 这里判红，而不是让死代码悄悄回流每个快照。
+{
+  const stale = (JSON.parse(readFileSync(join(HERE, 'snapshot-config', 'slim.json'), 'utf8')).engineStalePackages ?? [])
+  const present = res.present ?? {}
+  const names = new Set(Object.values(present).map((m) => m?.name).filter(Boolean))
+  for (const entry of stale) {
+    if (names.has(entry.name)) {
+      fails.push(`基座残留未剔除: ${entry.name}——slim.json 声明要删，快照里却还在（剔除步未生效或基座换代）`)
+    }
+  }
+  if (stale.length) console.log(`  基座残留反向断言：${stale.length} 条声明已逐条核验（在树即红）`)
+}
+
 if (fails.length) {
   console.error(`ENGINE-OVERLAY CHECK FAILED（${fails.length} 项）:`)
   for (const f of fails) console.error('  - ' + f)
