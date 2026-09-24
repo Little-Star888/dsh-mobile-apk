@@ -512,14 +512,9 @@ internal class EngineStartFlow(private val activity: MainActivity) {
                 // S1-4：进度**确定化 + 量纲统一**。旧实现只显示「已写入 N MB」且进度条恒为不确定态，
                 // 而状态副文案写的是「约 700MB」——两个数字对不上，用户无法判断还要多久。
                 // 现在 done 与 RUNTIME_UNCOMPRESSED_APPROX_BYTES 同量纲，进度条与文案一起走。
-                val pct = runtimeProgressPercent(done)
                 activity.guideRenderer.setDeterminateProgress(done, RUNTIME_UNCOMPRESSED_APPROX_BYTES)
                 activity.guideRenderer.progressText.visibility = View.VISIBLE
-                val mb = done / 1024 / 1024
-                val totalMb = RUNTIME_UNCOMPRESSED_APPROX_BYTES / 1024 / 1024
-                activity.guideRenderer.progressText.text =
-                  if (pct >= 0) "已写入 " + mb + " MB / 约 " + totalMb + " MB（" + pct + "%）"
-                  else "已写入 " + mb + " MB"
+                activity.guideRenderer.progressText.text = runtimeProgressLabel(done)
                 if (activity.guideRenderer.lastGuidePhase != GuidePhase.Extracting) {
                   activity.applyGuidePhase(GuidePhase.Extracting, "正在解压运行时")
                 }
