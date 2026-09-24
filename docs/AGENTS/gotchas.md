@@ -653,8 +653,16 @@
     所以没有任何路径会在转屏后替它换宽——不是概率问题，是结构性无人负责。
     **修法**：① 删掉 `buildUnit()` 里的死 `val width`，宽度口径收敛到 `OverlayService.panelWindowWidth()` 单一函数；
     ② `onConfigurationChanged()` 在面板展开时按新屏幕重算 `pp.width` 并 `updateViewLayout` + 重定位。
-    **同类**：抽屉/浮层窗口高度若只按 `heightPixels` 取比例，横屏会被压没（本条同批处理：
-    `OverlayReport` 汇报栏与 `OverlayPanel` 会话选择器加了 dp 地板并以「屏高 - 边距」封顶，
-    保证比例假设在横屏不再等于「可用高度被腰斩」）。
+    **同类（本条只修了汇报栏，会话选择器**未**改——见下面判据）**：抽屉/浮层窗口高度若只按
+    `heightPixels` 取比例，横屏会被压没。`OverlayReport` 的 `maxH = sh * 0.40f` 已加 300dp 地板，
+    并用「屏高 - 24dp」封顶（地板永不会把抽屉顶出可用屏幕）。
+    同形态还在 `OverlayPanel` 的会话选择器：`maxH = screenH * 0.45f`（横屏 405px=270dp，约 6 行），
+    但它是 **ScrollView 内的窗口高度**（列表可滚，不构成「条目够不到」），
+    ⇒ 本轮**不动它**，等设备层量出「横屏可见行数 / 用户是否需要多次翻页」再决定，不凭比例猜。
+    **设备几何实测（校准基准，勿沿用旧值）**：16416 `user_rotation=0`，natural `900x1600 @320dpi`
+    ⇒ 可用 900x1600、density 2.0、450x800dp；16384 `user_rotation=1`，natural 同为 `900x1600`
+    但 `@240dpi` ⇒ 可用 **1600x900**、density 1.5、1066x600dp。
+    注意 `wm size` 报的是 **natural** 尺寸（两台都显示 900x1600），横屏只能从 `user_rotation` 与
+    `dumpsys window` 的当前 frame 判读——照 `wm size` 判断方向会得出「两台都是竖屏」的错结论。
     **判据**：几何类改动必须过竖屏 16416 与横屏 16384 两个方向的 tap 级实测（AGENTS §2.1.6）——
     DOM/CDP 断言看不见这类缺陷（§2.1.4）。
