@@ -269,19 +269,6 @@ try {
     }
     const undoDeg = degraded.get('undo')
     const marketDeg = degraded.get('market')
-    // combo 缓存注入段（A3 启动性能）：注入链的 client.js 不在快照段预计算范围内，这里补算为
-    // client-combos.inject.json + <sha256>.map，经 inject-all --combo-cache-delta 合入 tar；
-    // 覆盖由注入后门禁 check-combo-cache 断言（与 build-apk-013.ps1 同一份实现）。
-    // 用**降级后的**源（与下方 inject-all 同一份），否则 combo 键与注入内容不一致。
-    log('combo 缓存注入段预计算（A3）…')
-    const comboDelta = join(work, 'combo-cache-delta')
-    mkdirSync(comboDelta, { recursive: true })
-    run('node', [
-      join(ROOT, 'scripts', 'lib', 'combo-precompute.mjs'),
-      ...pluginDirs.flatMap((p) => ['--scan', p]),
-      '--scan', undoDeg, '--scan', marketDeg,
-      '--out', comboDelta, '--manifest', 'client-combos.inject.json', '--engine', 'inject',
-    ])
     log('单 pass 注入（@dsh-android + undo/market + 权威 patch，全部装配 profile）…')
     // ST-05：--all-profiles = 权威 patch 写给全部真实装配 profile（web+headless，负控 profile 除外）
     run('python', [
@@ -290,7 +277,6 @@ try {
       '--dsh-android', ...pluginDirs,
       '--external', undoDeg, marketDeg,
       '--all-profiles',
-      '--combo-cache-delta', comboDelta,
     ])
     snapIn = join(work, 'snap-final2.tar.xz')
   } else {
@@ -304,8 +290,9 @@ try {
   // 注入面成员完整性（P0）：包内新增文件必须随注入进 tar，且相对导入不得悬空
   log('门禁：注入成员完整性（成员集合 + 相对导入可解析）…')
   run('node', [gate('check-inject-completeness.mjs'), snapIn])
-  // combo 缓存覆盖（A3）：注入后 tar 的每条 client.js 必须有 sha256 命中的缓存条目（含注入段增量）
-  log('门禁：combo 缓存覆盖（sha256 命中 + map 在场）…')
+  // combo 死缓存回流防护（0.14.2 撤销 A3 后反向）：产物里不得再出现 .combo-cache，构建链不得再调
+  // combo-precompute——上游 rc.1 已把 combo 载荷改懒构造，5 MiB 预计算清单反而更慢（实测见补丁头注）。
+  log('门禁：combo 死缓存不得回流产物…')
   run('node', [gate('check-combo-cache.mjs'), snapIn])
   // 浏览器语法下限（0.14.1 块C G-1）：入口 chunk 带 `static{}` 会让老内核（WebView <94）整模块不执行
   // → 纯白无字。判据 = 真实解析器 AST + esbuild 双 arm 逐字节差分（禁 grep），扫全清单。

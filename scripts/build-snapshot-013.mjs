@@ -411,40 +411,6 @@ for (const entry of OVERLAY.keepUnpublished ?? []) {
   log(`浏览器语法下限降级就位（chrome87；扫描 ${scannedFiles} 个浏览器面文件，改写 ${degradedFiles} 个，降级后复扫全绿）`)
 }
 
-// ── 0f-2. combo 构建期预计算（0.14.0 启动性能 P1-2 / 引擎树补丁 combo-cache-A3 的写半边）──
-// 把客户端 bundle 的 identity combo source 与 section map 在构建期算一次写进
-// home/.dsh/profiles/web/.combo-cache/（键 = sha256(client.js)）。运行时补丁按 sha256 查表，
-// 未命中/损坏回退现场生成（fail-open）。注入段的 4 条 client.js 由构建链
-// （build-apk-013.ps1 / build-apk.mjs）用 scripts/lib/combo-precompute.mjs 补算为
-// client-combos.inject.json + map 文件，经 inject-all.py --combo-cache-delta 合入 tar；
-// 两条链在注入后由 scripts/check-combo-cache.mjs 断言覆盖全部 client.js。
-// ⚠️ 双份构建脚本必须同改（雷点 10）。
-{
-  const stageRoot = join(STAGE, 'root')
-  const cacheDir = join(stageRoot, 'home', '.dsh', 'profiles', 'web', '.combo-cache')
-  if (!existsSync(join(stageRoot, 'home', '.dsh', 'profiles', 'web', 'package.json'))) {
-    console.error('[combo 预计算失败] 出厂 web profile 缺席（base-dsh 合并/seed 步骤未生效？）')
-    process.exit(1)
-  }
-  const precompute = join(ROOT, 'scripts', 'lib', 'combo-precompute.mjs')
-  const out = execSync(`node "${precompute}" --scan "${stageRoot}" --out "${cacheDir}" --manifest client-combos.json --engine "${readCfg('engine-overlay.json').engineVersion}"`,
-    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
-  for (const line of out.split('\n')) {
-    if (line.startsWith('COMBO-PRECOMPUTE') || line.startsWith('combo-precompute: skip')) log(line)
-  }
-  const manifestPath = join(cacheDir, 'client-combos.json')
-  if (!existsSync(manifestPath)) {
-    console.error('[combo 预计算失败] manifest 缺席: ' + manifestPath)
-    process.exit(1)
-  }
-  const count = Object.keys(JSON.parse(readFileSync(manifestPath, 'utf8')).entries ?? {}).length
-  if (count === 0) {
-    console.error('[combo 预计算失败] 0 条目——扫描根或 bundle 布局变更（客户端 combo 缓存将永远 miss）')
-    process.exit(1)
-  }
-  log(`combo 预计算就位（${count} 条 identity combo + map；目录 home/.dsh/profiles/web/.combo-cache/）`)
-}
-
 // ── 0g. 能力发现目录快照（0.13.5 W3）：从 stage 引擎树生成 dsh-model-capability 的厂商目录索引 ──
 // 数据必须与本次构建的引擎树同源（精确模型 id → thinkingLevelMap/input/compat），
 // 生成物落在插件 lib/（随注入进快照），因此必须在注入步骤之前完成；引擎升级后自动跟随。

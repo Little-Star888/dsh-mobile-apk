@@ -516,15 +516,15 @@ const checkChainWiring = () => {
       const lines = codeLines(readFileSync(p, 'utf8'))
       // ① 「调用」：同一行同时出现脚本名与 --degrade（是调用，不是别处的说明）
       const degradeLine = lines.find(({ l }) => l.includes('check-browser-syntax-floor.mjs') && l.includes('--degrade'))
-      const comboLine = lines.find(({ l }) => l.includes('combo-precompute.mjs'))
+      const consumeLine = lines.find(({ l }) => l.includes('inject-all.py'))
       if (!degradeLine) {
         problems.push(tag + ' 没有任何一行同时含 check-browser-syntax-floor.mjs 与 --degrade（降级步骤缺失）')
         continue
       }
-      if (!comboLine) { problems.push(tag + ' 找不到 combo-precompute.mjs 调用（无法验证降级在 combo 之前）'); continue }
-      if (degradeLine.n >= comboLine.n) {
-        problems.push(tag + ' 降级(L' + degradeLine.n + ')不在 combo 预计算(L' + comboLine.n + ')之前'
-          + '——combo 键 = sha256(client.js)，顺序反了必然全 miss')
+      if (!consumeLine) { problems.push(tag + ' 找不到 inject-all.py 调用（无法验证降级在被注入消费之前）'); continue }
+      if (degradeLine.n >= consumeLine.n) {
+        problems.push(tag + ' 降级(L' + degradeLine.n + ')不在注入消费(L' + consumeLine.n + ')之前'
+          + '——注入进快照的就是降级后的字节，顺序反了老内核仍会拿到未降级的 bundle（0.14.2 前这里查的是 combo 预计算顺序）')
       }
       // ② 暂存副本（**绑定判据**，不是「文件里提到过这个词」）：取降级调用的实际 --stage 实参，
       //    它必须是一个由**暂存路径**赋值的变量。否则就是原地降级 —— `vendor/**/lib/` 是入库跟踪的

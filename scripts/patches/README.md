@@ -183,3 +183,42 @@ node scripts/patches/apply-patches.mjs vendor --list
   - 回归 `scripts/patches/tests/boot-third-party-isolation-g3.test.mjs`（27 项）+ 真实引擎树 A/B：
     改前第三方臂 `BOOT-FAIL`、改后 `BOOT-OK` 且点名；官方臂改前改后均 `BOOT-FAIL`。
   - **未确证**：A/B 在宿主（Node v24.17.0 x64 + 解包引擎树）完成，**未在设备上**装真坏插件跑冷启动。
+
+## 2026-09-24 0.14.2 追上游 0.1.7-rc.1（重锚 A4/G3/N2；撤销 N1/G1/A3/A5/C3）
+
+**唯一可信的锚点判据**：`node scripts/probe-engine-anchors.mjs`——按 `engine-overlay.json` 的
+(包名, 版本) 回读构建期同一批 tgz 的**未打补丁字节**，在探针根上跑 `apply-patches --apply`。
+不要用 stage 目录（本轮实测它停在 `0.1.2-rc.1`），也不要用测试夹具（0.1.5 时代写死在目录名里，
+真树断 9 条而 16 个补丁测试全绿）。现况：engine 14 条 **14/14 ALL OK**。
+
+重锚的三条：
+- `combo-lazy-A4`：`bundleResource` 变 `async` 方法（薄壳 `serveBundle` 不是读图点）；插 `this.ensureComposed()`。
+- `boot-third-party-isolation-G3`：`boot()` 的 `async` 仍在，漂移在 `mountRootInclude(..., binName)` 第 5 参；
+  隔离器内部调用与反 no-op 断言同步改 5 参，`binName` 一路透传（诊断前缀不再退化成默认 `"dsh"`）。
+- `perf-compile-cache-flush-N2`：根包不再 `import { readFileSync } from "node:fs"`，锚改末条顶层 import；
+  测试的位置判据从「逐字符前缀」换成「import 段内、首个 `//#region` 前」的语义判据。
+
+撤销的五条，每条都带「收益是否还在」的证据，不是「锚点找不到就删」：
+- `perf-patch-reload-N1`：rc.1 全仓 `patchReload` 零命中（源码 + 产物），reload 链改为常驻但空转的
+  `dsh-client-hmr`（上游 `packages/bundle/web-app/cordis.patch.yml` 自述）。连带清掉写半边：
+  `scripts/lib/profile-seed.mjs` 由「seed 死键」改为「剥死键 + 断言 bundles 非空」。
+- `boot-pending-G1`：`requiredStartupEntryIds` 与本方行面无交集（要修的场景不存在），且 `const failures = [];`
+  锚点会误匹配 `auditStartupEntries` 的同名声明。**严禁重锚**。boot 期容错唯一真源是 G3。
+- `combo-single-lazy-A5`：上游 `buildCombo` 现在返回两个 `lazyBody(...)` 生产者，并把上一代已服务过的
+  字节留住（`responses.get(url) ?? this.responses.get(...)`）——A5 的前提被上游原生满足，且其
+  「代际换手即清空、旧 URL 一律 404」的取舍比上游更激进。
+- `combo-cache-A3`：同机同批 rc.1 字节实测（55 个 client.js / 4.6 MiB）——上游 boot 路径 44 ms，
+  A3 查表形态 129 ms（5.09 MiB 清单 JSON.parse + 逐条读 `<sha>.map`），只缓存 source 的收窄形态 78 ms。
+  **A3 在 rc.1 上是净亏**，且预计算清单本身是产物死重。写半边一并撤：
+  `build-snapshot` 0f-2 段、两条构建链的 precompute 调用与 `inject-all.py --combo-cache-delta` 全删；
+  `scripts/check-combo-cache.mjs` 反向改造成「死缓存回流门禁」（产物面/链路面/补丁面 + 5 例反证）。
+- `combo-parallel-C3`：它分片的就是 A3 注入的那条逐条循环；A3 撤了、上游又懒构造之后，启动路径上
+  没有可分片的逐条重活。重开触发条件写在其回归测试里（看真机 `[perf] compose` 的 dur/totalMs，
+  不看本机数字）。
+
+夹具与门禁（防同类假绿复发）：`scripts/probe-engine-anchors.mjs --fixtures` 从同一批 tgz 写出
+`fixtures/<pkg>-<contract.baseline>/` 并登记 `fixtures/manifest.json`；测试一律经
+`tests/lib/fixture.mjs` 的 `versionedFixture()` 取夹具；`scripts/check-patch-fixtures.mjs` 守
+「台账完备 / 夹具随版 / 禁写死版本」。**因此撤销条目的回归测试不删除，而是就地改写成
+「撤销不变量守卫」**：既钉住「不许顺手加回来」，也钉住「撤销理由今天仍然成立」（例如
+`combo-single-lazy-a5.test.mjs` 直接查上游 `buildCombo` 是否还返回 `lazyBody`）。
