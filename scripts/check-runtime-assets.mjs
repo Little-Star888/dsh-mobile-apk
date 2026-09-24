@@ -21,8 +21,11 @@
 //   abi         arm64 | x86_64（缺省 x86_64，仅兼容手工调用）
 //   --snapshot  显式快照 tar（发布链用 dsh-mobile-apk/snapshot/snapshot-<abi>.tar.xz）
 //   --require   严格模式：任何 SKIP 分支转失败（构建链/发布链必须用）
+//   --write     追版收尾用：把快照里的同源文件字节直接写回 assets/patched/<asset>
+//               （引擎换代后资产必然不同源——本门禁会拒打包，但没有生成器就得手工 tar -xO，
+//               于是「怎么修」变部落知识；这里把它变成一条命令，写完仍按逐字节复核）
 // 退出码：0 = 通过（或非严格模式下明确计数并打印的 SKIP）；1 = 资产与快照不同源 / 严格模式下缺件。
-import { readFileSync, existsSync, readdirSync } from 'node:fs'
+import { readFileSync, existsSync, readdirSync, writeFileSync } from 'node:fs'
 import { TAR } from './lib/shell.mjs'
 import { createHash } from 'node:crypto'
 import { join, dirname, basename } from 'node:path'
@@ -35,9 +38,11 @@ const args = process.argv.slice(2)
 let ABI = 'x86_64'
 let SNAP_OVERRIDE = null
 let REQUIRE = process.env.DSH_REQUIRE_SNAPSHOT_ASSETS === '1'
+let WRITE = false
 for (let i = 0; i < args.length; i += 1) {
   if (args[i] === '--snapshot') { SNAP_OVERRIDE = args[i + 1]; i += 1; continue }
   if (args[i] === '--require') { REQUIRE = true; continue }
+  if (args[i] === '--write') { WRITE = true; continue }
   if (!args[i].startsWith('--')) ABI = args[i]
 }
 
@@ -126,11 +131,18 @@ for (const asset of assets) {
   const assetBuf = readFileSync(join(ASSETS, asset))
   checked++
   if (!snapBuf.equals(assetBuf)) {
+    if (WRITE) {
+      writeFileSync(join(ASSETS, asset), snapBuf)
+      console.log(`REGEN ${asset} ← ${target}（${assetBuf.length} B → ${snapBuf.length} B，sha ${sha256(snapBuf).slice(0, 12)}…）`)
+      console.log(`PASS  资产与快照逐字节同源: ${asset}（--write 刚重写，已按快照字节复核）`)
+      continue
+    }
     fail(`运行时资产与快照不同源（逐字节）：${asset} ↔ ${target}\n`
       + `  资产 sha256   = ${sha256(assetBuf)}（${assetBuf.length} B）\n`
       + `  快照 sha256   = ${sha256(snapBuf)}（${snapBuf.length} B）\n`
       + '  引擎启动时会用该资产覆盖运行树 → 两条路径的补丁在设备上互相回退（这就是本门禁要防的假绿）\n'
-      + `  修复：从快照重新生成 ${join('app', 'src', 'main', 'assets', 'patched', asset)}`)
+      + `  修复：node scripts/check-runtime-assets.mjs ${ABI} --write`
+      + '（从快照回写 assets/patched，然后不带 --write 复核一次）')
   }
   const covered = src.map((p) => p.id).join(', ')
   console.log(`PASS  资产与快照逐字节同源: ${asset}（覆盖 ${covered}）`)
