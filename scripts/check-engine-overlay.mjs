@@ -67,8 +67,8 @@ for (const patch of PATCH_REGISTRY.patches.filter((p) => p.scope === 'engine' &&
 const py = `
 import tarfile, json, sys
 want = json.loads(open(sys.argv[2], 'r', encoding='utf-8').read())
-prefixes = json.loads(sys.argv[5])   # 内置预设载体目录（可多个，见 CARRIERS）
-nm = sys.argv[4]
+nm = sys.argv[3]
+prefixes = json.loads(open(sys.argv[4], 'r', encoding='utf-8').read())   # 内置预设载体目录，见 CARRIERS
 hits = {}
 present = {}
 carriers = [0] * len(prefixes)
@@ -110,14 +110,17 @@ try {
   // python 脚本与 want 清单都经临时文件传递（cmd.exe 对多行 -c 参数/超长 argv 直接碎裂）
   const tmpPy = join(dirname(snap), `.engine-overlay-scan-${process.pid}.py`)
   const wantFile = join(dirname(snap), `.engine-overlay-want-${process.pid}.json`)
+  const carrierFile = join(dirname(snap), `.engine-overlay-carriers-${process.pid}.json`)
   writeFileSync(tmpPy, py)
   writeFileSync(wantFile, JSON.stringify([...want.keys(), ...CARRIERS.map(c => c.prefix)]))
+  writeFileSync(carrierFile, JSON.stringify(CARRIERS.map(c => c.prefix)))
   try {
     const snapWin = snap.replace(/\\/g, '/')
-    res = JSON.parse(execSync(`${process.platform === 'win32' ? 'python' : 'python3'} ${JSON.stringify(tmpPy)} ${JSON.stringify(snapWin)} ${JSON.stringify(wantFile)} ${JSON.stringify(CARRIERS[0].prefix)} ${JSON.stringify(NM)} ${JSON.stringify(CARRIERS.map(c => c.prefix))}`, { encoding: 'utf8', maxBuffer: 128 * 1024 * 1024 }))
+    res = JSON.parse(execSync(`${process.platform === 'win32' ? 'python' : 'python3'} ${JSON.stringify(tmpPy)} ${JSON.stringify(snapWin)} ${JSON.stringify(wantFile)} ${JSON.stringify(NM)} ${JSON.stringify(carrierFile)}`, { encoding: 'utf8', maxBuffer: 128 * 1024 * 1024 }))
   } finally {
     rmSync(tmpPy, { force: true })
     rmSync(wantFile, { force: true })
+    rmSync(carrierFile, { force: true })
   }
 } catch (e) {
   console.error(`ENGINE-OVERLAY CHECK FAILED（扫描执行失败）: ${String(e).slice(0, 400)}`)
