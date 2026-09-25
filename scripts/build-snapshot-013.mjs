@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
 import { wslPath, sh as wsl, XZ_THREADS } from './lib/shell.mjs'
 import { sanitizeSymlinks } from './lib/symlink-sanitize.mjs'
+import { relocateGitShellPath } from './lib/git-shell-path.mjs'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const ABI = process.argv[2] ?? 'arm64'
@@ -685,6 +686,28 @@ if (existsSync(join(U, 'bin', 'git')) && existsSync(join(U, 'libexec', 'git-core
   log('git 包装就位（git.real + GIT_EXEC_PATH=' + gitExecPath + '）')
 } else {
   console.warn('警告: git 或 git-core 缺失（#87 包装未装配）')
+}
+
+// ── 7d2. git 编译期 SHELL_PATH 等长重定位（issue apk#247）──────────────────
+// git 的 credential.helper / `!` 前缀 alias / hook / rebase --exec 一律经 run-command
+// 走 shell，而 shell 取的是**编译期写死**的 SHELL_PATH
+// （/data/data/com.termux/files/usr/bin/sh，应用域不存在）。同类对照：--exec-path 有
+// GIT_EXEC_PATH（已由 7d 的 wrapper 覆盖，issue apk#80/#87）、CA 有 GIT_SSL_CAINFO，
+// 而 shell 路径**没有任何运行时覆盖点** ⇒ 上述路径全部 `cannot exec`。
+//
+// **本步必须晚于 7d**：usr/bin/git.real 是在 7d 里由基座的 usr/bin/git 改名而来，
+// 7d 之前它并不存在，且会被 7d 的 rmSync + rename 覆盖；放在第 6 步 shebang 阶段
+// 会被抹掉。故它与 fix-shebang.py **不同阶段**。
+//
+// 修法是**等长**原地替换（38 B → /system/bin/sh + NUL 填充），文件长度与 ELF 节表/
+// 偏移全不变，因此不违反 relocate-snapshot.py 头部那条「ELF 不做变长重写」的禁令。
+const shellPath = relocateGitShellPath(U)
+if (shellPath.hits > 0) {
+  log(`git SHELL_PATH 等长重定位（apk#247）：${shellPath.hits} 处 / ${shellPath.files} 文件（白名单 ${shellPath.scanned} 个）`)
+} else if (shellPath.scanned > 0) {
+  log(`git SHELL_PATH 等长重定位（apk#247）：白名单 ${shellPath.scanned} 个文件均无旧串（幂等或已修）`)
+} else {
+  console.warn('警告: git SHELL_PATH 白名单为空（git.real / libexec/git-core 缺失，apk#247 未施加）')
 }
 
 // ── 7e. pnpm standalone（F4 市场安装的运行时依赖——`dsh plugin add` 走 pnpm，见 apps/cli plugin.ts）──
