@@ -545,7 +545,7 @@ const checkChainWiring = () => {
           problems.push(tag + ' 降级目标是 ' + tgt + ' 且其赋值不来自暂存路径（禁止原地降级；'
             + 'vendor/**/lib 入库跟踪，原地降级会写脏工作树 + 制造镜像漂移）')
         }
-        evidence.push(tag + ': degrade@L' + degradeLine.n + ' < combo@L' + comboLine.n + ' stage=' + tgt + ' staged=' + fromStaging)
+        evidence.push(tag + ': degrade@L' + degradeLine.n + ' < consume@L' + consumeLine.n + ' stage=' + tgt + ' staged=' + fromStaging)
       }
     }
   }
@@ -670,7 +670,7 @@ if (has('self-test')) {
   //    真因：check-release-gates 只比门禁集合（31/31 全绿），比不出「构建链里少了降级步骤」，
   //    于是 PowerShell 链有降级、Node 链没有，云端自包含构建必判红而无人知。
   const wiring = checkChainWiring()
-  check('⑥ 接线反回归：两条构建链都必须在 combo 预计算之前调用 --degrade（暂存副本，不原地）',
+  check('⑥ 接线反回归：两条构建链都必须在注入消费（inject-all.py）之前调用 --degrade（暂存副本，不原地）',
     wiring.ok, wiring.detail)
   console.log('  接线取证: ' + wiring.evidence)
 

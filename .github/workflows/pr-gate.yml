@@ -85,7 +85,13 @@ jobs:
           # 上一步的 `npm install` 在 CI 上不会把它带进来）⇒ 本门禁在 CI 结构上取不到判据、
           # 只能直接判红（本轮实锤：PR 恒红）。该包**公开可取**，故显式装到 manage 的 node_modules
           # （门禁的首选候选路径），门禁照常真跑，不用 SKIP 掩盖。
-          (cd plugins/dsh-android-manage && npm install --no-save --no-audit --no-fund @deepseek-ai/dsh-tools@0.1.1-rc.2)
+          #
+          # 版本**从 manage 的 peerDependencies 现取**，不写字面量：追版时 pin 一抬，写死的旧版本就会
+          # 与它冲突（实测 0.1.7-rc.1 的 peer 与写死的 0.1.1-rc.2 触发 ERESOLVE，整步 exit 1）。
+          # 该 pin 是 semver range（^0.1.7-rc.1），npm install 需要确切版本号，故取 range 里的下限。
+          TOOLS_PIN=$(node -e "const r=require('./plugins/dsh-android-manage/package.json').peerDependencies['@deepseek-ai/dsh-tools'];console.log(r.replace(/^[\^~>=]+/,''))")
+          echo "dsh-tools pin (from peerDependencies) = $TOOLS_PIN"
+          (cd plugins/dsh-android-manage && npm install --no-save --no-audit --no-fund "@deepseek-ai/dsh-tools@$TOOLS_PIN")
           node scripts/check-tool-output-schema.mjs
       # 壳侧加固语义（NSC / backup 规则 / exported）与子进程有界读（0.13.8-b FX-208.4 / E1）
       - name: 壳侧加固与有界读门禁
