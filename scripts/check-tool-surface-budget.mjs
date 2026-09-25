@@ -151,7 +151,13 @@ if (unknownMasked.length > 0) {
   fail('掩蔽清单里有未注册的工具名（组名单与实现漂移）：' + unknownMasked.slice(0, 8).join('、')
     + (unknownMasked.length > 8 ? ' 等 ' + unknownMasked.length + ' 个' : ''))
 }
-const measured = { baseline: total, perPlugin, initialVisible: initialTotal, maskedGroups: Object.keys(groupMap) }
+const measured = {
+  baseline: total, perPlugin, initialVisible: initialTotal,
+  maskedGroups: Object.keys(groupMap),
+  /* G-3 的名字级判定记录：只守字节数会漏「塞进一个很小的新工具」——字节没涨过阈值，但模型
+   * 第一眼多看见一个面。可见集逐名登记后，任何新增可见工具都必须过一次评审（--update 才会改）。 */
+  visibleTools: initialTools.map((t) => t.name).sort(),
+}
 
 if (update) {
   writeFileSync(BASELINE_FILE, JSON.stringify(measured, null, 2) + '\n')
@@ -191,6 +197,29 @@ if (initialTotal > limitInitial) {
     + '  初始工具表膨胀 = 每会话固定开销上涨（渐进披露的目的就是压低这一项）；'
     + '请把新工具归入能力组受掩蔽，或经评审后 --update 基线')
 }
+// 名字级：初始可见集 == 登记集（多一名 = 新工具未经判定就暴露在模型第一眼；少一名 = 已登记的工具
+// 不再注册，要么实现被删要么被误归入掩蔽组）。掩蔽侧的方向（名单里的名字必须真注册）在 :149 已守。
+const baselineVisible = Array.isArray(baseline.visibleTools) ? baseline.visibleTools : null
+if (baselineVisible === null) {
+  fail('基线缺 visibleTools 名单（G-3 名字级判定记录）：跑 --update 后把 diff 拿去评审')
+} else {
+  const nowVisible = initialTools.map((t) => t.name).sort()
+  const newlyVisible = nowVisible.filter((n) => !baselineVisible.includes(n))
+  const noLongerVisible = baselineVisible.filter((n) => !nowVisible.includes(n))
+  if (newlyVisible.length > 0) {
+    fail('模型第一眼新增工具（未经判定）：' + newlyVisible.join('、')
+      + '\n  要么归入 capability gate 的能力组（默认掩蔽、按授权解锁），要么经评审后 --update 基线。'
+      + '\n  注意：往 DEVICE_TOOL_GROUPS 加名字不算「判定完成」——那只是把它藏起来，解锁面要单独想。')
+  }
+  if (noLongerVisible.length > 0) {
+    fail('已登记的可见工具不再注册：' + noLongerVisible.join('、')
+      + '（实现被删？还是被归进掩蔽组？两者都是产品面变更，必须显式确认）')
+  }
+  if (newlyVisible.length === 0 && noLongerVisible.length === 0) {
+    console.log('  可见集名单 == 登记（' + nowVisible.length + ' 名：' + nowVisible.join(', ') + '）')
+  }
+}
+
 console.log('CHECK-TOOL-SURFACE-BUDGET PASSED（注册集 ' + total + ' B / 基线 ' + baselineBytes + ' B；'
   + '初始可见集 ' + initialTotal + ' B / 基线 ' + baselineInitial + ' B）')
 process.exit(0)

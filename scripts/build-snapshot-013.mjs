@@ -53,7 +53,7 @@ const PYTHON = process.platform === 'win32' ? 'python' : 'python3'
 // 清单/模板与编排逻辑分离：预装包、镜像链、剥离清单、瘦身清单、seed 模板、apt.conf、
 // install-clang.sh 均在本目录维护；编排器只读数据 + 走流程。@@PREFIX@@ 为模板占位
 // （构建期替换为设备端前缀，本地 stage 路径不可烧入）。
-import { seedProfilePatchReload } from './lib/profile-seed.mjs'
+import { checkShippedProfileManifests } from './lib/profile-seed.mjs'
 const CFG_DIR = join(ROOT, 'scripts', 'snapshot-config')
 const readCfg = (f) => readFileSync(join(CFG_DIR, f), 'utf8')
 const PREINSTALL = JSON.parse(readCfg('preinstall.json'))
@@ -142,15 +142,14 @@ for (const leaf of STRIP.secretLeaves) {
 const seedSettingsPath = join(DH, 'settings.yaml')
 writeFileSync(seedSettingsPath, SEED_SETTINGS)
 log(`settings.yaml seed template written (zero-secret): ${seedSettingsPath}`)
-// 性能 A1 seed（0.13.8 §7.2）：出厂 profile 清单写 dsh.profile.patchReload=startup——上游在 live
-// 档额外挂 cordis-plugin-timer/hmr 并在启动期反复现场重算客户端 combo（实测冷启动 24.9s -> 16.6s）。
-// Android 无 live reload 收益（坑 19），故出厂即 startup；dev 档用 DSH_PROFILE_PATCH_RELOAD=live 覆写。
-// 存量升级路径由引擎树补丁 perf-patch-reload-N1 归一化（旧引擎已把 live 显式写进设备清单）。
-const profileSeed = seedProfilePatchReload(join(STAGE, 'root'), {
-  reload: process.env.DSH_PROFILE_PATCH_RELOAD || 'startup',
-})
-for (const r of profileSeed) {
-  log(`profile seed: ${r.profile} patchReload=${r.value ?? '<profile 缺席>'} ${r.changed ? '(updated)' : '(unchanged)'} previous=${r.previous ?? 'none'}`)
+// 出厂 profile 清单体检（0.14.2 起）：剥掉上游已不读的死键并断言 bundles 非空。历史上的
+// 性能 A1 seed（dsh.profile.patchReload=startup，实测冷启动 24.9s -> 16.6s）随 0.1.7-rc.1 失效：
+// 上游删掉了整个 patchReload 机制，reload 链改为常驻但空转的 dsh-client-hmr 一行 ⇒ 启动收益由
+// 上游结构本身提供，出厂清单里再躺一个没人读的键只会误导后续判断（含门禁）。
+const profileCheck = checkShippedProfileManifests(join(STAGE, 'root'))
+for (const r of profileCheck) {
+  if (r.missing) throw new Error(`出厂 profile 清单缺席: ${r.profile}（${r.path}）——快照不可发布`)
+  log(`profile 体检: ${r.profile} bundles=${String(r.bundles)} 死键剥除=[${r.stripped.join(', ')}]${r.changed ? ' (已改写)' : ''}`)
 }
 // F4 安装链（2026-08-23）：清陈旧 pnpm 状态记录——base-dsh 提取自运行设备，其
 // .modules.yaml / .pnpm-workspace-state / pnpm-lock 指向旧 store（含 com.dshmobile 残留路径），
@@ -357,8 +356,11 @@ for (const entry of OVERLAY.keepUnpublished ?? []) {
 // 为什么在构建链而不是改上游 target：我们**从不构建上游前端**，dsh-web-frontend/dist 是从 npm 下载的
 // tarball（engine-overlay.json:287 / overlayTgz:196-217），vite.config.ts 根本不在快照里。上游 3 个
 // dist 产物 + 上游各包自带 client.js 的构建配置都不在我们手里 → 唯一合法落点就是构建期对已下载产物降级。
-// 顺序硬约束（详档 §2.1「为何必须在 0f-2 之前」）：combo 缓存键 = sha256(client.js)，必须**先降级再预计算**；
-// 反了 = 缓存键与设备侧实际字节不一致 = 全 miss（fail-open 静默回退，启动收益归零）。
+// 【0.14.2 更正】此处原写「顺序硬约束（详档 §2.1 为何必须在 0f-2 之前）：combo 缓存键 = sha256(client.js)，
+// 必须先降级再预计算」——该约束随 0.1.7-rc.1 追版**整体失效**：构建期 combo 预计算（0f-2 步）与运行时
+// 补齐 combo-cache-A3 / combo-single-lazy-A5 / combo-parallel-C3 已一并撤销（实测 A3 在 rc.1 上是净亏，
+// 见 scripts/patches/README.md 的撤销段）。本步现在只剩**降级**一件事，不存在与预计算的顺序耦合；
+// 留此更正只为防止后人照旧注释去恢复一个已被实测证伪的预计算面。
 // 覆盖范围与门禁 check-browser-syntax-floor --scan **同一清单**（防口径分裂），由同一实现执行：
 //   任一 `dsh-web-frontend/dist/**/*.js`（上游前端 dist，全部）+ 任一 `lib/client.js`（含引擎树内
 //   上游包与 home/.dsh/profiles/** 下的 profile 级副本）。清单规则只此一处（门禁脚本内）。
@@ -411,40 +413,6 @@ for (const entry of OVERLAY.keepUnpublished ?? []) {
     process.exit(1)
   }
   log(`浏览器语法下限降级就位（chrome87；扫描 ${scannedFiles} 个浏览器面文件，改写 ${degradedFiles} 个，降级后复扫全绿）`)
-}
-
-// ── 0f-2. combo 构建期预计算（0.14.0 启动性能 P1-2 / 引擎树补丁 combo-cache-A3 的写半边）──
-// 把客户端 bundle 的 identity combo source 与 section map 在构建期算一次写进
-// home/.dsh/profiles/web/.combo-cache/（键 = sha256(client.js)）。运行时补丁按 sha256 查表，
-// 未命中/损坏回退现场生成（fail-open）。注入段的 4 条 client.js 由构建链
-// （build-apk-013.ps1 / build-apk.mjs）用 scripts/lib/combo-precompute.mjs 补算为
-// client-combos.inject.json + map 文件，经 inject-all.py --combo-cache-delta 合入 tar；
-// 两条链在注入后由 scripts/check-combo-cache.mjs 断言覆盖全部 client.js。
-// ⚠️ 双份构建脚本必须同改（雷点 10）。
-{
-  const stageRoot = join(STAGE, 'root')
-  const cacheDir = join(stageRoot, 'home', '.dsh', 'profiles', 'web', '.combo-cache')
-  if (!existsSync(join(stageRoot, 'home', '.dsh', 'profiles', 'web', 'package.json'))) {
-    console.error('[combo 预计算失败] 出厂 web profile 缺席（base-dsh 合并/seed 步骤未生效？）')
-    process.exit(1)
-  }
-  const precompute = join(ROOT, 'scripts', 'lib', 'combo-precompute.mjs')
-  const out = execSync(`node "${precompute}" --scan "${stageRoot}" --out "${cacheDir}" --manifest client-combos.json --engine "${readCfg('engine-overlay.json').engineVersion}"`,
-    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
-  for (const line of out.split('\n')) {
-    if (line.startsWith('COMBO-PRECOMPUTE') || line.startsWith('combo-precompute: skip')) log(line)
-  }
-  const manifestPath = join(cacheDir, 'client-combos.json')
-  if (!existsSync(manifestPath)) {
-    console.error('[combo 预计算失败] manifest 缺席: ' + manifestPath)
-    process.exit(1)
-  }
-  const count = Object.keys(JSON.parse(readFileSync(manifestPath, 'utf8')).entries ?? {}).length
-  if (count === 0) {
-    console.error('[combo 预计算失败] 0 条目——扫描根或 bundle 布局变更（客户端 combo 缓存将永远 miss）')
-    process.exit(1)
-  }
-  log(`combo 预计算就位（${count} 条 identity combo + map；目录 home/.dsh/profiles/web/.combo-cache/）`)
 }
 
 // ── 0g. 能力发现目录快照（0.13.5 W3）：从 stage 引擎树生成 dsh-model-capability 的厂商目录索引 ──
@@ -947,6 +915,25 @@ log('瘦身扩展：global node_modules 孤儿重复包…')
 }
 log('瘦身扩展完成（global 孤儿重复包已剔除）')
 
+// ── 基座引擎树的上一代残留剔除（0.14.2；由 check-engine-overlay 的反向面抓到）──
+// 反向门禁要求「快照内每个包要么逐条登记、要么可由登记包经依赖闭包到达」。这 4 个 0.1.1-rc.2 的包
+// 两者都不是：上游 0.1.7-rc.1 全仓已无此名（被改名/删除），而设备基座的引擎树还带着它们
+// ——overlay 只覆盖登记表内的包，从不删树里的旧包，于是每个快照都在发死代码。
+// 清单 = snapshot-config/slim.json 的 engineStalePackages；门禁同时反向断言这些包**缺席**。
+for (const entry of SLIM.engineStalePackages ?? []) {
+  const declared = OVERLAY.packages[entry.name] !== undefined
+    || (OVERLAY.keepUnpublished ?? []).some((x) => String(x).replace(/ \(.+\)$/, '').trim() === entry.name)
+  if (declared) {
+    console.error(`[基座残留剔除中止] ${entry.name} 已在 overlay 登记表内——上游重新引入了同名包。`
+      + '请把该条从 slim.json 的 engineStalePackages 删掉，否则这里会把真依赖删掉。')
+    process.exit(1)
+  }
+  const dir = overlayPkgDir(entry.name)
+  if (!existsSync(join(dir, 'package.json'))) continue
+  wsl(`rm -rf "${wslPath(dir)}"`)
+  log(`  剔除基座残留 ${entry.name}（${entry.lastSeenVersion ?? '?'}，登记表与依赖闭包都不认）`)
+}
+
 // ── 8a3. 权限归一化：不在本步做 ───────────────────────────────────────────
 // 实测（2026-09-08）：WSL 的 /mnt/d 9p 挂载未启用 metadata，chmod 恒被忽略（stat 仍 777），
 // 因此「归档前 chmod 整棵树」在 Windows 侧是无效步骤，只会白走 6 万文件。归档权限的唯一
@@ -1055,17 +1042,17 @@ if (termuxLinks !== 0) {
   process.exit(1)
 }
 log('归档内软链自检通过（0 条旧 Termux 前缀软链）')
-// A1 出厂声明值对账（P-AC-01，--require 严格档）：归档内 profiles/{web,headless}/package.json 必须带
-// patchReload=出厂值。seed 步在归档之前（本文件 0 段），此处是对**产物**的复核——stage 正确而归档缺件
+// 出厂 profile 清单对账（P-AC-01，--require 严格档）：归档内 profiles/{web,headless}/package.json 必须
+// bundles 非空且无死键。stage 段已体检过，此处是对**产物**的复核——stage 正确而归档缺件
 // 的同型缺陷此前在 LICENSES 上实锤过一次。
 const perfGate = spawnSync(process.execPath,
   [join(ROOT, 'scripts', 'check-perf-instrumentation.mjs'), '--require', '--snapshot', archive, '--abi', ABI],
   { encoding: 'utf8' })
 if (perfGate.status !== 0) {
-  console.error('A1 出厂声明值对账失败（归档内 profile 清单缺 patchReload 出厂值）——拒绝出快照')
+  console.error('出厂 profile 清单对账失败（归档内 profile 缺 bundles 或带上游已不读的死键）——拒绝出快照')
   console.error((perfGate.stdout + perfGate.stderr).split('\n').filter((l) => l.startsWith('FAIL')).join('\n'))
   process.exit(1)
 }
-log('A1 出厂声明值对账通过（归档内 profiles/{web,headless} patchReload=出厂值）')
+log('A1 出厂 profile 清单对账通过（归档内 profiles/{web,headless} bundles 非空、无死键）')
 log(`完成: ${archive} (${(statSync(archive).size / 1024 / 1024).toFixed(1)} MB, sha256=${sha.slice(0, 12)}…)`)
 log('后续步骤：注入插件（inject-snapshot.py）→ 门禁（elf-check/ci-verify-snapshot 语义）→ 打包装入 APK')

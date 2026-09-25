@@ -12,7 +12,7 @@
 //   node scripts/check-release-gates.mjs --list               # 打印声明的门禁集合
 //   node scripts/check-release-gates.mjs --run [--snapshot-dir <dir>]   # 顺序执行门禁集（发布链用）
 // 退出码：0 = 通过；1 = 接线缺口 / 门禁失败 / 树定位失败。
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { join, dirname, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
@@ -39,6 +39,9 @@ const rel = (p) => relative(ROOT, p).replace(/\\/g, '/')
  */
 const GATES = [
   { script: 'check-patch-mirror.mjs', ciApk: true, ciCoord: true, needsSnapshot: false },
+  // 0.14.2 T6：补丁测试的夹具必须与 contract.baseline 同代——夹具停在上一代时「补丁回归」是结构性假绿
+  // （rc.1 实测：真树断 9 条而 16 个补丁测试全绿）。
+  { script: 'check-patch-fixtures.mjs', ciApk: true, ciCoord: true, needsSnapshot: false },
   { script: 'check-manifest-hardening.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
   { script: 'check-bounded-io.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
   // #222：所有 mobile-owned /api exact/prefix 路由必须在登记表中，并有本地 auth guard 或窄公开白名单。
@@ -125,6 +128,12 @@ const GATES = [
   // ci:false 是刻意的：云端 CI 无 gradle 产物环境，故本项由本地链/发布链跑；
   // 无结果时显式 SKIP(#1) 计数（不计入绿），绝不冒充通过。
   { script: 'check-kotlin-test-count.mjs', ciApk: false, ciCoord: false, needsSnapshot: false },
+  // 执行地图覆盖与锚点（0.14.2 D7）：输入全在 apk 仓（app/src、plugins、EXECUTION-MAP.md），
+  // 故归属 apk 侧 CI + 两条链。**此前它只存在于 apk 仓 scripts/ 且只被 apk CI 调用**：
+  // 本地链与发布链的声明集里零命中 —— 即「改代码跑了 check-code-map 才算数」这条约定
+  // 在两条真正出包/发版的路径上都没有执行者，全靠人记得手跑。
+  // needsSnapshot=false：它读的是工作树与文档，不需要快照。
+  { script: 'check-code-map.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
 ]
 const CI_COORD_GATES = GATES.filter((g) => g.ciCoord).map((g) => g.script)
 const CI_APK_GATES = GATES.filter((g) => g.ciApk).map((g) => g.script)
@@ -228,6 +237,23 @@ for (const f of ['scripts/build-release.ps1', 'scripts/build-apk-013.ps1']) {
   if (!existsSync(b)) { check('两树同版: ' + f, true, '（对端缺席，跳过）'); continue }
   const same = readFileSync(a).equals(readFileSync(b))
   check('两树同版: ' + f, same, '逐字节不一致（autocrlf 噪声也会计入——请同步镜像）')
+}
+
+// ── 3a. 构建/门禁脚本必须可被 node 解析（0.14.2 补线）─────────────────────
+// 真因（本轮实锤）：`check-patch-mirror` 只判**逐字节相等**，一份语法坏掉的 build-snapshot
+// 会「镜像一致 PASSED」地同步到两棵树，而所有静态门禁都不解析它——直到真正跑构建才炸，
+// 于是本地一次、CI 一次、发布链一次，三处都白等。语法是最廉价的判据，放在这里当自动挡。
+{
+  const scriptDirs = [join(ROOT, 'scripts'), join(ROOT, 'scripts', 'lib')]
+  const candidates = scriptDirs.flatMap((d) =>
+    existsSync(d) ? readdirSync(d).filter((f) => f.endsWith('.mjs')).map((f) => join(d, f)) : [])
+  const broken = []
+  for (const p of candidates) {
+    const r = spawnSync(process.execPath, ['--check', p], { encoding: 'utf8' })
+    if (r.status !== 0) broken.push(rel(p) + ': ' + ((r.stderr || '').split('\n').find((l) => l.includes('Error')) ?? '解析失败'))
+  }
+  check('构建/门禁脚本全部可解析（node --check，' + String(candidates.length) + ' 个）', broken.length === 0,
+    broken.join(' | '))
 }
 
 // ── 3b. 两份编排器门禁集差集 = 0（0.13.8-b ST-06 / F-ENV-04 ④）────────────────
@@ -356,7 +382,11 @@ for (const gate of ALL_GATES) {
   }
   if (gate === 'check-api-route-auth.mjs') {
     if (snapshotDir && abis.length > 0) {
-      for (const abi of abis) runGate([join('scripts', gate), '--snapshot', snapshotTar(abi)], gate + '(' + abi + ')')
+      // 0.14.2 D2：本门禁自本轮起含「上游路由面审计」独立段，它在**上游树缺席**时按 SKIP 计数
+      // 结案（apk 自包含树不含 dsh/）。发布链必须真检，故严格档把 --require 一并传下去：
+      // 否则发布链在有快照面时走这一支、永远收不到 --require，上游面缺席也能以 SKIP 过关
+      // ——「发布环境必须显式判定上游面」这条就只写在注释里，没有执行者。
+      for (const abi of abis) runGate([join('scripts', gate), '--snapshot', snapshotTar(abi), ...(STRICT ? ['--require'] : [])], gate + '(' + abi + ')')
       ran += 1
       console.log('PASS  ' + gate + '（' + abis.join(', ') + ' post-injection artifact）')
       continue

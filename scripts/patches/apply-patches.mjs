@@ -384,6 +384,94 @@ const IMPLS = {
     },
   },
 
+  // ── narb-android-N1：Android 无预编译 node-addon-require-builtin 绑定（0.14.2 追上游 0.1.7-rc.1）──
+  // 0.1.7-rc.1 的 dsh-app-boot 新增依赖 node-addon-require-builtin（0.1.5 的 app-boot 里
+  // require-builtin / internalModules 零命中，已比对 0.1.5 夹具）；它在
+  // packages/boot/app-boot/src/profile-resolution/resolver.ts 的 internalModules() 里用 native
+  // 拿 Node 内部 loader（internal/modules/esm/loader 等）来装 profile 解析拦截。
+  //
+  // 该包只发布 darwin/linux/win32 七元组，**无 android**（npm 上
+  // node-addon-require-builtin-android-x64 = 404；上游 native/system/docs/support-matrix.md
+  // 明写「Other CPU/OS combinations have no published platform package」）。
+  // 设备实测（16416，engine.log 首行 + boot-fail.log 连记 4 轮）：
+  //   dsh: fatal uncaught exception: Error: dsh: host preparation failed:
+  //     No usable native binding found for node-addon-require-builtin-android-x64 (auto)
+  // ⇒ 引擎在 boot 阶段硬崩，**不是** PLAN §2.1 预测的「静默禁用插件」，而是根本没起来。
+  //
+  // 不变量：拿不到 native addon 不能杀死 boot。壳侧本来就以 --expose-internals 起 node
+  // （EngineManager.kt:1036 的 argv 第二项），设备实测该 flag 恰好暴露 rc.1 internalModules()
+  // 需要的五个 internal/modules/*，且形状与它的逐条校验全部吻合（esm.resolveSync /
+  // getOrCreateModuleJob / cjs._resolveFilename / getCjsConditions / getDefaultConditions /
+  // defaultResolve）。故 native 不可用时回落 require(moduleId) —— 与内置模块同一实现，
+  // 不是「假装成功」。
+  'narb-android-N1': {
+    file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/node-addon-require-builtin/lib/index.js',
+    scope: 'engine',
+    check: (s) => s.includes('dsh-mobile native-binding fallback (N1)'),
+    apply: (s) => {
+      if (s.includes('dsh-mobile native-binding fallback (N1)')) return s
+      const OLD = [
+        "const node_path_1 = __importDefault(require(\"node:path\"));",
+        "const { createEntryApi } = require('node-addon-native-custom-loader');",
+        "const api = createEntryApi(node_path_1.default.resolve(__dirname, '..'));",
+      ].join('\n')
+      const NEW = [
+        "const node_path_1 = __importDefault(require(\"node:path\"));",
+        "// dsh-mobile native-binding fallback (N1): no prebuilt addon for this platform (Android has none).",
+        "// The shell already launches node with --expose-internals, which exposes exactly the",
+        "// internal/modules/* entries internalModules() needs; fall back to require() for them",
+        "// instead of crashing host preparation. See scripts/patches/registry.json narb-android-N1.",
+        "let api;",
+        "try {",
+        "    const { createEntryApi } = require('node-addon-native-custom-loader');",
+        "    api = createEntryApi(node_path_1.default.resolve(__dirname, '..'));",
+        "} catch (error) {",
+        "    api = undefined;",
+        "    if (!globalThis.__dshMobileNativeBindingFallbackWarned) {",
+        "        globalThis.__dshMobileNativeBindingFallbackWarned = true;",
+        "        console.warn('node-addon-require-builtin: no prebuilt native binding for this platform; ' +",
+        "            'falling back to require() (dsh-mobile N1, requires --expose-internals): ' +",
+        "            (error && error.message ? error.message : String(error)));",
+        "    }",
+        "}",
+      ].join('\n')
+      const OLD_FNS = [
+        "function requireBuiltin(moduleId) {",
+        "    return api.requireBuiltin(moduleId);",
+        "}",
+        "function isAllowedInternalId(moduleId) {",
+        "    return api.isAllowedInternalId(moduleId);",
+        "}",
+        "function getBindingInfo() {",
+        "    return api.getBindingInfo();",
+        "}",
+      ].join('\n')
+      const NEW_FNS = [
+        "function requireBuiltin(moduleId) {",
+        "    if (api !== undefined) return api.requireBuiltin(moduleId);",
+        "    return require(moduleId);",
+        "}",
+        "function isAllowedInternalId(moduleId) {",
+        "    if (api !== undefined) return api.isAllowedInternalId(moduleId);",
+        "    try { require(moduleId); return true; } catch { return false; }",
+        "}",
+        "function getBindingInfo() {",
+        "    if (api !== undefined) return api.getBindingInfo();",
+        "    return { backend: 'expose-internals', package: undefined, abi: process.versions.modules };",
+        "}",
+      ].join('\n')
+      if (!s.includes(OLD)) {
+        throw new Error('narb-android 锚点未命中：createEntryApi 顶层调用——引擎升级后请人工核对 node-addon-require-builtin/lib/index.js')
+      }
+      if (!s.includes(OLD_FNS)) {
+        throw new Error('narb-android 锚点未命中：三个导出函数体——引擎升级后请人工核对 node-addon-require-builtin/lib/index.js')
+      }
+      s = s.replace(OLD, NEW).replace(OLD_FNS, NEW_FNS)
+      if (!s.includes('dsh-mobile native-binding fallback (N1)')) throw new Error('narb-android 复核失败——不写回')
+      return s
+    },
+  },
+
   // ── flock-android-F3：Android 无预编译 flock 绑定（0.13.7 追上游 0.1.5）──
   // 0.1.5 的 dsh-session-persistence-jsonl 用 @deepseek-ai/node-addon-system/flock 做
   // 会话目录写锁（session.lock，跨进程互斥）；dsh-sandbox-local 用同包的 landlock-run
@@ -968,74 +1056,24 @@ const IMPLS = {
     },
   },
 
-  // ── boot-pending-G1：web boot 容错（0.13.5 W1b，引擎树补丁 scope=engine）──
-  // issue #126 P3：第三方插件声明 inject 了 client-only 服务（uiConversation 只存在于
-  // dsh-client-ui-*/lib/client.js），宿主永远不 provide → fiber 永久 pending →
-  // assertEntriesActivated 抛错 → 整树 boot 失败、用户看到「Failed to load plugins」。
-  // 不变量：非官方包的 pending 降级为告警（等不到的服务不会因等待而出现），
-  // FAILED 与官方包（@deepseek-ai/*）pending 仍然致命——核心 bundle 坏掉必须响亮失败。
-  'boot-pending-G1': {
-    file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js',
-    scope: 'engine',
-    check: (s) => s.includes('dsh-mobile boot tolerance (G1)'),
-    apply: (s) => {
-      const DECL_OLD = '\tconst failures = [];'
-      const DECL_NEW = '\tconst failures = [];\n'
-        + '\t// dsh-mobile boot tolerance (G1): entries that stay pending are collected here\n'
-        + '\t// instead of failing the boot, unless they are official packages.\n'
-        + '\tconst deferred = [];'
-      const PENDING_OLD = '\t\t\tfailures.push(`${entry.options.name}: pending (waiting for ${subject}: ${missing.join(", ") || "unknown"})`);'
-      const PENDING_NEW = '\t\t\tconst pendingLine = `${entry.options.name}: pending (waiting for ${subject}: ${missing.join(", ") || "unknown"})`;\n'
-        + '\t\t\t// dsh-mobile boot tolerance (G1): a missing service a third-party entry waits for\n'
-        + '\t\t\t// never appears on the host, so waiting cannot succeed; keep it pending and boot on.\n'
-        + '\t\t\tif (String(entry.options.name ?? "").startsWith("@deepseek-ai/")) failures.push(pendingLine);\n'
-        + '\t\t\telse deferred.push(pendingLine);'
-      const THROW_OLD = '\tif (failures.length > 0) {'
-      const THROW_NEW = '\tif (deferred.length > 0) {\n'
-        + '\t\tconst deferredNoun = deferred.length === 1 ? "entry" : "entries";\n'
-        + '\t\tconsole.warn(`${binName}: ${String(deferred.length)} ${deferredNoun} did not activate and stays pending; boot continues (dsh-mobile boot tolerance (G1))\\n${deferred.join("\\n")}`);\n'
-        + '\t}\n'
-        + '\tif (failures.length > 0) {'
-      const REPL = [
-        { old: DECL_OLD, neu: DECL_NEW },
-        { old: PENDING_OLD, neu: PENDING_NEW },
-        { old: THROW_OLD, neu: THROW_NEW },
-      ]
-      let changed = 0
-      for (const { old, neu } of REPL) {
-        if (s.includes(neu)) continue
-        if (!s.includes(old)) throw new Error('boot-pending 锚点未命中：' + old.slice(0, 90) + '…——引擎升级后请人工核对 assertEntriesActivated')
-        s = s.replace(old, neu)
-        changed++
-      }
-      if (!s.includes('dsh-mobile boot tolerance (G1)') || !s.includes('const deferred = [];')) {
-        throw new Error('boot-pending 复核失败——不写回')
-      }
-      console.log(`  boot-pending-G1: ${changed} 处锚点替换`)
-      return s
-    },
-  },
-
   // ── boot-third-party-isolation-G3：第三方插件 boot 期失败隔离（0.14.1，scope=engine）──
   // 真因（真实用户反馈 报错反馈/0.14.0/20260919-125714-engine-died-during-boot，华为 NOH-AN00 /
   // Android 31 / arm64 / 0.14.0 vc39）：用户自装的 dsh-live2d-pets 在 **import 期**抛 SyntaxError
   // （`The requested module '@deepseek-ai/dsh-settings' does not provide an export named
   // 'settingsNamespace'`）→ 整树 boot 失败、engine exit=1。
-  // **boot-pending-G1 结构上无法覆盖这一形态**：G1 的锚点全在 `assertEntriesActivated` 内
-  // （dsh-app-boot/lib/index.js:1472-1505），而 import 失败的抛出点在**更早**的调用链上——
-  //   boot(:1543) → mountRootInclude(:1552) → loader.create(:553) → EntryTree.update
-  //   (cordis-plugin-loader/lib/index.js:86) → Promise.allSettled(:97) → Entry._init → import 失败
-  //   → updateError("import", …)（loader:309/524）→ failures.length === 1 → `throw failures[0]`（loader:100）
-  // 该异常在 mountRootInclude 处就冒泡进 boot 的 catch(:1557)，**assertEntriesActivated(:1555) 根本
-  // 不会被执行** ⇒ 不是「锚点漏了分支」，而是 G1 的函数在这条路径上不可达。
-  // 修法：在 boot() 里把挂载 root include 换成**隔离式挂载**——失败时若失败条目属于「用户自装第三方」，
+  // **为什么必须在 boot() 的挂载点拦，而不是在启动后的条目断言里容错**：import 失败的抛出点在
+  // **更早**的调用链上——boot() → mountRootInclude() → loader.create() → EntryTree.update
+  //   (cordis-plugin-loader) → Promise.allSettled → Entry._init → import 失败 → updateError("import", …)
+  //   → 单条失败即 `throw failures[0]`
+  // 该异常在 mountRootInclude 处就冒泡进 boot 的 catch，**assertEntriesActivated 根本不会被执行**
+  // ⇒ 条目断言层的容错对这条路径不可达（不是漏了分支，是那个函数不在路径上）。
+  // 修法：把挂载 root include 换成**隔离式挂载**——失败时若失败条目属于「用户自装第三方」，
   // 则用既有 patch 机制给它加 `disabled: true` 后重试；成功后在 engine.log 里**点名**被跳过的插件。
-  //   - 复用 `applyEntryPatches` 的 `disabled` 覆盖（cordis-plugin-include/lib/index.js:100），
+  //   - 复用 `applyEntryPatches` 的 `disabled` 覆盖（cordis-plugin-include），
   //     loader 的 `Entry._disabled()` 对新条目跳过 `init()` ⇒ 不再 import 坏插件。不改 loader/vendor。
   //   - **官方包与出厂移动侧插件失败仍然响亮失败**（@deepseek-ai/*、@dsh-android/* 及出货具名插件），
-  //     核心坏掉必须可见——这条不变量与 G1 同口径且更强。
+  //     核心坏掉必须可见。
   //   - **有上限**：最多隔离 8 个，超过即响亮失败并给出完整清单（不允许无限容忍）。
-  //   - 与 G1 **anchor 互不相交、顺序无关**（各自函数不同），故不设 requires 以免假耦合。
   'boot-third-party-isolation-G3': {
     file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js',
     scope: 'engine',
@@ -1046,7 +1084,7 @@ const IMPLS = {
       // （只按前缀判归属，会把不可证的 path/URL 条目也隔离掉）→ 必须判为未应用并重新施加。
       && s.includes('dshMobileIsIsolatableEntry')
       // 反 no-op：boot() 仍直接挂载 root include 就说明隔离没接上。
-      && !s.includes('\t\tawait mountRootInclude(ctx, absoluteConfigPath, patches, bareModuleBaseUrl);'),
+      && !s.includes('\t\tawait mountRootInclude(ctx, absoluteConfigPath, patches, bareModuleBaseUrl, binName);'),
     apply: (s) => {
       if (s.includes('dsh-mobile third-party boot isolation (G3)') && s.includes('dshMobileMountRootIncludeTolerant') && s.includes('dshMobileIsIsolatableEntry')) return s
       // ① 隔离式挂载器 + 判据（插在 boot() 定义之前）
@@ -1146,7 +1184,7 @@ const IMPLS = {
         '\tconst disabled = [];',
         '\tfor (;;) {',
         '\t\ttry {',
-        '\t\t\tawait mountRootInclude(ctx, absoluteConfigPath, [...(patches ?? []), ...disabled], bareModuleBaseUrl);',
+        '\t\t\tawait mountRootInclude(ctx, absoluteConfigPath, [...(patches ?? []), ...disabled], bareModuleBaseUrl, binName);',
         '\t\t\tif (disabled.length > 0) {',
         '\t\t\t\tconst noun = disabled.length === 1 ? "plugin" : "plugins";',
         '\t\t\t\tconsole.warn(`${binName}: ${String(disabled.length)} third-party ${noun} failed to load during boot and will be skipped; the engine continues. Broken: ${disabled.map((entry) => entry.name).join(", ")} (dsh-mobile third-party boot isolation (G3)). Update or remove the plugin to clear this warning.`);',
@@ -1176,14 +1214,14 @@ const IMPLS = {
       if (!s.includes(BOOT_FN_ANCHOR)) throw new Error('boot-third-party-isolation 锚点未命中：boot() 函数头（引擎升级后请人工核对 dsh-app-boot）')
       s = s.replace(BOOT_FN_ANCHOR, HELPERS)
       // ② boot() 调用点改为隔离式挂载
-      const CALL_OLD = '\t\tawait mountRootInclude(ctx, absoluteConfigPath, patches, bareModuleBaseUrl);'
+      const CALL_OLD = '\t\tawait mountRootInclude(ctx, absoluteConfigPath, patches, bareModuleBaseUrl, binName);'
       const CALL_NEW = '\t\tawait dshMobileMountRootIncludeTolerant(ctx, binName, absoluteConfigPath, patches, bareModuleBaseUrl); /* dsh-mobile third-party boot isolation (G3) */'
       if (!s.includes(CALL_OLD)) throw new Error('boot-third-party-isolation 锚点未命中：boot() 内 mountRootInclude 调用点')
       s = s.replace(CALL_OLD, CALL_NEW)
       if (!s.includes('dsh-mobile third-party boot isolation (G3)')
         || !s.includes('dshMobileMountRootIncludeTolerant')
         || !s.includes('__dshMobileBootSkippedPlugins')
-        || s.includes('\t\tawait mountRootInclude(ctx, absoluteConfigPath, patches, bareModuleBaseUrl);')) {
+        || s.includes('\t\tawait mountRootInclude(ctx, absoluteConfigPath, patches, bareModuleBaseUrl, binName);')) {
         throw new Error('boot-third-party-isolation 复核失败——不写回')
       }
       return s
@@ -1313,55 +1351,6 @@ const IMPLS = {
       return s
     },
   },
-  // ── perf-patch-reload-N1：patchReload=startup 出厂默认 + 存量升级归一化（0.13.8 性能 A1，scope=engine）──
-  // 背景（docs/ANDROID-RUNTIME-PERF-2026-09-12.md §A1/R2，实测 24.9s -> 16.6s 冷启动）：
-  // 出厂 web profile 的 patchReload 是 "live"，上游在 live 档额外挂 cordis-plugin-timer 与
-  // cordis-plugin-hmr，启动期反复现场重算客户端 combo（36 -> 16 次）。Android 上 live reload
-  // 本就不可用（坑 19：改 cordis.patch.yml 必须冷启动才生效），保留它纯亏启动时间。
-  // 两处一起改才算修好（P-AC-23 全新安装 + P-AC-24 存量升级）：
-  //   ① web 模板默认 "live" -> "startup"：initProfile（全新安装）与「键缺失」的升级用户都拿到 startup；
-  //   ② normalizeShippedProfile 的 needsReloadDefault：上游只在键**缺失**时写回模板默认，而存量设备上
-  //      旧引擎早已把 "live" 显式写进 profiles/web/package.json -> 永不归一化。改为「installation-owned
-  //      当前元组下把旧默认 live 一并归一化」，只动安装方拥有的元组，用户自建 profile 元组不受影响。
-  'perf-patch-reload-N1': {
-    file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js',
-    scope: 'engine',
-    check: (s) => (s.match(/dsh-mobile patchReload normalization \(N1\)/g) || []).length === 2,
-    apply: (s) => {
-      if ((s.match(/dsh-mobile patchReload normalization \(N1\)/g) || []).length === 2) return s
-      const TEMPLATE_OLD = '\tweb: {\n\t\tbundles: ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"],\n\t\tpatchReload: "live"\n\t},'
-      const TEMPLATE_NEW = [
-        '\tweb: {',
-        '\t\tbundles: ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"],',
-        '\t\t/* dsh-mobile patchReload normalization (N1): the shipped web profile starts in',
-        '\t\t * "startup" mode — Android cannot use live patch reload (a cordis.patch.yml change',
-        '\t\t * never takes effect without a restart, gotcha 19) and live costs 8s of cold start. */',
-        '\t\tpatchReload: "startup"',
-        '\t},',
-      ].join('\n')
-      if (!s.includes(TEMPLATE_OLD)) throw new Error('perf-patch-reload 锚点未命中：web 模板 patchReload: "live"')
-      s = s.replace(TEMPLATE_OLD, TEMPLATE_NEW)
-      const NORMALIZE_OLD = '\tconst needsReloadDefault = manifest.dsh?.profile?.patchReload === void 0 && isCurrentTuple;'
-      const NORMALIZE_NEW = [
-        '\t/* dsh-mobile patchReload normalization (N1): resident installs already carry the old',
-        '\t * installation default "live" explicitly, so the upstream fill-a-missing-key rule never',
-        '\t * reaches them; an installation-owned tuple is normalized to the shipped default. */',
-        '\tconst staleReloadDefault = manifest.dsh?.profile?.patchReload === "live";',
-        '\tconst needsReloadDefault = isCurrentTuple && (manifest.dsh?.profile?.patchReload === void 0 || staleReloadDefault);',
-      ].join('\n')
-      if (!s.includes(NORMALIZE_OLD)) throw new Error('perf-patch-reload 锚点未命中：needsReloadDefault（引擎升级后请人工核对 normalizeShippedProfile）')
-      s = s.replace(NORMALIZE_OLD, NORMALIZE_NEW)
-      const ASSIGN_OLD = '\t\t\t\tpatchReload: manifest.dsh?.profile?.patchReload ?? template.patchReload'
-      const ASSIGN_NEW = '\t\t\t\tpatchReload: staleReloadDefault ? template.patchReload : (manifest.dsh?.profile?.patchReload ?? template.patchReload)'
-      if (!s.includes(ASSIGN_OLD)) throw new Error('perf-patch-reload 锚点未命中：patchReload 回写表达式')
-      s = s.replace(ASSIGN_OLD, ASSIGN_NEW)
-      if ((s.match(/dsh-mobile patchReload normalization \(N1\)/g) || []).length !== 2) {
-        throw new Error('perf-patch-reload 复核失败——不写回')
-      }
-      return s
-    },
-  },
-
   // ── combo-lazy-A4：compose() 延迟 + 去重（0.14.0 启动性能 P1-1，scope=engine）──
   // 背景（docs/ANDROID-RUNTIME-PERF-2026-09-12.md §R1/§4.A4）：装配期每次 internal/plugin 事件
   // 都触发 flush → compose() 全表重建 90 条 combo（单次 1.8-3.1 s，启动期 9-14 次，占 LISTEN
@@ -1430,8 +1419,8 @@ const IMPLS = {
       const INJECT_NEW = '\t\t\ttable.push(...bootInjections(this.ensureComposed()));'
       if (!s.includes(INJECT_OLD)) throw new Error('combo-lazy 锚点未命中：index-inject 行')
       s = s.replace(INJECT_OLD, INJECT_NEW)
-      const RESOURCE_OLD = '\tbundleResource(method, url) {\n\t\tif (method !== "GET" && method !== "HEAD") return { status: 405 };'
-      const RESOURCE_NEW = '\tbundleResource(method, url) {\n\t\tthis.ensureComposed();\n\t\tif (method !== "GET" && method !== "HEAD") return { status: 405 };'
+      const RESOURCE_OLD = '\tasync bundleResource(method, url) {\n\t\tif (method !== "GET" && method !== "HEAD") return { status: 405 };'
+      const RESOURCE_NEW = '\tasync bundleResource(method, url) {\n\t\tthis.ensureComposed();\n\t\tif (method !== "GET" && method !== "HEAD") return { status: 405 };'
       if (!s.includes(RESOURCE_OLD)) throw new Error('combo-lazy 锚点未命中：bundleResource')
       s = s.replace(RESOURCE_OLD, RESOURCE_NEW)
       const REBUILT_OLD = '\t\tthis.composed = this.compose();\n\t\tfor (const notify of this.rebuildListeners) try {'
@@ -1440,549 +1429,6 @@ const IMPLS = {
       s = s.replace(REBUILT_OLD, REBUILT_NEW)
       if ((s.match(/dsh-mobile combo lazy \(A4\)/g) || []).length !== 2 || !s.includes('\tensureComposed() {')) {
         throw new Error('combo-lazy 复核失败——不写回')
-      }
-      return s
-    },
-  },
-
-  // ── combo-cache-A3：combo 构建期预计算 + 运行时查表（0.14.0 启动性能 P1-2，scope=engine）──
-  // 契约（与 scripts/lib/combo-precompute.mjs、scripts/check-combo-cache.mjs 三处同源，勿单边演进）：
-  //   键 = sha256(client.js 原始字节)；值 = { id, source, lines, map }；
-  //   清单 = $DSH_HOME/profiles/web/.combo-cache/{client-combos.json,client-combos.inject.json}（按序合并，
-  //   后者为注入段增量）；未命中/损坏/id 不符/文件不可读一律回退现场生成并计数（fail-open）。
-  // 命中路径跳过的正是热点：comboSource 的 utf8 解码与正则、newlineCount 逐字符扫描、
-  // identitySectionMap（mappings 拼接 + sourcesContent 全文进 map）。HMR rebuilt() 时 bundle 已变，
-  // sha 天然不匹配 → 回退现场生成（行为与不装缓存一致）。
-  'combo-cache-A3': {
-    file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-modules/lib/index.js',
-    scope: 'engine',
-    check: (s) => s.includes('dsh-mobile combo cache (A3)')
-      && s.includes('dsh-mobile combo cache hit (A3)')
-      && s.includes('dsh-mobile combo cache report (A3)'),
-    apply: (s) => {
-      if (s.includes('dsh-mobile combo cache (A3)')
-        && s.includes('dsh-mobile combo cache hit (A3)')
-        && s.includes('dsh-mobile combo cache report (A3)')) return s
-      const HELPERS = [
-        '/* dsh-mobile combo cache (A3): precomputed identity-combo sections keyed by sha256(client.js',
-        ' * bytes), shipped under <DSH_COMBO_CACHE || $DSH_HOME/profiles/web/.combo-cache>. Every lookup',
-        ' * failure (absent manifest, corrupt JSON, id mismatch, unreadable map file) falls back to the',
-        ' * live composition and is counted for the boot probe (fail-open, P-AC-05). */',
-        'const DSH_MOBILE_COMBO_CACHE_STATS = { state: "unloaded", entries: 0, hits: 0, misses: 0 };',
-        'Object.defineProperty(globalThis, "__dshMobileComboCacheStats", { value: DSH_MOBILE_COMBO_CACHE_STATS, configurable: true });',
-        'let dshMobileComboCache = null;',
-        'let dshMobileComboCacheWarned = false;',
-        'let dshMobileComboCacheReported = false;',
-        'const dshMobileComboCacheMemo = /* @__PURE__ */ new WeakMap();',
-        'function dshMobileComboCacheWarn(message) {',
-        '\tif (dshMobileComboCacheWarned) return;',
-        '\tdshMobileComboCacheWarned = true;',
-        '\tconsole.warn(`client-modules: combo cache (A3) fell back to live composition: ${message}`);',
-        '}',
-        'function dshMobileComboCacheLoad() {',
-        '\tif (dshMobileComboCache !== null) return dshMobileComboCache;',
-        '\tconst home = process.env.DSH_HOME;',
-        '\tconst dir = process.env.DSH_COMBO_CACHE !== void 0 && process.env.DSH_COMBO_CACHE !== "" ? process.env.DSH_COMBO_CACHE',
-        '\t\t: home === void 0 || home === "" ? void 0 : join(home, "profiles", "web", ".combo-cache");',
-        '\tconst cache = { dir: dir ?? "", entries: /* @__PURE__ */ new Map() };',
-        '\tif (dir === void 0) {',
-        '\t\tDSH_MOBILE_COMBO_CACHE_STATS.state = "no-dsh-home";',
-        '\t\tdshMobileComboCache = cache;',
-        '\t\treturn cache;',
-        '\t}',
-        '\tlet manifests = 0;',
-        '\tfor (const name of ["client-combos.json", "client-combos.inject.json"]) {',
-        '\t\tconst path = join(dir, name);',
-        '\t\tif (!existsSync(path)) continue;',
-        '\t\tmanifests += 1;',
-        '\t\ttry {',
-        '\t\t\tconst manifest = JSON.parse(readFileSync(path, "utf8"));',
-        '\t\t\tconst entries = manifest === null || typeof manifest !== "object" ? void 0 : manifest.entries;',
-        '\t\t\tif (entries === null || typeof entries !== "object") throw new Error(`${name}: entries missing`);',
-        '\t\t\tfor (const [key, value] of Object.entries(entries)) {',
-        '\t\t\t\tif (value === null || typeof value !== "object") continue;',
-        '\t\t\t\tif (typeof value.id !== "string" || typeof value.source !== "string" || typeof value.lines !== "number" || typeof value.map !== "string") continue;',
-        '\t\t\t\tcache.entries.set(key, value);',
-        '\t\t\t}',
-        '\t\t} catch (error) {',
-        '\t\t\tdshMobileComboCacheWarn(`${name}: ${error instanceof Error ? error.message : String(error)}`);',
-        '\t\t}',
-        '\t}',
-        '\tDSH_MOBILE_COMBO_CACHE_STATS.state = manifests === 0 ? "absent" : cache.entries.size === 0 ? "empty" : "loaded";',
-        '\tDSH_MOBILE_COMBO_CACHE_STATS.entries = cache.entries.size;',
-        '\tdshMobileComboCache = cache;',
-        '\treturn cache;',
-        '}',
-        'function dshMobileComboCacheLookup(record) {',
-        '\tif (record.sourceMap !== void 0) return void 0;',
-        '\tconst memo = dshMobileComboCacheMemo.get(record);',
-        '\tif (memo !== void 0 && memo.bundle === record.bundle) return memo.value;',
-        '\tconst cache = dshMobileComboCacheLoad();',
-        '\tlet value;',
-        '\tconst entry = cache.entries.get(createHash("sha256").update(record.bundle).digest("hex"));',
-        '\tif (entry !== void 0 && entry.id === record.entry.id) {',
-        '\t\ttry {',
-        '\t\t\tvalue = {',
-        '\t\t\t\tsource: entry.source,',
-        '\t\t\t\tlines: entry.lines,',
-        '\t\t\t\tsection: JSON.parse(readFileSync(join(cache.dir, entry.map), "utf8"))',
-        '\t\t\t};',
-        '\t\t\tDSH_MOBILE_COMBO_CACHE_STATS.hits += 1;',
-        '\t\t} catch (error) {',
-        '\t\t\tdshMobileComboCacheWarn(`map read failed for ${entry.id}: ${error instanceof Error ? error.message : String(error)}`);',
-        '\t\t\tvalue = void 0;',
-        '\t\t}',
-        '\t}',
-        '\tif (value === void 0) DSH_MOBILE_COMBO_CACHE_STATS.misses += 1;',
-        '\tdshMobileComboCacheMemo.set(record, { bundle: record.bundle, value });',
-        '\treturn value;',
-        '}',
-        'function dshMobileComboCacheReport() {',
-        '\tif (dshMobileComboCacheReported) return;',
-        '\tdshMobileComboCacheReported = true;',
-        '\tconst stats = DSH_MOBILE_COMBO_CACHE_STATS;',
-        '\tconsole.log(`client-modules: combo cache (A3) state=${stats.state} entries=${stats.entries} hits=${stats.hits} misses=${stats.misses}`);',
-        '}',
-      ].join('\n')
-      const HELPERS_ANCHOR = '/** sha1 content hash shortened to 12 hex chars (combo / graph / rebuilt-artifact rev). */'
-      if (!s.includes(HELPERS_ANCHOR)) throw new Error('combo-cache 锚点未命中：shortHash JSDoc（引擎升级后请人工核对 dsh-client-modules）')
-      s = s.replace(HELPERS_ANCHOR, HELPERS + '\n' + HELPERS_ANCHOR)
-      const LOOP_OLD = [
-        '\tfor (const record of records) {',
-        '\t\tconst prepared = comboSource(record);',
-        '\t\tconst section = record.sourceMap === void 0 ? identitySectionMap(prepared.source, prepared.fallbackSource) : comboSectionMap(record);',
-      ].join('\n')
-      const LOOP_NEW = [
-        '\tfor (const record of records) {',
-        '\t\tconst mobileCached = dshMobileComboCacheLookup(record); /* dsh-mobile combo cache hit (A3) */',
-        '\t\tif (mobileCached !== void 0) {',
-        '\t\t\tsections.push({',
-        '\t\t\t\toffset: {',
-        '\t\t\t\t\tline,',
-        '\t\t\t\t\tcolumn: 0',
-        '\t\t\t\t},',
-        '\t\t\t\tmap: mobileCached.section',
-        '\t\t\t});',
-        '\t\t\tsource += mobileCached.source + ";\\n";',
-        '\t\t\tline += mobileCached.lines;',
-        '\t\t\tcontinue;',
-        '\t\t}',
-        '\t\tconst prepared = comboSource(record);',
-        '\t\tconst section = record.sourceMap === void 0 ? identitySectionMap(prepared.source, prepared.fallbackSource) : comboSectionMap(record);',
-      ].join('\n')
-      if (!s.includes(LOOP_OLD)) throw new Error('combo-cache 锚点未命中：buildCombo 逐条装配循环')
-      s = s.replace(LOOP_OLD, LOOP_NEW)
-      const REPORT_OLD = [
-        '\t\tconst batches = artifacts.map((artifact) => artifact.descriptor);',
-        '\t\treturn {',
-        '\t\t\trev: shortHash(JSON.stringify({',
-        '\t\t\t\tentries,',
-        '\t\t\t\tbatches',
-        '\t\t\t})),',
-        '\t\t\tentries,',
-        '\t\t\tbatches',
-        '\t\t};',
-      ].join('\n')
-      const REPORT_NEW = [
-        '\t\tconst batches = artifacts.map((artifact) => artifact.descriptor);',
-        '\t\tdshMobileComboCacheReport(); /* dsh-mobile combo cache report (A3) */',
-        '\t\treturn {',
-        '\t\t\trev: shortHash(JSON.stringify({',
-        '\t\t\t\tentries,',
-        '\t\t\t\tbatches',
-        '\t\t\t})),',
-        '\t\t\tentries,',
-        '\t\t\tbatches',
-        '\t\t};',
-      ].join('\n')
-      if (!s.includes(REPORT_OLD)) throw new Error('combo-cache 锚点未命中：compose 返回处')
-      s = s.replace(REPORT_OLD, REPORT_NEW)
-      if (!s.includes('dsh-mobile combo cache (A3)') || !s.includes('dsh-mobile combo cache hit (A3)') || !s.includes('dsh-mobile combo cache report (A3)')) {
-        throw new Error('combo-cache 复核失败——不写回')
-      }
-      return s
-    },
-  },
-
-  // ── combo-single-lazy-A5：单条 combo 延迟到首次被请求（0.14.1 块F P0-1，scope=engine）──
-  // 背景（docs/0.14.1-preview-BOOT-SPEED-AND-LAZY-PLUGINS.md §3.3(4) 与 §4 第 1 项，A 档设备实测）：
-  // 上游 compose() 无条件遍历全表，为每条记录 buildCombo([record], rev) 产出一条「单条 combo」塞进
-  // this.responses，供 /plugins/??<id>/client.js&rev=… 使用。而单条 URL 的唯一生产者是 HMR
-  // invalidate()（client/system.ts:126-127 只在 reloadUrls 有值时才用单条 row.url）：设备 CDP 实测
-  // boot 期浏览器只请求 2 个 /plugins/ 资源（两个批 combo），56 条单条 combo 一条都没被请求。
-  // A4 已把 compose 收敛为 1 次，但这一次仍把 56 条单条产物全建出来——它是那 2 795 ms 同步块里
-  // 与「首个页面请求」无关的部分。
-  // 修法（不改上游语义）：compose() 只登记「单条 URL -> 记录 + 是否 map」映射（纯字符串键，无字节
-  // 运算、无哈希），bundleResource() 命中单条 URL 时才 buildCombo([record], rev) 并缓存；批 combo
-  // 仍按原样即时构建，notifyGraphChanged / rebuilt() 语义不变。
-  // 缓存按「组合世代」失效：每次 compose() 换新的 singleResponses Map，上一代交给 previousSingle*
-  // 承载——与上游 previousBatchResponses「一代覆盖竞态请求」的口径同构。
-  // 陈旧字节防线：命中后仍用记录重建 artifact、用 artifact 的 URL 与请求 URL 逐字符比对，记录换
-  // rev 后旧 URL 一律落 404（绝不在陈旧 rev 下交付字节）。
-  'combo-single-lazy-A5': {
-    file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-modules/lib/index.js',
-    scope: 'engine',
-    check: (s) => s.includes('dsh-mobile combo single lazy (A5)')
-      && s.includes('dshMobileSingleComboResponse')
-      // 关键反 no-op：compose() 里「无条件为每条记录建单条」的调用必须已消失。
-      && !s.includes('const artifact = buildCombo([record], record.entry.rev);'),
-    apply: (s) => {
-      if (s.includes('dsh-mobile combo single lazy (A5)') && s.includes('dshMobileSingleComboResponse')) return s
-      // ① 模块级探针计数：boot 期 singleBuilds=0 证明「已延迟」；请求一条后变 1 证明探针活着。
-      const STATS_ANCHOR = 'const COMBO_REVISION_PLACEHOLDER = "0".repeat(HASH_REVISION_LENGTH);'
-      const STATS = [
-        '/* dsh-mobile combo single lazy (A5): boot composes batch combos only; a single-row',
-        ' * body is built on first request (HMR invalidate() is its only producer). The counter',
-        ' * is the probe surface: singleBuilds=0 at boot proves the deferral, a rise after one',
-        ' * request proves the lazy path is live rather than a dead counter. */',
-        'const DSH_MOBILE_COMBO_LAZY_STATS = { urls: 0, singleBuilds: 0, maxMs: 0 };',
-        'Object.defineProperty(globalThis, "__dshMobileComboLazyStats", { value: DSH_MOBILE_COMBO_LAZY_STATS, configurable: true });',
-      ].join('\n')
-      if (!s.includes(STATS_ANCHOR)) throw new Error('combo-single-lazy 锚点未命中：COMBO_REVISION_PLACEHOLDER 常量（引擎升级后请人工核对 dsh-client-modules）')
-      s = s.replace(STATS_ANCHOR, STATS_ANCHOR + '\n' + STATS)
-      // ② 类字段：单条 URL 登记表 + 当/上两代响应缓存
-      const FIELDS_ANCHOR = '\tpreviousBatchResponses = /* @__PURE__ */ new Map();'
-      const FIELDS = [
-        '\tpreviousBatchResponses = /* @__PURE__ */ new Map();',
-        '\t/* dsh-mobile combo single lazy (A5): single-row URLs are registered, never built eagerly. */',
-        '\tsingleRecords = /* @__PURE__ */ new Map();',
-        '\tsingleResponses = /* @__PURE__ */ new Map();',
-      ].join('\n')
-      if (!s.includes(FIELDS_ANCHOR)) throw new Error('combo-single-lazy 锚点未命中：previousBatchResponses 类字段')
-      s = s.replace(FIELDS_ANCHOR, FIELDS)
-      // ③ compose()：去掉逐条 buildCombo，改为登记 URL -> 记录；世代换手。
-      const COMPOSE_OLD = [
-        '\t\tconst responses = new Map(batchResponses);',
-        '\t\tfor (const record of this.table.values()) {',
-        '\t\t\tconst artifact = buildCombo([record], record.entry.rev);',
-        '\t\t\tresponses.set(artifact.url, {',
-        '\t\t\t\tbody: artifact.script,',
-        '\t\t\t\tcontentType: "text/javascript; charset=utf-8"',
-        '\t\t\t});',
-        '\t\t\tresponses.set(artifact.sourceMapUrl, {',
-        '\t\t\t\tbody: artifact.sourceMap,',
-        '\t\t\t\tcontentType: "application/json; charset=utf-8"',
-        '\t\t\t});',
-        '\t\t}',
-        '\t\tthis.previousBatchResponses = this.batchResponses;',
-        '\t\tthis.batchResponses = batchResponses;',
-        '\t\tthis.responses = responses;',
-      ].join('\n')
-      const COMPOSE_NEW = [
-        '\t\tconst responses = new Map(batchResponses);',
-        '\t\t/* dsh-mobile combo single lazy (A5): boot requests batch combos only, so a single-row',
-        '\t\t * body must not be composed here. Register the cheap URL -> record mapping instead and',
-        '\t\t * compose each body on first request. A stale rev can never be served: the lazy resolver',
-        '\t\t * rebuilds the artifact URL and compares it with the request before answering. */',
-        '\t\tconst singleRecords = new Map();',
-        '\t\tfor (const record of this.table.values()) {',
-        '\t\t\tsingleRecords.set(comboUrl([record.entry.id], record.entry.rev), { record, sourceMap: false });',
-        '\t\t\tsingleRecords.set(comboUrl([record.entry.id], record.entry.rev, true), { record, sourceMap: true });',
-        '\t\t}',
-        '\t\tthis.previousBatchResponses = this.batchResponses;',
-        '\t\tthis.batchResponses = batchResponses;',
-        '\t\t/* dsh-mobile combo single lazy (A5): the single-row maps are RETAINED per composition',
-        '\t\t * generation only. A prior generation is deliberately NOT kept: reconcilePackage swaps',
-        '\t\t * a new record object in while the old one keeps its obsolete rev, so an old URL could',
-        '\t\t * otherwise be answered with superseded bytes. A URL no live record owns is a 404 —',
-        '\t\t * upstream serves single-row URLs only to the HMR reload path, which always re-reads the',
-        '\t\t * fresh URL from the graph. Clearing the memo also drops any body built for a URL whose',
-        '\t\t * record has since been replaced. */',
-        '\t\tthis.singleRecords = singleRecords;',
-        '\t\tthis.singleResponses = new Map();',
-        '\t\tthis.responses = responses;',
-        '\t\tDSH_MOBILE_COMBO_LAZY_STATS.urls = singleRecords.size; /* registered single-row URLs, client.js + .map */',
-      ].join('\n')
-      if (!s.includes(COMPOSE_OLD)) throw new Error('combo-single-lazy 锚点未命中：compose() 逐条 buildCombo 循环 + 世代换手')
-      s = s.replace(COMPOSE_OLD, COMPOSE_NEW)
-      // ④ bundleResource()：批响应未命中时才走惰性单条解析
-      const RESOURCE_OLD = '\t\tconst response = this.responses.get(resourceUrl) ?? this.previousBatchResponses.get(resourceUrl);'
-      const RESOURCE_NEW = '\t\tconst response = this.responses.get(resourceUrl) ?? this.previousBatchResponses.get(resourceUrl) ?? this.dshMobileSingleComboResponse(resourceUrl); /* dsh-mobile combo single lazy (A5) */'
-      if (!s.includes(RESOURCE_OLD)) throw new Error('combo-single-lazy 锚点未命中：bundleResource 响应查找行')
-      s = s.replace(RESOURCE_OLD, RESOURCE_NEW)
-      // ⑤ 惰性解析器（同步、无 await）
-      const HELPER_ANCHOR = '\tnotifyGraphChanged() {'
-      const HELPER = [
-        '\t/**',
-        '\t* Compose one single-row combo on demand (perf A5). Boot composes batch combos only; a',
-        '\t* single-row URL is fetched only after HMR invalidate(), so its body is built here on the',
-        '\t* first request and memoized for the composition generation that owns the URL. A record',
-        '\t* replaced by a newer revision can never answer an obsolete rev: the artifact URL is',
-        '\t* rebuilt and compared before any body is served (a stale rev stays a 404, as upstream).',
-        '\t* @param resourceUrl - path plus query of the requested `/plugins` resource.',
-        '\t* @returns the response, or undefined when no live record owns the URL.',
-        '\t*/',
-        '\tdshMobileSingleComboResponse(resourceUrl) {',
-        '\t\tconst memoized = this.singleResponses.get(resourceUrl);',
-        '\t\tif (memoized !== void 0) return memoized;',
-        '\t\tconst pending = this.singleRecords.get(resourceUrl);',
-        '\t\tif (pending === void 0) return void 0;',
-        '\t\tconst started = performance.now();',
-        '\t\tconst artifact = buildCombo([pending.record], pending.record.entry.rev);',
-        '\t\tconst artifactUrl = pending.sourceMap ? artifact.sourceMapUrl : artifact.url;',
-        '\t\t/* A record whose rev moved on must not answer the URL built from the old rev. */',
-        '\t\tif (artifactUrl !== resourceUrl) return void 0;',
-        '\t\tDSH_MOBILE_COMBO_LAZY_STATS.singleBuilds += 1;',
-        '\t\tDSH_MOBILE_COMBO_LAZY_STATS.maxMs = Math.max(DSH_MOBILE_COMBO_LAZY_STATS.maxMs, performance.now() - started);',
-        '\t\tconst response = {',
-        '\t\t\tbody: pending.sourceMap ? artifact.sourceMap : artifact.script,',
-        '\t\t\tcontentType: pending.sourceMap ? "application/json; charset=utf-8" : "text/javascript; charset=utf-8"',
-        '\t\t};',
-        '\t\tthis.singleResponses.set(resourceUrl, response);',
-        '\t\treturn response;',
-        '\t}',
-        '\tnotifyGraphChanged() {',
-      ].join('\n')
-      if (!s.includes(HELPER_ANCHOR)) throw new Error('combo-single-lazy 锚点未命中：notifyGraphChanged 方法头')
-      s = s.replace(HELPER_ANCHOR, HELPER)
-      if (!s.includes('dsh-mobile combo single lazy (A5)')
-        || !s.includes('dshMobileSingleComboResponse')
-        || s.includes('const artifact = buildCombo([record], record.entry.rev);')
-        || !s.includes('DSH_MOBILE_COMBO_LAZY_STATS.singleBuilds += 1;')) {
-        throw new Error('combo-single-lazy 复核失败——不写回')
-      }
-      return s
-    },
-  },
-
-  // ── combo-parallel-C3：compose 重活分片并行（K = min(2, cores-1)，0.14.1 块F P1，scope=engine）──
-  // 背景（docs/0.14.1-preview-BOOT-SPEED-AND-LAZY-PLUGINS.md §3.6(e) 与 §4 第 3 项；用户 2026-09-19
-  // 拍板 C3 为 0.14.1 必做）：A4 把 compose 收敛为 1 次、A3 砍半、A5 去掉单条浪费之后，剩下的仍是
-  // 一个同步块（设备实测 2 795 ms），且它落在首个页面请求路径上——把这块重活移出主线程是当前对
-  // 「可对话」最大的单一杠杆。
-  // 形态（硬约束逐条对应详档 §4 第 3 项）：
-  //   - buildCombo 的**逐记录字节计算**（comboSource 的 utf8 解码与正则、identitySectionMap 的
-  //     逐行 mappings + sourcesContent 全文、newlineCount 逐字符）分片到 worker；A3 缓存命中仍走
-  //     主线程（查表极便宜，且 A3 是字节真相源）；带 sourceMap 的记录留主线程走 comboSectionMap
-  //     （真实产物里 .map 已被 slim 删除，此路径实际不触发，保留只为正确性）。
-  //   - **rev 分配与批拼接留主线程**：allocateInitialRevision() 未被触碰；framedHash/Buffer 拼接/
-  //     JSON.stringify(sections) 全部仍在主线程执行（worker 只回传每条的 {source, lines, section}）。
-  //   - 池是**启动期临时池**：每次组合过程创建、在同一过程结束的 finally 里对每个 worker 调
-  //     terminate()——比「启动完成后」更严格，稳态 RSS 不驻留（预算 220 MiB）。
-  //   - **正确性不依赖池**：任何异常（Worker 不可用、分片超时、worker 内抛错）都回退主线程现场生成
-  //     并计数；分片失败绝不产出错误字节，也不会挂死（有分片 deadline）。
-  // 步进同步用 SharedArrayBuffer + Atomics.wait：compose() 是同步函数（上游不含 await），必须同步
-  // 等待分片结果。**坑**：把 Int32Array 视图放进 workerData 会被结构化克隆（worker 里 isSAB=false，
-  // 计数不共享）——必须传 `.buffer` 本体（宿主实测：传视图 → 主线程永远等不到；传 buffer → 正常）。
-  'combo-parallel-C3': {
-    file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-modules/lib/index.js',
-    scope: 'engine',
-    requires: ['combo-lazy-A4', 'combo-cache-A3', 'combo-single-lazy-A5'],
-    check: (s) => s.includes('dsh-mobile combo parallel (C3)')
-      && s.includes('dshMobileComboPrepareRecords')
-      && s.includes('__dshMobileComboParallelStats')
-      // 反 no-op：A3 的逐条装配循环必须已被「预准备数组 + 主线程拼接」取代。
-      && !s.includes('const mobileCached = dshMobileComboCacheLookup(record);'),
-    apply: (s) => {
-      if (s.includes('dsh-mobile combo parallel (C3)') && s.includes('dshMobileComboPrepareRecords')) return s
-      // ① 依赖导入（fixture 是 ESM：worker_threads 与 os 都要显式 import）
-      const IMPORT_ANCHOR = 'import { dirname, isAbsolute, join } from "node:path";'
-      const IMPORTS = [
-        IMPORT_ANCHOR,
-        '/* dsh-mobile combo parallel (C3): temporary shard pool for one composition pass. */',
-        'import { availableParallelism } from "node:os";',
-        'import { MessageChannel, Worker, receiveMessageOnPort } from "node:worker_threads";',
-      ].join('\n')
-      if (!s.includes(IMPORT_ANCHOR)) throw new Error('combo-parallel 锚点未命中：node:path import 行（引擎升级后请人工核对 dsh-client-modules）')
-      s = s.replace(IMPORT_ANCHOR, IMPORTS)
-      // ② 模块级：walk 统计 + 常量 + worker 源码 + 分片执行器 + 预准备器
-      const STATS_ANCHOR = 'Object.defineProperty(globalThis, "__dshMobileComboLazyStats", { value: DSH_MOBILE_COMBO_LAZY_STATS, configurable: true });'
-      const BLOCK = [
-        STATS_ANCHOR,
-        '/* dsh-mobile combo parallel (C3): per-record byte computation for one composition pass is',
-        ' * sharded across a temporary worker pool sized K = min(2, cores - 1). rev allocation and the',
-        ' * batch concatenation stay on the main thread. The pool lives exactly one pass and every',
-        ' * worker is terminated when that pass ends, so the startup cost never becomes resident memory.',
-        ' * Any failure falls back to the live single-thread path for the affected records: correctness',
-        ' * never depends on the pool. */',
-        'const DSH_MOBILE_COMBO_PARALLEL_STATS = { workers: 0, shards: 0, records: 0, fallbackRecords: 0, terminateRequests: 0, live: 0 };',
-        'Object.defineProperty(globalThis, "__dshMobileComboParallelStats", { value: DSH_MOBILE_COMBO_PARALLEL_STATS, configurable: true });',
-        '/** Hard ceiling for one sharded pass: a stalled worker must never hang the sync composition. */',
-        'const DSH_MOBILE_COMBO_PARALLEL_DEADLINE_MS = 20000;',
-        '/** Worker body: byte-identical copy of comboSource + identitySectionMap for one record.',
-        ' * Written as a real function and stringified, so worker byte math cannot drift from the',
-        ' * main-thread implementation through a second hand-rolled copy. */',
-        'function dshMobileComboWorkerBody() {',
-        '\tconst { workerData } = require("node:worker_threads");',
-        '\tconst SOURCE_MAP_TRAILER = /(?:\\r?\\n)?\\/\\/# sourceMappingURL=[^\\r\\n]*(?:\\r?\\n)?$/;',
-        '\tconst SOURCE_URL_TRAILER = /(?:\\r?\\n)?\\/\\/# sourceURL=([^\\r\\n]+)(?:\\r?\\n)?$/;',
-        '\tconst newlineCount = (value) => { let n = 0; for (const c of value) if (c === "\\n") n += 1; return n; };',
-        '\tconst prepare = (record) => {',
-        '\t\tlet source = Buffer.from(record.bundle).toString("utf8");',
-        '\t\tconst sourceUrl = SOURCE_URL_TRAILER.exec(source)?.[1];',
-        '\t\tsource = source.replace(SOURCE_URL_TRAILER, "").replace(SOURCE_MAP_TRAILER, "");',
-        '\t\tif (!source.endsWith("\\n")) source += "\\n";',
-        '\t\tconst fallbackSource = sourceUrl === void 0 ? `/plugins/${record.id}/client.js` : /^(?:[A-Za-z][A-Za-z\\d+.-]*:|\\/)/.test(sourceUrl) ? sourceUrl : `/${sourceUrl}`;',
-        '\t\tconst mappings = Array.from({ length: newlineCount(source) }, (_, index) => index === 0 ? "AAAA" : "AACA").join(";");',
-        '\t\treturn { source, lines: newlineCount(source + ";\\n"), section: { version: 3, names: [], sources: [fallbackSource], sourcesContent: [source], mappings } };',
-        '\t};',
-        '\tconst done = new Int32Array(workerData.sab);',
-        '\tworkerData.port.on("message", (msg) => {',
-        '\t\tlet payload;',
-        '\t\ttry { payload = { parts: msg.records.map(prepare) }; }',
-        '\t\tcatch (error) { payload = { error: error?.message ?? String(error) }; }',
-        '\t\tworkerData.port.postMessage(payload);',
-        '\t\tAtomics.add(done, 0, 1);',
-        '\t\tAtomics.notify(done, 0);',
-        '\t});',
-        '}',
-        'const DSH_MOBILE_COMBO_WORKER_SOURCE = `(${dshMobileComboWorkerBody.toString()})()`;',
-        '/** K = min(2, cores - 1); DSH_MOBILE_COMBO_PARALLEL=0 forces the single-thread path (A/B tests). */',
-        'function dshMobileComboWorkerCount() {',
-        '\tif (process.env.DSH_MOBILE_COMBO_PARALLEL === "0") return 1;',
-        '\tconst cores = typeof availableParallelism === "function" ? availableParallelism() : 1;',
-        '\treturn Math.max(1, Math.min(2, cores - 1));',
-        '}',
-        '/**',
-        '* Shard the identity-path preparation of `pending` records across a temporary worker pool.',
-        '* @param records - the full record list (indexed by `pending`).',
-        '* @param pending - indexes whose bytes must be prepared on this pass.',
-        '* @returns parts aligned with `pending`, or undefined when the caller must use the main thread.',
-        '*/',
-        'function dshMobileComboRunParallel(records, pending) {',
-        '\tconst k = dshMobileComboWorkerCount();',
-        '\tif (k <= 1 || pending.length < 2) {',
-        '\t\tDSH_MOBILE_COMBO_PARALLEL_STATS.fallbackRecords += pending.length;',
-        '\t\treturn void 0;',
-        '\t}',
-        '\tconst parts = new Array(pending.length);',
-        '\tconst pool = [];',
-        '\ttry {',
-        '\t\tconst shards = Array.from({ length: k }, () => []);',
-        '\t\tfor (let i = 0; i < pending.length; i += 1) shards[i % k].push(i);',
-        '\t\t/* pass the SharedArrayBuffer itself, never an Int32Array view: a view is structured-cloned',
-        '\t\t * (losing shared memory) and the main thread would then wait forever. */',
-        '\t\tconst sab = new SharedArrayBuffer(4);',
-        '\t\tconst done = new Int32Array(sab);',
-        '\t\tfor (let i = 0; i < shards.length; i += 1) {',
-        '\t\t\tconst channel = new MessageChannel();',
-        '\t\t\tconst worker = new Worker(DSH_MOBILE_COMBO_WORKER_SOURCE, { eval: true, workerData: { sab, port: channel.port2 }, transferList: [channel.port2] });',
-        '\t\t\tworker.unref();',
-        '\t\t\tDSH_MOBILE_COMBO_PARALLEL_STATS.workers += 1;',
-        '\t\t\tDSH_MOBILE_COMBO_PARALLEL_STATS.live += 1;',
-        '\t\t\tpool.push({ worker, port: channel.port1 });',
-        '\t\t}',
-        '\t\tfor (let i = 0; i < pool.length; i += 1) {',
-        '\t\t\tpool[i].port.postMessage({ records: shards[i].map((index) => ({ id: records[index].entry.id, bundle: records[index].bundle })) });',
-        '\t\t}',
-        '\t\tconst deadline = Date.now() + DSH_MOBILE_COMBO_PARALLEL_DEADLINE_MS;',
-        '\t\twhile (Atomics.load(done, 0) < pool.length) {',
-        '\t\t\tif (Date.now() > deadline) throw new Error("a shard did not answer before the deadline");',
-        '\t\t\tAtomics.wait(done, 0, Atomics.load(done, 0), 25);',
-        '\t\t}',
-        '\t\tfor (let i = 0; i < pool.length; i += 1) {',
-        '\t\t\tconst message = receiveMessageOnPort(pool[i].port);',
-        '\t\t\tif (message === void 0) throw new Error("a shard replied without an enveloped message");',
-        '\t\t\tif (message.message.error !== void 0) throw new Error(message.message.error);',
-        '\t\t\tconst shardParts = message.message.parts;',
-        '\t\t\tif (shardParts.length !== shards[i].length) throw new Error("a shard returned the wrong number of parts");',
-        '\t\t\tfor (let j = 0; j < shardParts.length; j += 1) parts[shards[i][j]] = shardParts[j];',
-        '\t\t}',
-        '\t\tfor (const part of parts) if (part === void 0) throw new Error("a shard left a record unprepared");',
-        '\t\tDSH_MOBILE_COMBO_PARALLEL_STATS.shards += pool.length;',
-        '\t\tDSH_MOBILE_COMBO_PARALLEL_STATS.records += pending.length;',
-        '\t\treturn parts;',
-        '\t} catch (error) {',
-        '\t\tconsole.warn(`client-modules: combo parallel (C3) fell back to the main thread: ${error?.message ?? String(error)}`);',
-        '\t\tDSH_MOBILE_COMBO_PARALLEL_STATS.fallbackRecords += pending.length;',
-        '\t\treturn void 0;',
-        '\t} finally {',
-        '\t\tfor (const entry of pool) {',
-        '\t\t\tDSH_MOBILE_COMBO_PARALLEL_STATS.terminateRequests += 1;',
-        '\t\t\tconst settle = () => { DSH_MOBILE_COMBO_PARALLEL_STATS.live -= 1; };',
-        '\t\t\ttry { Promise.resolve(entry.worker.terminate()).then(settle, settle); } catch { settle(); }',
-        '\t\t}',
-        '\t}',
-        '}',
-        '/**',
-        '* Per-record pieces for one buildCombo pass. A3 cache hits are served on the main thread (the',
-        '* lookup is cheap and A3 owns the byte truth); identity-path misses are sharded (C3); records',
-        '* carrying a source map keep the upstream comboSectionMap path on the main thread.',
-        '* @param records - records in composition order.',
-        '* @returns one { source, lines, section } per record, same order.',
-        '*/',
-        'function dshMobileComboPrepareRecords(records) {',
-        '\tconst parts = new Array(records.length);',
-        '\tconst pending = [];',
-        '\tfor (let i = 0; i < records.length; i += 1) {',
-        '\t\tconst cached = dshMobileComboCacheLookup(records[i]); /* dsh-mobile combo cache hit (A3) */',
-        '\t\tif (cached !== void 0) parts[i] = { source: cached.source, lines: cached.lines, section: cached.section };',
-        '\t\telse if (records[i].sourceMap === void 0) pending.push(i);',
-        '\t}',
-        '\tif (pending.length > 0) {',
-        '\t\tconst sharded = dshMobileComboRunParallel(records, pending);',
-        '\t\tif (sharded !== void 0) for (let j = 0; j < pending.length; j += 1) parts[pending[j]] = sharded[j];',
-        '\t}',
-        '\tfor (let i = 0; i < records.length; i += 1) {',
-        '\t\tif (parts[i] !== void 0) continue;',
-        '\t\tconst prepared = comboSource(records[i]);',
-        '\t\t/* Map-carrying records, and any identity record the shards did not cover (single-record',
-        '\t\t * passes, fallback), take the upstream branch verbatim — identitySectionMap for the',
-        '\t\t * identity path, comboSectionMap only when the record carries a map. */',
-        '\t\tconst section = records[i].sourceMap === void 0 ? identitySectionMap(prepared.source, prepared.fallbackSource) : comboSectionMap(records[i]);',
-        '\t\tparts[i] = { source: prepared.source, lines: newlineCount(prepared.source + ";\\n"), section };',
-        '\t}',
-        '\treturn parts;',
-        '}',
-      ].join('\n')
-      if (!s.includes(STATS_ANCHOR)) throw new Error('combo-parallel 锚点未命中：A5 统计挂载行（需先施加 combo-single-lazy-A5）')
-      s = s.replace(STATS_ANCHOR, BLOCK)
-      // ③ buildCombo：A3 的逐条装配循环 → 预准备数组 + 主线程拼接（rev/拼接/哈希语义不变）
-      const LOOP_OLD = [
-        '\tfor (const record of records) {',
-        '\t\tconst mobileCached = dshMobileComboCacheLookup(record); /* dsh-mobile combo cache hit (A3) */',
-        '\t\tif (mobileCached !== void 0) {',
-        '\t\t\tsections.push({',
-        '\t\t\t\toffset: {',
-        '\t\t\t\t\tline,',
-        '\t\t\t\t\tcolumn: 0',
-        '\t\t\t\t},',
-        '\t\t\t\tmap: mobileCached.section',
-        '\t\t\t});',
-        '\t\t\tsource += mobileCached.source + ";\\n";',
-        '\t\t\tline += mobileCached.lines;',
-        '\t\t\tcontinue;',
-        '\t\t}',
-        '\t\tconst prepared = comboSource(record);',
-        '\t\tconst section = record.sourceMap === void 0 ? identitySectionMap(prepared.source, prepared.fallbackSource) : comboSectionMap(record);',
-        '\t\tsections.push({',
-        '\t\t\toffset: {',
-        '\t\t\t\tline,',
-        '\t\t\t\tcolumn: 0',
-        '\t\t\t},',
-        '\t\t\tmap: section',
-        '\t\t});',
-        '\t\tconst bundle = `${prepared.source};\\n`;',
-        '\t\tsource += bundle;',
-        '\t\tline += newlineCount(bundle);',
-        '\t}',
-      ].join('\n')
-      const LOOP_NEW = [
-        '\t/* dsh-mobile combo parallel (C3): the per-record byte work is prepared (A3 lookup on the',
-        '\t * main thread, identity-path misses sharded to the temporary pool), but every rev allocation,',
-        '\t * buffer concatenation and hash below stays on the main thread exactly as upstream. */',
-        '\tconst dshMobileParts = dshMobileComboPrepareRecords(records);',
-        '\tfor (let dshMobileIndex = 0; dshMobileIndex < records.length; dshMobileIndex += 1) {',
-        '\t\tconst mobilePart = dshMobileParts[dshMobileIndex];',
-        '\t\tsections.push({',
-        '\t\t\toffset: {',
-        '\t\t\t\tline,',
-        '\t\t\t\tcolumn: 0',
-        '\t\t\t},',
-        '\t\t\tmap: mobilePart.section',
-        '\t\t});',
-        '\t\tsource += mobilePart.source + ";\\n";',
-        '\t\tline += mobilePart.lines;',
-        '\t}',
-      ].join('\n')
-      if (!s.includes(LOOP_OLD)) throw new Error('combo-parallel 锚点未命中：buildCombo 的 A3 逐条装配循环（需先施加 combo-cache-A3）')
-      s = s.replace(LOOP_OLD, LOOP_NEW)
-      if (!s.includes('dsh-mobile combo parallel (C3)')
-        || !s.includes('dshMobileComboPrepareRecords')
-        || !s.includes('__dshMobileComboParallelStats')
-        || s.includes('const mobileCached = dshMobileComboCacheLookup(record);')
-        || !s.includes('dshMobileParts[dshMobileIndex]')) {
-        throw new Error('combo-parallel 复核失败——不写回')
       }
       return s
     },
@@ -2009,7 +1455,7 @@ const IMPLS = {
   'combo-probe-P1': {
     file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-modules/lib/index.js',
     scope: 'engine',
-    requires: ['combo-lazy-A4', 'combo-cache-A3', 'combo-single-lazy-A5', 'combo-parallel-C3'],
+    requires: ['combo-lazy-A4'],
     check: (s) => s.includes('dsh-mobile combo probe (P1)')
       && s.includes('dshMobileComboProbeEmit')
       && s.includes('import { isMainThread } from "node:worker_threads";')
@@ -2018,8 +1464,8 @@ const IMPLS = {
       && s.includes('} else {'),
     apply: (s) => {
       if (s.includes('dsh-mobile combo probe (P1)') && s.includes('dshMobileComboProbeEmit')) return s
-      // ① import：锚点选 node:crypto 行——A3 不碰它、C3 锚在 node:path 行，互不干扰。
-      const IMPORT_ANCHOR = 'import { createHash, randomBytes } from "node:crypto";'
+      // ① import：锚点选 node:crypto 行——combo 家族里 A3/A5/C3 撤销后，这行只剩探针自己会碰。
+      const IMPORT_ANCHOR = 'import { createHash } from "node:crypto";'
       const IMPORTS = [
         IMPORT_ANCHOR,
         '/* dsh-mobile combo probe (P1): the compose probe is part of the product, so the shell parses',
@@ -2147,7 +1593,10 @@ const IMPLS = {
     check: (s) => s.includes('dsh-mobile compile cache flush (N2)') && s.includes('dshMobileFlushCompileCacheQuietly'),
     apply: (s) => {
       if (s.includes('dsh-mobile compile cache flush (N2)') && s.includes('dshMobileFlushCompileCacheQuietly')) return s
-      const IMPORT_OLD = 'import { readFileSync } from "node:fs";'
+      // 锚 = bin.js 的最后一条顶层 import（rc.1 起 node:util 那行；此前是 node:fs 的 readFileSync，
+      // 上游把根包改成只用 fs/promises 后旧锚逐字符消失）。插在 import 之后、`//#region` 之前，
+      // 保证定时器与 exit 兜底在任何命令逻辑跑起来之前就注册。
+      const IMPORT_OLD = 'import { inspect } from "node:util";'
       const BLOCK = [
         'import { flushCompileCache as dshMobileFlushCompileCache } from "node:module";',
         '/* dsh-mobile compile cache flush (N2): Node persists NODE_COMPILE_CACHE entries only when the',

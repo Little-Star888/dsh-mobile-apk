@@ -117,13 +117,30 @@ class GuideAndConsoleBatch6Test {
   }
 
   @Test
+  fun `进度文案在超出估算值时不再印分母（设备实测缺陷）`() {
+    // 设备读数（16416 冷启动截图）：「已写入 1157 MB / 约 700 MB（99%）」——分子大于分母还报 99%。
+    val half = RUNTIME_UNCOMPRESSED_APPROX_BYTES / 2
+    assertTrue("半程仍带估算分母", runtimeProgressLabel(half).contains("/ 约 "))
+    assertTrue("半程百分比在场", runtimeProgressLabel(half).contains("50%"))
+    val over = RUNTIME_UNCOMPRESSED_APPROX_BYTES * 2
+    val label = runtimeProgressLabel(over)
+    assertFalse("超出估算值后不得再出现分母", label.contains("/ 约 "))
+    assertFalse("不得出现自相矛盾的百分比", label.contains("%"))
+    assertTrue("仍然如实报绝对量", label.contains((over / 1024 / 1024).toString() + " MB"))
+    assertEquals("无法判定时只报绝对量", "已写入 1 MB", runtimeProgressLabel(1024 * 1024, 0))
+  }
+
+  @Test
   fun `进度条必须能切确定态且文案含总量`() {
     val code = codeOnly(source("GuidePageRenderer.kt"))
     assertTrue("必须提供确定档入口", code.contains("fun setDeterminateProgress(doneBytes: Long, totalBytes: Long)"))
     assertTrue("百分比 <0 时回不确定态", code.contains("progressBar.isIndeterminate = pct < 0"))
     val flow = codeOnly(source("EngineStartFlow.kt"))
     assertTrue("解压流程必须真的调它", flow.contains("setDeterminateProgress(done, RUNTIME_UNCOMPRESSED_APPROX_BYTES)"))
-    assertTrue("进度行必须同时给已写入量与总量", flow.contains("MB / 约 "))
+    // 0.14.2：文案不再在 flow 里拼字符串，而是走 runtimeProgressLabel 唯一漏斗
+    // （否则「超出估算值只报绝对量」这条修法在 flow 里会分叉成第二份口径）。
+    assertTrue("进度行必须经唯一漏斗渲染", flow.contains("runtimeProgressLabel(done)"))
+    assertFalse("flow 不得再自己拼进度文案", flow.contains("MB / 约 "))
   }
 
   // ── S1-5：诊断包路径不得进标题 ───────────────────────────────────────────

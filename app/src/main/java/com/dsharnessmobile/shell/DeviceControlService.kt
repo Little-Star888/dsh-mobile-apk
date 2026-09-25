@@ -8,7 +8,6 @@ import android.graphics.Path
 import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
-import android.util.DisplayMetrics
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -565,18 +564,36 @@ class DeviceControlService : AccessibilityService() {
     }
   }
 
+  /**
+   * issue #258：坐标归一化的**基准尺寸**（单一真源）。
+   *
+   * 本函数此前直接返回 `currentWindowMetrics`（= 当前**窗口**）：分屏 / 自由窗口 / 悬浮窗下
+   * 它是窗口尺寸而非整屏尺寸，于是 `nx=0.712` 被换算到 0.712*733=522（屏幕左侧），
+   * DSH 自身浮窗（x∈[1438,2144]）整块点不到。判定与取数现在全部收在 [CoordBasisPolicy]
+   * （纯函数判定 + 可注入取数，反证用例见 `CoordBasisPolicyTest`）。
+   *
+   * 四条消费路径共用本函数：click（[handleClick]）、longClick（[handleLongClick]）、
+   * 快照回显的 screen 字段（[buildSnapshot]）、滚动兜底手势（[handleScroll]）——
+   * 任一条漏改都会让同一个缺陷换条路复发，故不允许各写一份换算。
+   */
+  private fun coordBasis(): CoordBasisPolicy.Basis = CoordBasisPolicy.screenBasis(this)
+
   private fun screenSize(): Pair<Int, Int> {
-    val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-    return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-      val b = wm.currentWindowMetrics.bounds
-      b.width() to b.height()
-    } else {
-      val metrics = DisplayMetrics()
-      @Suppress("DEPRECATION")
-      wm.defaultDisplay.getRealMetrics(metrics)
-      metrics.widthPixels to metrics.heightPixels
-    }
+    val basis = coordBasis()
+    return basis.width to basis.height
   }
+
+  /**
+   * issue #258：把本次动作**实际使用的归一化基准**并进返回值（工具层据此回显）。
+   *
+   * 这是 issue 明确要求的一条：回显基准能让同类缺陷下次自证——收到返回的人不必再去猜
+   * 「这个 nx 是按窗口还是按屏幕算的」，也能立刻看出「basis=window-current 意味着本机没给出
+   * 整屏尺寸、nx 可能偏左」。
+   */
+  private fun withBasis(result: JSONObject, basis: CoordBasisPolicy.Basis): JSONObject = result
+    .put("basis", basis.wire)
+    .put("basisWidth", basis.width)
+    .put("basisHeight", basis.height)
 
   private fun rotation(): Int {
     val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
@@ -1084,10 +1101,11 @@ class DeviceControlService : AccessibilityService() {
       Target.None -> Unit
     }
     if (args.has("nx") && args.has("ny")) {
-      val metrics = screenSize()
-      val x = (args.optDouble("nx") * metrics.first).toFloat()
-      val y = (args.optDouble("ny") * metrics.second).toFloat()
-      return tapAt(x, y, "gesture-norm")
+      // issue #258：基准 = **整屏**（多窗口下不得用窗口尺寸），并在返回里回显所用基准。
+      val basis = coordBasis()
+      val x = (args.optDouble("nx") * basis.width).toFloat()
+      val y = (args.optDouble("ny") * basis.height).toFloat()
+      return withBasis(tapAt(x, y, "gesture-norm"), basis)
     }
     return error("需要 row（行句柄）或 nx/ny")
   }
@@ -1145,10 +1163,11 @@ class DeviceControlService : AccessibilityService() {
       Target.None -> Unit
     }
     if (args.has("nx") && args.has("ny")) {
-      val metrics = screenSize()
-      val x = (args.optDouble("nx") * metrics.first).toFloat()
-      val y = (args.optDouble("ny") * metrics.second).toFloat()
-      return pressAt(x, y, durationMs, "gesture-norm-longclick")
+      // issue #258：与 click 同源同基准（长按走同一条归一化路径，不得只修一处）。
+      val basis = coordBasis()
+      val x = (args.optDouble("nx") * basis.width).toFloat()
+      val y = (args.optDouble("ny") * basis.height).toFloat()
+      return withBasis(pressAt(x, y, durationMs, "gesture-norm-longclick"), basis)
     }
     return error("需要 row（行句柄）或 nx/ny")
   }

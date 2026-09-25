@@ -5,7 +5,7 @@
  * 屏幕/Shizuku/虚拟屏/浮窗/无障碍/强制销毁统一收进 dsh-client-ui-responsive 的「手机控制」设置分区。
  * 本文件保留 `./client` 入口契约（插件 manifest 要求），不再注册任何 UI。
  */
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
 
 /** Required services (cordis fiber inject). */
 export const inject = [] as const

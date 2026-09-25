@@ -516,15 +516,15 @@ const checkChainWiring = () => {
       const lines = codeLines(readFileSync(p, 'utf8'))
       // ① 「调用」：同一行同时出现脚本名与 --degrade（是调用，不是别处的说明）
       const degradeLine = lines.find(({ l }) => l.includes('check-browser-syntax-floor.mjs') && l.includes('--degrade'))
-      const comboLine = lines.find(({ l }) => l.includes('combo-precompute.mjs'))
+      const consumeLine = lines.find(({ l }) => l.includes('inject-all.py'))
       if (!degradeLine) {
         problems.push(tag + ' 没有任何一行同时含 check-browser-syntax-floor.mjs 与 --degrade（降级步骤缺失）')
         continue
       }
-      if (!comboLine) { problems.push(tag + ' 找不到 combo-precompute.mjs 调用（无法验证降级在 combo 之前）'); continue }
-      if (degradeLine.n >= comboLine.n) {
-        problems.push(tag + ' 降级(L' + degradeLine.n + ')不在 combo 预计算(L' + comboLine.n + ')之前'
-          + '——combo 键 = sha256(client.js)，顺序反了必然全 miss')
+      if (!consumeLine) { problems.push(tag + ' 找不到 inject-all.py 调用（无法验证降级在被注入消费之前）'); continue }
+      if (degradeLine.n >= consumeLine.n) {
+        problems.push(tag + ' 降级(L' + degradeLine.n + ')不在注入消费(L' + consumeLine.n + ')之前'
+          + '——注入进快照的就是降级后的字节，顺序反了老内核仍会拿到未降级的 bundle（0.14.2 前这里查的是 combo 预计算顺序）')
       }
       // ② 暂存副本（**绑定判据**，不是「文件里提到过这个词」）：取降级调用的实际 --stage 实参，
       //    它必须是一个由**暂存路径**赋值的变量。否则就是原地降级 —— `vendor/**/lib/` 是入库跟踪的
@@ -545,7 +545,7 @@ const checkChainWiring = () => {
           problems.push(tag + ' 降级目标是 ' + tgt + ' 且其赋值不来自暂存路径（禁止原地降级；'
             + 'vendor/**/lib 入库跟踪，原地降级会写脏工作树 + 制造镜像漂移）')
         }
-        evidence.push(tag + ': degrade@L' + degradeLine.n + ' < combo@L' + comboLine.n + ' stage=' + tgt + ' staged=' + fromStaging)
+        evidence.push(tag + ': degrade@L' + degradeLine.n + ' < consume@L' + consumeLine.n + ' stage=' + tgt + ' staged=' + fromStaging)
       }
     }
   }
@@ -670,7 +670,7 @@ if (has('self-test')) {
   //    真因：check-release-gates 只比门禁集合（31/31 全绿），比不出「构建链里少了降级步骤」，
   //    于是 PowerShell 链有降级、Node 链没有，云端自包含构建必判红而无人知。
   const wiring = checkChainWiring()
-  check('⑥ 接线反回归：两条构建链都必须在 combo 预计算之前调用 --degrade（暂存副本，不原地）',
+  check('⑥ 接线反回归：两条构建链都必须在注入消费（inject-all.py）之前调用 --degrade（暂存副本，不原地）',
     wiring.ok, wiring.detail)
   console.log('  接线取证: ' + wiring.evidence)
 

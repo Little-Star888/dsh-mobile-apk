@@ -60,6 +60,8 @@ const market = externalNamed('dshmarketplace-plugin')
 // 门禁集（唯一声明处；check-release-gates.mjs 断言与 build-apk-013.ps1 的差集 = 0）
 const GATE_SCRIPTS = [
   'check-patch-mirror.mjs',
+  // 0.14.2 T6：补丁测试夹具必须与 contract.baseline 同代（夹具停在上一代 = 补丁回归结构性假绿）。
+  'check-patch-fixtures.mjs',
   // review C6：适配层契约（bundle 行/构建产物/版本钉）。上游 dsh/ 与基线 node_modules 是本机只读
   // 产物（gitignore）——本链（云端自包含）对应小节 SKIP 计数；发布链以 --require 强制齐全。
   'check-contract.mjs',
@@ -103,6 +105,8 @@ const GATE_SCRIPTS = [
   'check-build-parallel-cap.mjs',
   // Kotlin 单测数量反回归（0.14.1 P0）：CI 不跑 Kotlin 单测 + 只按退出码判 = 防线删失仍绿。
   'check-kotlin-test-count.mjs',
+  // 执行地图覆盖与锚点（0.14.2 D7）：输入在 apk 仓（app/src、plugins、EXECUTION-MAP.md）。
+  'check-code-map.mjs',
 ]
 
 // ---- 参数解析 ----
@@ -156,6 +160,8 @@ try {
   // ---- 2. 门禁（注入前；与 build-apk-013.ps1 同一份门禁集，0.13.8-b ST-06）----
   log('门禁：补丁镜像一致性…')
   run('node', [gate('check-patch-mirror.mjs')])
+  log('门禁：补丁测试夹具随版（夹具代 == contract.baseline）…')
+  run('node', [gate('check-patch-fixtures.mjs')])
   // review C6：适配层契约（上游 bundle 行引用 / 注入包 lib 产物 / 客户端槽位 / 版本钉台账）。
   log('门禁：适配层契约（bundle/构建产物/版本钉）…')
   run('node', [gate('check-contract.mjs')])
@@ -204,6 +210,10 @@ try {
   // 云端链无 gradle 产物 → --allow-missing 显式 SKIP 计数（不计入绿），本地链才有真结果。
   log('门禁：Kotlin 单测数量反回归（逐类基线只许升 + 无缺席 + 结果新鲜）…')
   run('node', [gate('check-kotlin-test-count.mjs'), '--allow-missing'])
+  // 执行地图覆盖与锚点门禁（0.14.2 D7）：输入在 apk 仓，与本地链/发布链同一份实现。
+  // 声明集合差集必须为 0 —— 只加一侧即被 check-release-gates 判红。
+  log('门禁：执行地图覆盖与锚点（覆盖完整 + 锚点有效 + 编号一致）…')
+  run('node', [gate('check-code-map.mjs')])
   // 制度性门禁（0.13.8-b B2 ST-25/26/31）：与本地链同一份集合（差集 = 0 由 check-release-gates 断言）
   log('门禁：状态登记制（PR 模板四栏 + 登记表 evidence）…')
   run('node', [gate('check-state-registry.mjs')])
@@ -265,19 +275,6 @@ try {
     }
     const undoDeg = degraded.get('undo')
     const marketDeg = degraded.get('market')
-    // combo 缓存注入段（A3 启动性能）：注入链的 client.js 不在快照段预计算范围内，这里补算为
-    // client-combos.inject.json + <sha256>.map，经 inject-all --combo-cache-delta 合入 tar；
-    // 覆盖由注入后门禁 check-combo-cache 断言（与 build-apk-013.ps1 同一份实现）。
-    // 用**降级后的**源（与下方 inject-all 同一份），否则 combo 键与注入内容不一致。
-    log('combo 缓存注入段预计算（A3）…')
-    const comboDelta = join(work, 'combo-cache-delta')
-    mkdirSync(comboDelta, { recursive: true })
-    run('node', [
-      join(ROOT, 'scripts', 'lib', 'combo-precompute.mjs'),
-      ...pluginDirs.flatMap((p) => ['--scan', p]),
-      '--scan', undoDeg, '--scan', marketDeg,
-      '--out', comboDelta, '--manifest', 'client-combos.inject.json', '--engine', 'inject',
-    ])
     log('单 pass 注入（@dsh-android + undo/market + 权威 patch，全部装配 profile）…')
     // ST-05：--all-profiles = 权威 patch 写给全部真实装配 profile（web+headless，负控 profile 除外）
     run('python', [
@@ -286,7 +283,6 @@ try {
       '--dsh-android', ...pluginDirs,
       '--external', undoDeg, marketDeg,
       '--all-profiles',
-      '--combo-cache-delta', comboDelta,
     ])
     snapIn = join(work, 'snap-final2.tar.xz')
   } else {
@@ -300,8 +296,9 @@ try {
   // 注入面成员完整性（P0）：包内新增文件必须随注入进 tar，且相对导入不得悬空
   log('门禁：注入成员完整性（成员集合 + 相对导入可解析）…')
   run('node', [gate('check-inject-completeness.mjs'), snapIn])
-  // combo 缓存覆盖（A3）：注入后 tar 的每条 client.js 必须有 sha256 命中的缓存条目（含注入段增量）
-  log('门禁：combo 缓存覆盖（sha256 命中 + map 在场）…')
+  // combo 死缓存回流防护（0.14.2 撤销 A3 后反向）：产物里不得再出现 .combo-cache，构建链不得再调
+  // combo-precompute——上游 rc.1 已把 combo 载荷改懒构造，5 MiB 预计算清单反而更慢（实测见补丁头注）。
+  log('门禁：combo 死缓存不得回流产物…')
   run('node', [gate('check-combo-cache.mjs'), snapIn])
   // 浏览器语法下限（0.14.1 块C G-1）：入口 chunk 带 `static{}` 会让老内核（WebView <94）整模块不执行
   // → 纯白无字。判据 = 真实解析器 AST + esbuild 双 arm 逐字节差分（禁 grep），扫全清单。

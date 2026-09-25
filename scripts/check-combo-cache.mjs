@@ -1,176 +1,104 @@
 #!/usr/bin/env node
-// check-combo-cache.mjs — A3 combo 缓存覆盖门禁（0.14.0 启动性能 P1-2）。
+// check-combo-cache.mjs — combo 预计算死缓存回流门禁（0.14.2 反向改造）
 //
-// 背景：运行时补丁 combo-cache-A3 按 sha256(client.js) 查构建期缓存；缓存是**机会性**的
-// （miss 即回退现场生成，fail-open）。门禁保证「随快照出厂的每一条 bundle 都有可用条目」，
-// 否则回退会静默吃掉全部收益而无人知（假绿）。契约三处同源：scripts/lib/combo-precompute.mjs
-// （写）/ apply-patches.mjs combo-cache-A3（读）/ 本门禁（覆盖）。
+// 这个名字原本守的是另一件事：「快照里每条 client.js 都必须有 sha256 命中的 A3 预计算条目」
+// （覆盖不全 = 启动收益被回退吞掉）。0.14.2 追上游 0.1.7-rc.1 时 A3 被**撤销**，理由不是锚点漂了，
+// 而是它在 rc.1 上**净亏**（实测见 scripts/patches/registry.json 与本文件 --self-test 的口径说明）：
+//   上游把 combo 载荷改成懒构造（`buildCombo` 返回 `lazyBody(...)`，`dsh-client-modules/lib/index.js`），
+//   启动路径上每条 bundle 只剩 utf8 解码 + 两次正则剥离；而 A3 命中路径要先 JSON.parse 一份
+//   内联了全部 source 文本的清单（55 条 / 4.6 MiB 样本 ⇒ 清单 5.09 MiB）再逐条读 .map 文件。
+//   同一台机器同一批字节：上游 44 ms / A3 现形态 129 ms / 只缓存 source 的收窄形态 78 ms。
+// ⇒ 预计算与 .combo-cache 目录本身现在是**产物里的死重**（多 5 MiB 要打包、传输、解包，
+//   设备上还要在启动路径上解析）。本门禁因此反向外形：谁把它弄回来，就在这里判红。
 //
-// 断言：
-//   A. 缓存契约在场：home/.dsh/profiles/web/.combo-cache/ 至少一份清单（client-combos.json =
-//      快照段；client-combos.inject.json = 注入段增量，运行时按序合并）；
-//   B. 每条 `*/lib/client.js`：
-//      - 无同级 `.map`：sha256 必须命中清单，entry.id == 邻近 package.json 的 name，map 文件在场；
-//      - 有同级 `.map`：豁免（运行时不走 identity 路径，走 comboSectionMap 现场生成）。
+// 三条断言：
+//   1. 产物面：快照内不得出现 home/.dsh/profiles/**/.combo-cache/ 任何条目；
+//   2. 链路面：构建脚本不得再调 combo-precompute，inject-all.py 不得再收 --combo-cache-delta；
+//   3. 补丁面：补丁登记表里不得再有 combo-cache-A3 / combo-single-lazy-A5 / combo-parallel-C3。
 //
-// 用法：node scripts/check-combo-cache.mjs --stage <stageRoot>
-//       node scripts/check-combo-cache.mjs <snapshot.tar.xz>
-//       node scripts/check-combo-cache.mjs --self-test
-// 退出码：0 = 通过；1 = 覆盖缺口；2 = 用法或输入不可读。
-import { createHash } from 'node:crypto'
-import { TAR } from './lib/shell.mjs'
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { dirname, join, relative, posix } from 'node:path'
-import { execFileSync, spawnSync } from 'node:child_process'
+// 用法：node scripts/check-combo-cache.mjs [<snapshot.tar.xz>] [--self-test]
+// 退出码：0 = PASS（无快照时第 1 条计数 SKIP）；1 = FAIL。
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { precomputeComboCache, walkClientBundles } from './lib/combo-precompute.mjs'
+import { execFileSync } from 'node:child_process'
+import { TAR } from './lib/shell.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
+const ROOT = dirname(HERE)
 const argv = process.argv.slice(2)
-const argOf = (name) => { const i = argv.indexOf('--' + name); return i >= 0 ? argv[i + 1] : undefined }
-const CACHE_REL = 'home/.dsh/profiles/web/.combo-cache'
-const MANIFESTS = ['client-combos.json', 'client-combos.inject.json']
+const DEAD_PATCH_IDS = ['combo-cache-A3', 'combo-single-lazy-A5', 'combo-parallel-C3']
 
-// --self-test：自包含两向验证（临时 stage，不碰仓库）：覆盖齐全 → 0；篡改 bundle → 1。
-if (argv.includes('--self-test')) {
-  const tmp = mkdtempSync(join(tmpdir(), 'combo-cache-self-'))
-  try {
-    const stage = join(tmp, 'stage')
-    const pkgDir = join(stage, 'usr/lib/node_modules/@deepseek-ai/demo-pkg')
-    mkdirSync(join(pkgDir, 'lib'), { recursive: true })
-    writeFileSync(join(pkgDir, 'package.json'), JSON.stringify({ name: '@deepseek-ai/demo-pkg', version: '1.0.0' }))
-    const clientPath = join(pkgDir, 'lib', 'client.js')
-    writeFileSync(clientPath, 'window.__ModuleLoader__.load({ id: "demo-pkg", factory: () => {} });\n')
-    const report = precomputeComboCache({ clientPaths: [clientPath], outDir: join(stage, CACHE_REL), manifestName: 'client-combos.json', engine: 'self-test' })
-    const cleanRun = spawnSync(process.execPath, [fileURLToPath(import.meta.url), '--stage', stage], { encoding: 'utf8' })
-    writeFileSync(clientPath, readFileSync(clientPath, 'utf8') + '// tampered\n')
-    const dirtyRun = spawnSync(process.execPath, [fileURLToPath(import.meta.url), '--stage', stage], { encoding: 'utf8' })
-    const ok = report.entries === 1 && cleanRun.status === 0 && dirtyRun.status === 1 && dirtyRun.stdout.includes('sha256')
-    console.log((ok ? 'COMBO-CACHE SELF-TEST PASSED' : 'COMBO-CACHE SELF-TEST FAILED')
-      + '（覆盖齐全 exit=' + cleanRun.status + ' 期望 0；篡改后 exit=' + dirtyRun.status + ' 期望 1；entries=' + report.entries + '）')
-    if (!ok) console.log((cleanRun.stdout + cleanRun.stderr + dirtyRun.stdout + dirtyRun.stderr).slice(0, 600))
-    process.exit(ok ? 0 : 1)
-  } finally {
-    rmSync(tmp, { recursive: true, force: true })
-  }
+/** 只留可执行行：撤销说明里提一句文件名是合法的，判全文会把自己变成假红（0.14.2 已踩过两次）。 */
+const codeOnly = (text) => text.split('\n')
+  .filter((l) => !l.trim().startsWith('//') && !l.trim().startsWith('#') && !l.trim().startsWith('<#'))
+  .join('\n')
+
+/** 纯判据：喂成员清单 + 构建脚本源码 + 登记表 id，返回失败列表（--self-test 直接驱动它）。 */
+function audit(memberNames, buildScriptsText, registryIds) {
+  const out = []
+  const dead = memberNames.filter((n) => n.includes('/.combo-cache/'))
+  if (dead.length > 0) out.push(`快照内含 combo 死缓存条目 ${String(dead.length)} 个: [${dead.slice(0, 3).join(', ')}]——A3 已撤销（上游 rc.1 懒构造后预计算净亏）`)
+  const code = codeOnly(buildScriptsText)
+  if (/combo-precompute\.mjs/.test(code)) out.push('构建链仍在调用 combo-precompute.mjs')
+  if (/--combo-cache-delta/.test(code)) out.push('inject-all 仍接受 --combo-cache-delta（死缓存的回流口）')
+  for (const id of DEAD_PATCH_IDS) if (registryIds.includes(id)) out.push(`补丁登记表复活了 ${id}`)
+  return out
 }
 
-const stage = argOf('stage')
-const tar = argv.find((a) => !a.startsWith('--') && a !== stage)
-if ((!stage && !tar) || (stage && !existsSync(stage)) || (tar && !existsSync(tar))) {
-  console.error('用法: node scripts/check-combo-cache.mjs --stage <stageRoot> | <snapshot.tar.xz> | --self-test')
-  process.exit(2)
+if (argv.includes('--self-test')) {
+  const fails = []
+  const push = (label, ok, detail) => { if (!ok) fails.push(label) ; console.log((ok ? 'PASS  ' : 'FAIL  ') + label + (ok || detail === undefined ? '' : ' -> ' + detail)) }
+  const ids = ['flock-android-F3']
+  push('反证：快照含 .combo-cache 条目判红',
+    audit(['home/.dsh/profiles/web/.combo-cache/client-combos.json'], '', ids).length === 1)
+  push('反证：构建链调 precompute 判红',
+    audit([], "run('node', [join(ROOT,'scripts','lib','combo-precompute.mjs')])", ids).length === 1)
+  push('反证：inject-all 收 --combo-cache-delta 判红',
+    audit([], 'elif argv[i] == "--combo-cache-delta":', ids).length === 1)
+  push('反证：登记表复活 A3 判红',
+    audit([], '', ['combo-cache-A3']).length === 1)
+  push('反证：注释里提文件名不误判（撤销说明本身就是合法文案）',
+    audit([], '// 链路面不得再调 combo-precompute.mjs\n  run(\'node\', [gate(\'check-something.mjs\')])', ids).length === 0)
+  push('对照组：干净输入不判红', audit(['home/.dsh/profiles/web/package.json'], '', ids).length === 0)
+  if (fails.length) { console.error(`COMBO-CACHE SELF-TEST FAILED（${fails.length} 项）`); process.exit(1) }
+  console.log('COMBO-CACHE SELF-TEST PASSED')
+  process.exit(0)
 }
 
 const failures = []
-let checked = 0
-let exempt = 0
+let skipped = 0
 const check = (label, ok, detail) => {
   console.log((ok ? 'PASS  ' : 'FAIL  ') + label + (ok || detail === undefined ? '' : ' -> ' + detail))
   if (!ok) failures.push(label)
 }
 
-// ── 输入抽象：stage 树直接走文件系统；tar 产物选择性解出（两批，避开 Windows 命令行长度上限）──
-let root = stage
-let listing = null
-let tmpRoot = null
-if (tar) {
-  let members
-  try {
-    members = execFileSync(TAR, ['-tf', tar], { encoding: 'utf8', maxBuffer: 1024 * 1024 * 1024 })
-      .split('\n').map((s) => s.trim()).filter((s) => s && !s.endsWith('/'))
-  } catch (e) {
-    console.error('CHECK-COMBO-CACHE FAILED：tar 不可读（' + e.message + '）')
-    process.exit(2)
-  }
-  listing = new Set(members)
-  const bundles = members.filter((m) => m.endsWith('/client.js'))
-  if (bundles.length === 0) {
-    console.error('CHECK-COMBO-CACHE FAILED：tar 内无 */lib/client.js（路径布局变更？）')
-    process.exit(1)
-  }
-  tmpRoot = mkdtempSync(join(tmpdir(), 'combo-cache-tar-'))
-  const extract = (list, label) => {
-    if (list.length === 0) return
-    try {
-      execFileSync(TAR, ['-xf', tar, '-C', tmpRoot, ...list], { encoding: 'utf8', maxBuffer: 1024 * 1024 * 1024 })
-    } catch (e) {
-      console.error('CHECK-COMBO-CACHE FAILED：tar 选择性解出失败（' + label + '：' + e.message + '）')
-      rmSync(tmpRoot, { recursive: true, force: true })
-      process.exit(2)
-    }
-  }
-  extract([...bundles, ...MANIFESTS.map((n) => CACHE_REL + '/' + n).filter((n) => listing.has(n))], 'client bundles')
-  // tar 成员路径是 POSIX 形态；Windows 上 join() 会转成反斜杠 → 必须用 posix 拼包名路径，
-  // 否则 listing.has() 恒 false（包名读成 undefined，entry.id 核对整体失效——本机实测的假红形态）。
-  const pkgJsons = [...new Set(bundles.map((m) => posix.join(posix.dirname(posix.dirname(m)), 'package.json')))]
-    .filter((m) => listing.has(m))
-  extract(pkgJsons, 'package manifests')
-  root = tmpRoot
+const tarArg = argv.find((a) => !a.startsWith('-'))
+const autoTar = join(ROOT, '.deploy-tmp', 'snapshot-013', 'x86_64', 'snapshot.tar.xz')
+const tarPath = tarArg ?? (existsSync(autoTar) ? autoTar : null)
+let members = []
+if (!tarArg && !existsSync(autoTar)) {
+  skipped += 1
+  console.log('SKIP(#' + String(skipped) + ')  产物面未核对（无快照可扫）——构建/发布链以显式 <snapshot.tar.xz> 参数强制')
+} else {
+  const listing = execFileSync(TAR, ['-tf', tarPath], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+  members = listing.split('\n').filter((l) => l.length > 0)
+  check('产物面无 combo 死缓存条目（' + String(members.length) + ' 个成员已扫）',
+    !members.some((m) => m.includes('/.combo-cache/')),
+    'A3 已撤销：预计算清单在 rc.1 上是净亏，见本文件头注')
 }
 
-try {
-  const bundlePaths = walkClientBundles(root)
-  if (bundlePaths.length === 0) {
-    console.error('CHECK-COMBO-CACHE FAILED：未找到任何 lib/client.js（快照布局变更或输入不完整）')
-    process.exit(1)
-  }
-  const cacheDir = join(root, CACHE_REL)
-  const manifests = MANIFESTS.filter((name) => existsSync(join(cacheDir, name)))
-  check('缓存清单在场（' + (manifests.join(' + ') || '无') + '）', manifests.length > 0,
-    '缺 ' + CACHE_REL + '/{client-combos.json,client-combos.inject.json}')
-  const merged = new Map()
-  for (const name of manifests) {
-    try {
-      const manifest = JSON.parse(readFileSync(join(cacheDir, name), 'utf8'))
-      const entries = manifest !== null && typeof manifest === 'object' ? manifest.entries : undefined
-      if (entries === null || typeof entries !== 'object') throw new Error('entries 缺失')
-      let added = 0
-      for (const [key, value] of Object.entries(entries)) {
-        if (!/^[0-9a-f]{64}$/.test(key)) throw new Error('键不是 sha256: ' + key)
-        if (value === null || typeof value !== 'object' || typeof value.id !== 'string'
-          || typeof value.source !== 'string' || typeof value.lines !== 'number' || typeof value.map !== 'string') {
-          throw new Error('条目字段非法: ' + key)
-        }
-        merged.set(key, value)
-        added += 1
-      }
-      console.log('      ' + name + '：' + added + ' 条')
-    } catch (e) {
-      check('清单可解析且字段合法: ' + name, false, e.message)
-    }
-  }
-  check('合并后条目非空（' + merged.size + ' 条）', merged.size > 0)
+const buildScripts = ['scripts/build-snapshot-013.mjs', 'scripts/build-apk.mjs', 'scripts/build-apk-013.ps1',
+  'scripts/inject-all.py'].map((rel) => {
+  const p = join(ROOT, rel)
+  return existsSync(p) ? readFileSync(p, 'utf8') : ''
+}).join('\n')
+const registry = JSON.parse(readFileSync(join(ROOT, 'scripts', 'patches', 'registry.json'), 'utf8'))
+const problems = audit(members, buildScripts, registry.patches.map((p) => p.id))
+check('combo 死缓存回流判据（产物面 / 链路面 / 补丁面）', problems.length === 0, problems.join(' | '))
 
-  const mapPresent = (rel) => listing !== null ? listing.has(rel) : existsSync(join(root, rel))
-  const cacheHas = (name) => listing !== null ? listing.has(CACHE_REL + '/' + name) : existsSync(join(cacheDir, name))
-  const missingSha = []
-  const idMismatch = []
-  const missingMap = []
-  for (const clientPath of bundlePaths) {
-    checked += 1
-    const rel = relative(root, clientPath).replace(/\\/g, '/')
-    if (mapPresent(rel + '.map')) { exempt += 1; continue }
-    const sha = createHash('sha256').update(readFileSync(clientPath)).digest('hex')
-    const entry = merged.get(sha)
-    if (entry === undefined) { missingSha.push(rel); continue }
-    const pkgPath = join(root, posix.join(posix.dirname(posix.dirname(rel)), 'package.json'))
-    const id = existsSync(pkgPath) ? JSON.parse(readFileSync(pkgPath, 'utf8')).name : undefined
-    if (entry.id !== id) idMismatch.push(rel + '（清单 ' + entry.id + ' != 包 ' + id + '）')
-    if (!cacheHas(entry.map)) missingMap.push(rel + ' -> ' + entry.map)
-  }
-  check('全部客户端 bundle 有缓存条目（sha256 命中）', missingSha.length === 0,
-    '未覆盖 ' + missingSha.length + ' 条: ' + missingSha.slice(0, 5).join(', '))
-  check('entry.id 与包名一致', idMismatch.length === 0, idMismatch.slice(0, 3).join('；'))
-  check('map 文件在场', missingMap.length === 0, missingMap.slice(0, 3).join('；'))
-  console.log('      bundle=' + checked + '（豁免 .map ' + exempt + '）/ 缓存条目=' + merged.size)
-} finally {
-  if (tmpRoot !== null) rmSync(tmpRoot, { recursive: true, force: true })
-}
-
-if (failures.length > 0) {
-  console.error('CHECK-COMBO-CACHE FAILED（' + failures.length + ' 项，bundle=' + checked + '，豁免=' + exempt + '）：' + failures.slice(0, 5).join('；'))
+if (failures.length) {
+  console.error(`CHECK-COMBO-CACHE FAILED（${failures.length} 项，SKIP=${String(skipped)}）`)
   process.exit(1)
 }
-console.log('CHECK-COMBO-CACHE PASSED（' + checked + ' 条 bundle 覆盖' + (exempt > 0 ? '，' + exempt + ' 条 .map 豁免' : '') + '）')
+console.log(`CHECK-COMBO-CACHE PASSED（SKIP=${String(skipped)}；combo 预计算已撤销且无回流）`)

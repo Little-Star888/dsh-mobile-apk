@@ -21,6 +21,7 @@ import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { versionedFixture } from './lib/fixture.mjs'
 
 /** Node on Android is entered through the dynamic linker, so `process.execPath` reports
  *  /apex/com.android.runtime/bin/linker64 rather than the interpreter; argv0 carries the real
@@ -30,7 +31,7 @@ const NODE = process.argv0 && isAbsolute(process.argv0) ? process.argv0 : proces
 const here = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(here, '..', '..', '..')
 const TARGET = 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-fs-local/lib/index.js'
-const FIXTURE = join(here, 'fixtures', 'dsh-fs-local-0.1.5-rc.1', 'lib', 'index.js')
+const FIXTURE = versionedFixture('dsh-fs-local', 'lib', 'index.js')
 
 const failures = []
 /** Assert one condition, recording the failure instead of throwing so every check reports. */

@@ -14,11 +14,12 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { versionedFixture } from './lib/fixture.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(here, '..', '..', '..')
 const TARGET = 'usr/lib/node_modules/@deepseek-ai/dsh/lib/bin.js'
-const FIXTURE = join(here, 'fixtures', 'dsh-root-0.1.5-rc.1', 'lib', 'bin.js')
+const FIXTURE = versionedFixture('dsh-root', 'lib', 'bin.js')
 
 const failures = []
 function check(label, ok, detail) {
@@ -40,8 +41,15 @@ try {
   const patched = readFileSync(target, 'utf8')
   check('marker 数 = 1', (patched.match(/dsh-mobile compile cache flush \(N2\)/g) || []).length === 1,
     'count=' + ((patched.match(/dsh-mobile compile cache flush \(N2\)/g) || []).length))
-  check('注入点紧跟 node:fs import（bin.js 头部，任何命令路径都会加载）',
-    patched.startsWith('#!/usr/bin/env node\nimport { readFileSync } from "node:fs";\nimport { flushCompileCache as dshMobileFlushCompileCache } from "node:module";'))
+  // 位置判据取语义而非逐字符前缀：真正要保的是「flush 注册早于任何命令逻辑」——bin.js 的产物形态是
+  // import 段 → //#region <模块> → …。逐字符钉住 shebang+首行 import 的写法在 rc.1 已经过期
+  //（根包不再 import node:fs），而位置语义没变。
+  const blockAt = patched.indexOf('dshMobileFlushCompileCache')
+  const firstRegion = patched.indexOf('//#region')
+  check('注入点在 import 段内、首个模块 region 之前（任何命令路径都会加载）',
+    blockAt > 0 && (firstRegion < 0 || blockAt < firstRegion)
+    && patched.indexOf('import { inspect } from "node:util";') < blockAt,
+    `blockAt=${blockAt} firstRegion=${firstRegion}`)
   const parse = spawnSync(process.execPath, ['--check', target], { encoding: 'utf8' })
   check('patched file parses', parse.status === 0, (parse.stderr || '').split('\n')[0])
   apply()

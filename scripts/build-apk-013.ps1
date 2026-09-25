@@ -38,6 +38,12 @@ Write-Host "== 补丁镜像一致性门禁 =="
 node (Join-Path $Root "scripts\check-patch-mirror.mjs") 2>&1
 if ($LASTEXITCODE -ne 0) { Write-Host "补丁镜像不一致，拒绝打包（先同步镜像 scripts/patches 到对端树）"; exit 1 }
 
+# 补丁测试夹具随版门禁（0.14.2 T6）：夹具停在上一代引擎时，「补丁回归」证明的是补丁对旧字节
+# 仍成立——rc.1 实锤：真树断 9 条而补丁测试全绿。夹具代必须等于 contract.baseline。
+Write-Host "== 补丁测试夹具随版门禁 =="
+node (Join-Path $Root "scripts\check-patch-fixtures.mjs") 2>&1
+if ($LASTEXITCODE -ne 0) { Write-Host "夹具未随版，拒绝打包（跑 node scripts\probe-engine-anchors.mjs --fixtures 重生成）"; exit 1 }
+
 # 适配层契约门禁（review C6）：上游 bundle 行引用 / 注入包 lib 产物 / 客户端槽位 / 版本钉台账。
 # 本地链 --require 严格档（上游 dsh/ 与本机 node_modules 都在场）；云端自包含链无这些本机产物，
 # 对应小节按 SKIP 计数（check-release-gates --run --require 在发布链上强制齐全）。
@@ -158,6 +164,13 @@ Write-Host "== Kotlin 单测数量反回归门禁 =="
 node (Join-Path $Root "scripts\check-kotlin-test-count.mjs") --allow-missing 2>&1
 if ($LASTEXITCODE -ne 0) { Write-Host "Kotlin 单测防线数量/新鲜度不达标（可能有用例被删或结果陈旧），拒绝打包"; exit 1 }
 
+# 执行地图覆盖与锚点门禁（0.14.2 D7）：此前只被 apk 仓 CI 调用，本地链与发布链的声明集里
+# 零命中 —— 于是「改了代码必须跑 check-code-map」这条约定在两条真正出包/发版的路径上没有执行者。
+# 它守的是漂移：新加源文件没人挂到查点、锚点指向已删函数、主表与章节对不上。
+Write-Host "== 执行地图覆盖与锚点门禁 =="
+node (Join-Path $Root "scripts\check-code-map.mjs") 2>&1
+if ($LASTEXITCODE -ne 0) { Write-Host "执行地图失真（覆盖缺口/锚点失效/编号不一致），拒绝打包"; exit 1 }
+
 # pi-ai 目录 diff（0.13.3 W1/P2）：baseline -> pin 信息性输出（构建日志 + 报告文件），
 # 删除清单供回归报告引用——不拒绝构建（删除项由 W4 降级补丁兜底）。
 $overlayManifest = Join-Path $Root "scripts\snapshot-config\engine-overlay.json"
@@ -275,25 +288,13 @@ foreach ($abi in @('arm64', 'x86_64')) {
         # 注入后的权威判据是下方 `check-browser-syntax-floor.mjs --scan <注入后 tar>`——它扫全清单，
         # 一旦有包没降到位就判红；不需要在这里「顺手再降一遍」。
         if (-not [string]::IsNullOrEmpty($degradeFailDetail)) { Deny-Abi $abi $degradeFailDetail; continue }
-        # combo 缓存注入段（A3 启动性能）：注入链的 client.js 不在快照段预计算范围内，这里对
-        # 注入源逐个补算为 client-combos.inject.json + <sha256>.map，经 inject-all --combo-cache-delta
-        # 作为新 tar 条目合入 home/.dsh/profiles/web/.combo-cache/。覆盖由注入后门禁 check-combo-cache 断言。
-        # 用**降级后的**源（与下方 inject-all 同一份），否则 combo 键与注入内容不一致。
-        # 雷点 8：全量输出。
-        Write-Host "== combo 缓存注入段预计算（$abi）=="
-        $comboDelta = Join-Path $work "combo-cache-delta"
-        New-Item -ItemType Directory -Force -Path $comboDelta | Out-Null
-        $comboArgs = @()
-        foreach ($d in (@($pluginDirs) + @($undoDeg, $marketDeg))) { $comboArgs += @("--scan", $d) }
-        node (Join-Path $Root "scripts\lib\combo-precompute.mjs") @comboArgs --out $comboDelta --manifest client-combos.inject.json --engine inject 2>&1
-        if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "combo 缓存注入段预计算失败"; continue }
         # 单 pass 注入（2c 提速 2026-09-05）：@dsh-android + 根级插件 + 权威 patch 覆盖合并
         # 为一次 tar 流处理——压缩/解压从 ×4 → ×1（原三步各自全量重压缩 ~743MB）。
         # 雷点 8：全量输出。
         Write-Host "== 单 pass 注入（@dsh-android + undo/market + 权威 patch）（$abi）=="
         # ST-05：--all-profiles = 权威 patch 与注入包覆盖全部真实装配 profile（web + headless；
         # 负控 profile headless-bad 由 inject-all.py 显式跳过）。此前只写 web，headless 停在旧值。
-        python (Join-Path $Root "scripts\inject-all.py") $snap (Join-Path $work "snap-final2.tar.xz") (Join-Path $Root "scripts\profile-web.cordis.patch.yml") --dsh-android @pluginDirs --external $undoDeg $marketDeg --all-profiles --combo-cache-delta $comboDelta 2>&1
+        python (Join-Path $Root "scripts\inject-all.py") $snap (Join-Path $work "snap-final2.tar.xz") (Join-Path $Root "scripts\profile-web.cordis.patch.yml") --dsh-android @pluginDirs --external $undoDeg $marketDeg --all-profiles 2>&1
         if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "注入失败"; continue }
         # 防回归（审校 C4 2026-08-23）：patch 挂载集 ⊇ 注入集——缺条目（如 linux-env 漏挂）直接拒打包
         Write-Host "== 挂载集校验（$abi）=="
@@ -303,10 +304,10 @@ foreach ($abi in @('arm64', 'x86_64')) {
         Write-Host "== 注入成员完整性门禁（$abi）=="
         node (Join-Path $Root "scripts\check-inject-completeness.mjs") (Join-Path $work "snap-final2.tar.xz") 2>&1
         if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "注入产物成员不完整（新增文件丢失/import 悬空）"; continue }
-        # combo 缓存覆盖（A3）：注入后 tar 的每条 client.js 必须有 sha256 命中的缓存条目（含注入段增量）
-        Write-Host "== combo 缓存覆盖门禁（$abi）=="
+        # combo 死缓存回流防护（0.14.2 撤销 A3）：产物里不得再有 .combo-cache，链上不得再调 precompute
+        Write-Host "== combo 死缓存回流门禁（$abi）=="
         node (Join-Path $Root "scripts\check-combo-cache.mjs") (Join-Path $work "snap-final2.tar.xz") 2>&1
-        if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "combo 缓存覆盖不全（回退将吞掉全部启动收益）"; continue }
+        if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "combo 死缓存回流（上游 rc.1 已懒构造，预计算反而更慢）"; continue }
 
         # 浏览器语法下限（0.14.1 块C G-1）：发往浏览器的 bundle 不得携带老内核（WebView <94）解析
         # 不了的语法——入口 chunk 里一个 `static{}` 就会让整模块不执行 → 纯白无字（自 0.13.3 起每版皆有）。

@@ -68,6 +68,21 @@ internal fun runtimeProgressPercent(doneBytes: Long, totalBytes: Long = RUNTIME_
   if (totalBytes <= 0) -1 else ((doneBytes.coerceAtLeast(0) * 100) / totalBytes).toInt().coerceIn(0, 99)
 
 /**
+ * 解压进度文案（0.14.2 设备实测收尾）。
+ *
+ * 缺陷现场：0.14.2 的运行时解压到 1157 MB 时，界面写的是
+ * 「已写入 1157 MB / 约 700 MB（99%）」——分子比分母大还报 99%，用户读到的是两个互相打脸的数字。
+ * 估算常量本身仍然有用（百分比、进度条），但**文字里不许出现「比总量还大的已写入」**：
+ * 一旦超出估算值，就退回只报绝对量。
+ */
+internal fun runtimeProgressLabel(doneBytes: Long, totalBytes: Long = RUNTIME_UNCOMPRESSED_APPROX_BYTES): String {
+  val mb = doneBytes / 1024 / 1024
+  val pct = runtimeProgressPercent(doneBytes, totalBytes)
+  if (pct < 0 || doneBytes > totalBytes) return "已写入 " + mb + " MB"
+  return "已写入 " + mb + " MB / 约 " + (totalBytes / 1024 / 1024) + " MB（" + pct + "%）"
+}
+
+/**
  * 自动回撤不可用时给用户看的一句话（S1-6，纯函数 JVM 可测）。
  *
  * 缺陷现场：`EngineStartFlow` 直接 `result.summary.take(120)` 当副文案，而 summary 是 UndoGate 的
@@ -572,7 +587,9 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
 
   fun showWeb() {
     activity.guideView.visibility = View.GONE
-    activity.webView.visibility = View.VISIBLE
+    // 不直接置 VISIBLE：露出时机要与首帧提交对齐（#242 反色闪），
+    // 但由 revealWebView() 保证「最迟 WEB_REVEAL_FALLBACK_MS 后一定显形」。
+    activity.revealWebView()
     // Preserve the existing WebView session across a liveness transition. Only
     // a documented engine-origin load error requires a fresh navigation.
     if (activity.enginePageFailed) {

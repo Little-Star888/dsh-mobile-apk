@@ -255,11 +255,14 @@ class OverlayReport(private val svc: OverlayService) {
       return false
     }
     val w = (sw - 2 * (16 * dp).toInt()).coerceAtMost((440 * dp).toInt()).coerceAtLeast((200 * dp).toInt())
-    // 高度上下限（0.14.1 D6）：
-    //   上限 = 屏高 40%（抽屉形态，具体比例属未确证项，实机走查时按需调整）；
+    // 高度上下限（0.14.1 D6，0.14.2 加横屏地板）：
+    //   上限 = 屏高 40%，但**不得低于 300dp**——横屏（1600x900）时 40% 只有 240dp，
+    //   比下限 140dp 多出的上拉行程仅 100dp，「上拉看长汇报」这个手势几乎失效；
+    //   地板同时受「屏高 - 24dp」封顶，保证抽屉永远不会高出可用屏幕。
     //   下限 = 140dp（标题 + 摘要行 + 手柄；低于此值手柄都放不下，也就没有「上拉」的起点）。
-    // 初始高度**按内容取**（短汇报不强占 40% 屏高）——见 reportBarInitialHeight。
-    val maxH = (sh * 0.40f).toInt().coerceAtLeast(1)
+    // 初始高度**按内容取**（短汇报不强占上限高度）——见 reportBarInitialHeight。
+    val screenCeil = (sh - (24 * dp).toInt()).coerceAtLeast(1)
+    val maxH = ((sh * 0.40f).toInt().coerceAtLeast((300 * dp).toInt())).coerceAtMost(screenCeil).coerceAtLeast(1)
     val minH = (140 * dp).toInt().coerceAtMost(maxH)
     val lp = android.view.WindowManager.LayoutParams(
       w,

@@ -135,6 +135,14 @@ class MainActivity : ComponentActivity() {
     private const val MAIN_WEBVIEW_BACKGROUND = 0xFF1E1E1E.toInt()
 
     /**
+     * #242（0.14.2）：露出 WebView 与首帧提交之间的兜底时限与淡入时长。
+     * 时限存在的意义不是美化——页面若永不提交（引擎死掉 / 加载失败），必须仍然把那块
+     * 诊断深色底显形给用户看，否则「有界等待」会退化成「停在引导页毫无反馈」。
+     */
+    private const val WEB_REVEAL_FALLBACK_MS = 1200L
+    private const val WEB_REVEAL_FADE_MS = 140L
+
+    /**
      * §2.4：ES2022 类静态块（`static{}`）需要 Chromium 94+；低于此值的产物会在**解析期**整体
      * 不执行——用户看到纯白、无报错、引擎却健康（详档 §1.2 的 A 档实测）。
      * 本常量是诊断字段 `syntax_floor_ok` 的判据门槛，与 `check-browser-syntax-floor.mjs` 的
@@ -158,6 +166,12 @@ class MainActivity : ComponentActivity() {
      */
     @Volatile
     internal var webViewRef: WebView? = null
+
+    /** #242：引擎文档首帧是否已提交（`onPageCommitVisible`）；新文档在 `onPageStarted` 复位。 */
+    @Volatile internal var webFrameCommitted = false
+
+    /** #242：是否有一次「露出 WebView」正在等首帧（决定淡入还是已显形）。 */
+    @Volatile private var webRevealPending = false
   }
 
   // —— 引擎流 / 引导页委托（原位一行委托到协作类；引擎启动与引导页状态渲染
@@ -754,6 +768,22 @@ class MainActivity : ComponentActivity() {
         if (isEngineSource(url)) enginePageFailed = false
         // 新文档：上一文档的层栈信号作废（页面插件在新文档里重新推）。
         if (isEngineSource(url)) backGateState.onPageStarted()
+        // 新文档＝还没有任何像素：露出请求若已发生，回到「透明等首帧」状态（#242）。
+        if (isEngineSource(url)) webFrameCommitted = false
+      }
+
+      /**
+       * #242：`showWeb()` 露出 WebView 时，页面可能一帧都还没画——而它的背景色是**故意**的
+       * 中性深色（§2.3：白底会让「渲染失败」伪装成「正常空页」）。此前两者之间没有任何同步点，
+       * 于是每次冷启动/引擎重启都闪一下诊断底色。这里只登记「首帧已提交」，
+       * 怎么用它见 [revealWebView]；**背景色本身不动**，可诊断性是它存在的全部理由。
+       */
+      override fun onPageCommitVisible(view: WebView, url: String?) {
+        super.onPageCommitVisible(view, url)
+        if (isEngineSource(url ?: "")) {
+          webFrameCommitted = true
+          onWebFrameCommitted()
+        }
       }
 
       override fun onPageFinished(view: WebView, url: String) {
@@ -1030,6 +1060,37 @@ class MainActivity : ComponentActivity() {
    *  一次覆盖该时序；onResume 亦补推（覆盖从系统设置/SAF 返回后主题变化）。
    *  Runnable 体内 try/catch + onDestroy removeCallbacks（M7：防销毁后
    *  迟到的 evaluateJavascript 抛主线程异常）。 */
+  /**
+   * #242：引导页切到 Web 面。露出时机与「首帧已提交」对齐，但**永远立刻露出**——
+   * 未提交时以 alpha=0 露出（加载继续、触摸可达），首帧到达再淡入；若 [WEB_REVEAL_FALLBACK_MS]
+   * 内都没到（引擎死了 / 导航失败），也必须把诊断深色底显形，绝不让用户停在毫无反馈的界面上。
+   */
+  internal fun revealWebView() {
+    val wv = webView
+    wv.visibility = View.VISIBLE
+    if (webFrameCommitted) {
+      webRevealPending = false
+      wv.alpha = 1f
+      return
+    }
+    if (webRevealPending) return       // 已有一次露出在等首帧，别重复挂兜底
+    webRevealPending = true
+    wv.alpha = 0f
+    wv.postDelayed({
+      if (!webRevealPending) return@postDelayed
+      webRevealPending = false
+      wv.alpha = 1f
+      LogCollector.log("dsh-web-reveal", "首帧在 ${WEB_REVEAL_FALLBACK_MS}ms 内未提交，按诊断底色直接显形")
+    }, WEB_REVEAL_FALLBACK_MS)
+  }
+
+  /** 首帧提交：若有一次等待中的露出就淡入；常态（引擎页在引导期就已画好）这里什么都不做。 */
+  private fun onWebFrameCommitted() {
+    if (!webRevealPending) return
+    webRevealPending = false
+    webView.animate().alpha(1f).setDuration(WEB_REVEAL_FADE_MS).start()
+  }
+
   private fun pushSystemDark(view: android.webkit.WebView) {
     val dark = (resources.configuration.uiMode and
       android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==

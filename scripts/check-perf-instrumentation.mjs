@@ -1,13 +1,15 @@
 #!/usr/bin/env node
-// check-perf-instrumentation.mjs — 启动性能度量入口与 A1 出厂声明值门禁（0.13.8-b §7.2 / P-AC-01/03/04/22/23/24）。
+// check-perf-instrumentation.mjs — 启动性能度量入口与出厂 profile 清单门禁（0.13.8-b §7.2 / P-AC-01/03/04/22）。
+// P-AC-23/24（patchReload 出厂默认 + 存量归一化）随 0.1.7-rc.1 撤销：上游删除了整个 patchReload 机制，
+// live reload 的收益改由结构本身提供（dsh-client-hmr 常驻但无 dev watcher 时空转）——见 profile-seed.mjs 头注。
 //
 // 断言四层：
 //   1. 度量入口在场且可自检：scripts/perf/count-compose.mjs（--self-test）+ scripts/perf/measure-steady.ps1
 //      （-DryRun；且不得用 adb forward 判定——P-AC-04 明确禁用该假阳性口径）；
-//   2. A1 seed 机制自检（不依赖快照）：scripts/lib/profile-seed.mjs 在临时 stage 上把出厂清单写成
-//      patchReload=startup、幂等、且 dev 档 DSH_PROFILE_PATCH_RELOAD=live 可覆写（P-AC-22）；
-//   3. A1 声明值对账（P-AC-01）：--require <tar> 时解包快照断言 profiles/{web,headless}/package.json
-//      的 patchReload == 出厂值；无快照非严格档计数 SKIP，严格档失败（不得以 SKIP 结案）；
+//   2. 出厂 profile 清单体检自检（不依赖快照）：scripts/lib/profile-seed.mjs 在临时 stage 上剥掉上游
+//      已不读的死键、断言 bundles 非空、幂等（P-AC-22 由「写死键」改为「不写死键」）；
+//   3. 出厂清单对账（P-AC-01）：--require <tar> 时解包快照断言 profiles/{web,headless}/package.json
+//      bundles 非空且无死键；无快照非严格档计数 SKIP，严格档失败（不得以 SKIP 结案）；
 //   4. 壳侧声明缺口台账（scripts/perf-instrumentation-gaps.json）：逐条核对「仍然缺席」，实现后即 stale 失败。
 //
 // 用法：node scripts/check-perf-instrumentation.mjs [--require] [--snapshot <tar>] [--abi <arm64|x86_64>]
@@ -25,7 +27,6 @@ const argv = process.argv.slice(2)
 const REQUIRE = argv.includes('--require')
 const argOf = (name) => { const i = argv.indexOf('--' + name); return i >= 0 ? argv[i + 1] : undefined }
 const ABI = argOf('abi') ?? 'x86_64'
-const EXPECTED_RELOAD = process.env.DSH_PROFILE_PATCH_RELOAD || 'startup'
 
 const failures = []
 let skipped = 0
@@ -59,42 +60,54 @@ if (existsSync(measurePs1)) {
   check('measure-steady 支持 -DryRun（离线自检）', text.includes('-DryRun'))
 }
 
-// ── 2. A1 seed 机制自检 ─────────────────────────────────────────────────────
+// ── 2. 出厂 profile 清单体检自检 ────────────────────────────────────────────
 const builderPath = join(ROOT, 'scripts', 'build-snapshot-013.mjs')
 const builder = existsSync(builderPath) ? readFileSync(builderPath, 'utf8') : ''
-check('build-snapshot 接线 seedProfilePatchReload', builder.includes('seedProfilePatchReload'))
-check('build-snapshot 默认出厂值为 startup', builder.includes("process.env.DSH_PROFILE_PATCH_RELOAD || 'startup'"))
-const { seedProfilePatchReload } = await import(pathToFileURL(join(ROOT, 'scripts', 'lib', 'profile-seed.mjs')).href)
+check('build-snapshot 接线出厂 profile 清单体检 checkShippedProfileManifests', builder.includes('checkShippedProfileManifests'))
+// 反向面：死键的**写入**必须整条消失，否则「体检」与「写键」两套事实并存（0.14.2 撤销 N1 的收尾）。
+// 只判赋值/接线符号，不判字符串出现——本文件的解释性注释里就会提到 patchReload。
+check('build-snapshot 不再写 patchReload（P-AC-23/24 已随上游撤销该机制）',
+  !builder.includes('seedProfilePatchReload')
+  && !/\.patchReload\s*=[^=]/.test(builder.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n')))
+const { checkShippedProfileManifests, DEAD_PROFILE_KEYS } = await import(pathToFileURL(join(ROOT, 'scripts', 'lib', 'profile-seed.mjs')).href)
 
 const stage = mkdtempSync(join(tmpdir(), 'perf-seed-'))
 try {
   mkdirSync(join(stage, 'home', '.dsh', 'profiles', 'web'), { recursive: true })
   mkdirSync(join(stage, 'home', '.dsh', 'profiles', 'headless'), { recursive: true })
+  mkdirSync(join(stage, 'home', '.dsh', 'profiles', 'broken'), { recursive: true })
   writeFileSync(join(stage, 'home', '.dsh', 'profiles', 'web', 'package.json'),
     JSON.stringify({ name: 'dsh-profile-web', dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'] } } }))
+  // 存量形态：更早的构建把 patchReload 写进了清单（基座 home 会被后续快照继承）
   writeFileSync(join(stage, 'home', '.dsh', 'profiles', 'headless', 'package.json'),
-    JSON.stringify({ name: 'dsh-profile-headless', dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-headless'], patchReload: 'live' } } }))
-  const first = seedProfilePatchReload(stage)
-  const webManifest = JSON.parse(readFileSync(join(stage, 'home', '.dsh', 'profiles', 'web', 'package.json'), 'utf8'))
-  const headlessManifest = JSON.parse(readFileSync(join(stage, 'home', '.dsh', 'profiles', 'headless', 'package.json'), 'utf8'))
-  check('seed：键缺失的 web 写出 startup', webManifest.dsh.profile.patchReload === 'startup')
-  check('seed：存量 live 的 headless 归一化为 startup', headlessManifest.dsh.profile.patchReload === 'startup')
+    JSON.stringify({ name: 'dsh-profile-headless', dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-headless'], patchReload: 'startup' } } }))
+  const probe = (profiles) => checkShippedProfileManifests(stage, { profiles })
+  const first = probe(['web', 'headless'])
+  const headless = JSON.parse(readFileSync(join(stage, 'home', '.dsh', 'profiles', 'headless', 'package.json'), 'utf8'))
+  check('体检：存量死键被剥除', headless.dsh.profile.patchReload === undefined && first.find((r) => r.profile === 'headless')?.stripped.join() === 'patchReload')
+  check('体检：bundles 保留', (headless.dsh.profile.bundles ?? []).length === 2)
   const mtime1 = statSync(join(stage, 'home', '.dsh', 'profiles', 'web', 'package.json')).mtimeMs
-  const second = seedProfilePatchReload(stage)
+  const second = probe(['web', 'headless'])
   const mtime2 = statSync(join(stage, 'home', '.dsh', 'profiles', 'web', 'package.json')).mtimeMs
-  check('seed 幂等：二次运行零改写', second.every((r) => r.changed === false) && mtime1 === mtime2)
-  check('seed 报告 web/headless 两条', first.length === 2 && first.every((r) => !r.missing))
-  seedProfilePatchReload(stage, { reload: 'live' })
-  check('dev 档 DSH_PROFILE_PATCH_RELOAD=live 可覆写（P-AC-22）',
-    JSON.parse(readFileSync(join(stage, 'home', '.dsh', 'profiles', 'web', 'package.json'), 'utf8')).dsh.profile.patchReload === 'live')
+  check('体检幂等：二次运行零改写', second.every((r) => r.changed === false) && mtime1 === mtime2)
+  check('体检逐 profile 报告', first.length === 2 && first.every((r) => !r.missing && r.bundles > 0))
+  // 反证：bundles 为空的清单必须报 0（产物段以此判红），否则「形状合格」是空话
+  writeFileSync(join(stage, 'home', '.dsh', 'profiles', 'broken', 'package.json'),
+    JSON.stringify({ name: 'dsh-profile-broken', dsh: { profile: { bundles: [] } } }))
+  const broken = probe(['broken'])
+  check('反证：空 bundles 被报成 0（不是静默通过）', broken.length === 1 && broken[0].bundles === 0)
+  // 反证：剥键是外科手术而不是「清空 dsh.profile」——未登记键必须原样留着，
+  // 否则体检会把上游将来真读的字段也一并抹掉还全绿。
+  writeFileSync(join(stage, 'home', '.dsh', 'profiles', 'web', 'package.json'),
+    JSON.stringify({ name: 'dsh-profile-web', dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'], patchReload: 'startup', futureKnob: 7 } } }))
+  probe(['web'])
+  const webAfter = JSON.parse(readFileSync(join(stage, 'home', '.dsh', 'profiles', 'web', 'package.json'), 'utf8'))
+  check('反证：未登记的键不被误删（只点死键）', webAfter.dsh.profile.futureKnob === 7 && webAfter.dsh.profile.patchReload === undefined)
 } finally {
   rmSync(stage, { recursive: true, force: true })
 }
 
 const registry = JSON.parse(readFileSync(join(ROOT, 'scripts', 'patches', 'registry.json'), 'utf8'))
-const n1 = registry.patches.find((p) => p.id === 'perf-patch-reload-N1')
-check('存量升级归一化补丁 perf-patch-reload-N1 在 registry（P-AC-24 / Q-20b 默认 N1）',
-  Boolean(n1 && n1.scope === 'engine' && String(n1.marker || '').includes('patchReload normalization')))
 
 // 产品内探针补丁 combo-probe-P1（0.14.1 块F P0-2）：设备上 t_compose_total 恒为 -1 的结构性真因是
 // 「[perf] TOTAL 只有测量 preload 会产，而 scripts/perf/count-compose.mjs 没有任何发行路径」+「解析链
@@ -140,16 +153,19 @@ if (!tarPath) {
     const member = 'home/.dsh/profiles/' + profile + '/package.json'
     const text = readFromTar(tarPath, member)
     if (text === null) { skip('快照内缺 ' + member + '（' + tarPath + '）'); continue }
-    let value = null
-    try { value = JSON.parse(text).dsh?.profile?.patchReload ?? null } catch { value = '<解析失败>' }
-    if (value === EXPECTED_RELOAD) {
-      check('A1 出厂声明值：' + profile + ' patchReload == ' + EXPECTED_RELOAD + '（P-AC-01）', true)
-    } else if (REQUIRE) {
-      check('A1 出厂声明值：' + profile + ' patchReload == ' + EXPECTED_RELOAD + '（P-AC-01，--require）', false,
-        'actual=' + JSON.stringify(value) + '（快照未含出厂 seed：重出快照即转绿）')
+    let manifest = null
+    try { manifest = JSON.parse(text) } catch { /* 保留 null = 解析失败 */ }
+    const bundles = manifest?.dsh?.profile?.bundles ?? []
+    const dead = DEAD_PROFILE_KEYS.filter((key) => manifest?.dsh?.profile?.[key] !== undefined)
+    const ok = manifest !== null && bundles.length > 0 && dead.length === 0
+    const detail = 'bundles=' + String(bundles.length) + ' 死键=[' + dead.join(', ') + ']'
+      + (manifest === null ? '（package.json 解析失败）' : '')
+    if (ok) check('出厂 profile 清单：' + profile + ' ' + detail + '（P-AC-01）', true)
+    else if (REQUIRE) {
+      check('出厂 profile 清单：' + profile + ' ' + detail + '（P-AC-01，--require）', false,
+        'bundles 非空且无上游已不读的死键；重出快照即转绿')
     } else {
-      skip('A1 出厂声明值未核对：' + profile + ' patchReload=' + JSON.stringify(value)
-        + '（当前快照是 A1 前的产物；重出快照后本断言自动转 PASS，构建/发布链以 --require 强制）')
+      skip('出厂 profile 清单未核对：' + profile + ' ' + detail + '（构建/发布链以 --require 强制）')
     }
   }
 }

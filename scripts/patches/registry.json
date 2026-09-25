@@ -108,6 +108,14 @@
       "marker": "dsh-mobile undo route auth (U1)"
     },
     {
+      "id": "narb-android-N1",
+      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/node-addon-require-builtin/lib/index.js",
+      "scope": "engine",
+      "summary": "Android 无预编译 node-addon-require-builtin 绑定 → 回落 require(moduleId)（壳侧已以 --expose-internals 起 node，该 flag 恰暴露 rc.1 internalModules() 需要的五个 internal/modules/*）",
+      "provenance": "0.14.2 追上游 0.1.7-rc.1；rc.1 的 dsh-app-boot 新增该依赖（0.1.5 夹具零命中）。设备 boot-fail.log 连记 4 轮 host preparation failed / No usable native binding found for node-addon-require-builtin-android-x64",
+      "marker": "dsh-mobile native-binding fallback (N1)"
+    },
+    {
       "id": "flock-android-F3",
       "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/node-addon-system/lib/flock.js",
       "scope": "engine",
@@ -159,14 +167,6 @@
       "marker": "dsh-mobile link->rename fallback (F8)"
     },
     {
-      "id": "perf-patch-reload-N1",
-      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js",
-      "scope": "engine",
-      "summary": "patchReload=startup 出厂默认 + 存量升级归一化：web 模板默认 live->startup（上游 live 档额外挂 timer/hmr 反复重算客户端 combo），并把 installation-owned 当前元组下已显式写入的旧默认 live 一并归一化（上游只在键缺失时写回模板默认，存量用户永不归一化）",
-      "provenance": "0.13.8 性能 A1（docs/ANDROID-RUNTIME-PERF-2026-09-12.md §A1，实测冷启动 24.9s -> 16.6s）；验收 P-AC-23 全新安装 + P-AC-24 存量升级",
-      "marker": "dsh-mobile patchReload normalization (N1)"
-    },
-    {
       "id": "combo-lazy-A4",
       "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-modules/lib/index.js",
       "scope": "engine",
@@ -175,49 +175,11 @@
       "marker": "dsh-mobile combo lazy (A4)"
     },
     {
-      "id": "combo-cache-A3",
-      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-modules/lib/index.js",
-      "scope": "engine",
-      "requires": [
-        "combo-lazy-A4"
-      ],
-      "summary": "identity combo 源码与 section map 按 sha256(client.js) 查构建期缓存（快照段 client-combos.json + 注入段 client-combos.inject.json，按序合并），未命中/损坏/id 不符一律回退现场生成并计数（fail-open）；预计算脚本 scripts/lib/combo-precompute.mjs，覆盖门禁 scripts/check-combo-cache.mjs",
-      "provenance": "0.14.0 启动性能 P1-2（同上方案 §4.A3 / 计划 §5.2 P1-2）；验收 P-AC-05 篡改回落 + 缓存覆盖门禁",
-      "marker": "dsh-mobile combo cache (A3)"
-    },
-    {
-      "id": "combo-single-lazy-A5",
-      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-modules/lib/index.js",
-      "scope": "engine",
-      "requires": [
-        "combo-lazy-A4"
-      ],
-      "summary": "单条 combo 延迟到首次被请求：compose() 只登记单条 URL -> 记录映射（不建产物）；bundleResource() 命中单条 URL 时按需 buildCombo 并缓存（按组合世代失效 + 用重建 URL 比对挡陈旧 rev）；批 combo 与 notifyGraphChanged 语义不变；探针计数 __dshMobileComboLazyStats.singleBuilds 区分「已延迟」与「探针没接上」",
-      "provenance": "0.14.1 块F P0-1（docs/0.14.1-preview-BOOT-SPEED-AND-LAZY-PLUGINS.md §3.3(4) 与 §4 第 1 项）；A 档设备实测 boot 期浏览器只请求 2 个 /plugins/ 资源（两个批 combo），56 条单条 combo 零请求——单条 URL 的唯一生产者是 HMR invalidate()",
-      "marker": "dsh-mobile combo single lazy (A5)"
-    },
-    {
-      "id": "combo-parallel-C3",
-      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-modules/lib/index.js",
-      "scope": "engine",
-      "requires": [
-        "combo-lazy-A4",
-        "combo-cache-A3",
-        "combo-single-lazy-A5"
-      ],
-      "summary": "compose 重活分片并行（K=min(2,cores-1)）：buildCombo 的逐记录字节计算（comboSource 解码/正则、identitySectionMap 的 mappings 与 sourcesContent、newlineCount）分片到启动期临时 worker 池；A3 命中与 rev 分配、批拼接、framedHash 全留主线程；每次组合过程结束 finally 里 terminate() 全池（不驻留 RSS）；任何异常回退单线程现场生成（正确性不依赖池），分片带 deadline 不挂死",
-      "provenance": "0.14.1 块F P1（docs/0.14.1-preview-BOOT-SPEED-AND-LAZY-PLUGINS.md §3.6(e) 与 §4 第 3 项；用户 2026-09-19 拍板 C3 为 0.14.1 必做）；A3/A4/A5 之后那唯一一次 compose 仍是落在首个页面请求路径上的同步块（设备 2795 ms）",
-      "marker": "dsh-mobile combo parallel (C3)"
-    },
-    {
       "id": "combo-probe-P1",
       "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-modules/lib/index.js",
       "scope": "engine",
       "requires": [
-        "combo-lazy-A4",
-        "combo-cache-A3",
-        "combo-single-lazy-A5",
-        "combo-parallel-C3"
+        "combo-lazy-A4"
       ],
       "summary": "把 compose 探针送进产品内（收口 t_compose_total 恒 -1）：在 compose() 返回处打印 `[perf] compose #N at=.. dur=..` 与 `[perf] TOTAL calls=.. totalMs=.. instances=.. firstAt=..ms singles=.. loopP99Ms=.. loopSamples=.. comboCache=..`（字段齐备，无值报 -1）；只主线程安装（worker 的 calls=0 TOTAL 不得冒充真读数）；不新增快照成员、壳侧解析器零改动",
       "provenance": "0.14.1 块F（T6 设备实测真因 + 详档 §5.1 C6/P-AC-04）：42/42 恒为 -1；preload/注入方案结构性无效——① count-compose 的 TOTAL 只在 process.on('exit') 打印，落在 killExistingEngine() 内、早于 rotateEngineLog()，被搬进 engine.log.1 而新生代从偏移 0 读不到；② --import/NODE_OPTIONS 在 file-based worker 线程也执行（Node v24.17 实测，引擎树至少 5 处 worker），worker 临终打 calls=0 而解析取最后一条，得到「非 -1 但为 0」的假绿，且 NODE_OPTIONS 会继承到 agent 全部子进程、缺 COMBO_LIB 直接 exit(2)。落点在 compose() 返回处 = LISTEN 之后、首个页面请求路径上，正是 C2 要测的同步块",
@@ -263,14 +225,6 @@
       "summary": "移动形态（html[data-dsh-mobile-form]）下目录行的落定动作改为下钻：点行体进子目录而不是把文件夹变成引用；桌面行为不变",
       "provenance": "2026-09-11 apk #163（用户拍板交互）；上游把「下钻」只绑在行尾 chevron/Tab 上，手机上点不到",
       "marker": "dsh-mobile mobile-folder-drill (F6)"
-    },
-    {
-      "id": "boot-pending-G1",
-      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js",
-      "scope": "engine",
-      "summary": "web boot 容错：非官方包 pending 降级为告警并继续启动；FAILED 与官方包 pending 仍致命",
-      "provenance": "0.13.5 W1b；apk issue #126 P3（第三方插件 inject 了 client-only 服务 uiConversation → 永久 pending → 整树 boot 失败）",
-      "marker": "dsh-mobile boot tolerance (G1)"
     },
     {
       "id": "pi-toolcall-G2",

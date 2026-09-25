@@ -22,7 +22,8 @@
  * 就绪后接通）；未授权时全部工具返回引导——与 PRD "未授权时全部失败关闭" 语义一致。
  */
 import { Context } from '@deepseek-ai/cordis'
-import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
+import { defineTool } from '@deepseek-ai/dsh-tools'
+import { type JsonValue } from '@deepseek-ai/dsh-util-values'
 import { join } from 'node:path'
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { parseUiTreeXml, pruneNodes, resolveRef, findActionableAncestor, checkUiTreeParse, type UiNode, actionableAncestorV2, scopePoolV2 } from './ui-tree.js'
@@ -225,6 +226,53 @@ function tools(ctx: Context, priv: PrivilegeFace) {
   const DISPLAY_ID_PROP = { type: 'number' } as const
   const SCOPE_PROP = { type: 'string' } as const
 
+  /** 壳侧版本兼容标记：老壳侧不回显基准时文案里的这句即为唯一线索（wire 上有测试钉住）。 */
+  const COMPAT_NOTE = '（基准未回显：壳侧版本较旧）'
+
+  /**
+   * issue #258：**回显归一化基准**。
+   *
+   * 缺陷形态：多窗口/自由窗口下壳侧曾用**当前窗口**尺寸（而非整屏）当分母，`nx=0.712` 被算成
+   * `0.712*733=522`（屏幕左侧），DSH 自身浮窗整块点不到。修好后壳侧在返回值里带
+   * `basis/basisWidth/basisHeight`，本函数把它渲染进文案——这样同类缺陷下次**自证**：
+   * 收到返回的人一眼能看出这次换算按的是哪块尺寸。
+   *
+   * 老壳侧（未修版本）不回显基准时，这里**如实标注**而不是假装知道：回显的全部意义就是自证，
+   * 猜一个基准等于又制造一个看不见的错。
+   */
+  const coordBasisNote = (data: unknown): string => {
+    const d = (data ?? {}) as { basis?: unknown; basisWidth?: unknown; basisHeight?: unknown }
+    if (typeof d.basis !== 'string' || d.basis === '') return COMPAT_NOTE
+    const w = typeof d.basisWidth === 'number' ? d.basisWidth : 0
+    const h = typeof d.basisHeight === 'number' ? d.basisHeight : 0
+    // window-current = 壳侧未拿到整屏尺寸（issue #258 的缺陷基准），必须显式告警。
+    const warn = d.basis === 'window-current'
+      ? '——本机未给出整屏尺寸，本次按**当前窗口**换算，多窗口下可能偏左'
+      : ''
+    return `（基准 ${d.basis} = ${w}x${h}${warn}）`
+  }
+
+  /**
+   * issue #258：把壳侧回显的基准字段并进工具返回值（schema 已声明 basis/basisWidth/basisHeight）。
+   *
+   * 只在壳侧真的回显时才带键——老壳侧不回显时**不编造** 0 值（那会让「没回显」看起来像
+   * 「基准是 0x0」）；文案侧由 [coordBasisNote] 如实标注。
+   */
+  const basisFields = (data: unknown): Record<string, unknown> => {
+    const d = (data ?? {}) as { basis?: unknown; basisWidth?: unknown; basisHeight?: unknown }
+    if (typeof d.basis !== 'string' || d.basis === '') return {}
+    return {
+      basis: d.basis,
+      ...(typeof d.basisWidth === 'number' ? { basisWidth: d.basisWidth } : {}),
+      ...(typeof d.basisHeight === 'number' ? { basisHeight: d.basisHeight } : {}),
+    }
+  }
+
+  /** 归一化基准回显字段（issue #258；仅 android_ui_click 用，故就地声明不走共享常量）。 */
+  const BASIS_PROP = { type: 'string' } as const
+  const BASIS_WIDTH_PROP = { type: 'number' } as const
+  const BASIS_HEIGHT_PROP = { type: 'number' } as const
+
   const screenList = defineTool({
     name: 'android_screen_list',
     description: '列出稳定屏幕别名及当前用户开放范围。只返回 capability 元数据，不读取页面内容；屏幕读写仍要求 danger-full-access。虚拟屏（virtual-N）的语义树/ref 动作需无障碍通道；纯 Shizuku 下虚拟屏只能坐标操作——用 android_vdisplay_input（tap/swipe/keyevent/text）。真实屏用 android_ui_click 的 nx/ny。',
@@ -389,14 +437,19 @@ function tools(ctx: Context, priv: PrivilegeFace) {
    * 代次变化或 invalidated=true 即判定界面确实变了；否则明确回报「未观察到变化」，
    * 让模型不必靠「再 dump 一次」才发现点击落空。
    */
-  async function verifyClick(beforeGen: number | undefined, exec: ExecLike): Promise<string> {
+  async function verifyClick(beforeGen: number | undefined, exec: ExecLike, targetVerified = true): Promise<string> {
     await new Promise((resolve) => setTimeout(resolve, 260))
     const s = await a11yExec('state', {}, 4000)
     if (!s.ok) return `（生效校验不可用：${s.error}）`
     const d = (s.data ?? {}) as { gen?: number; invalidated?: boolean }
     const changed = d.invalidated === true
       || (typeof d.gen === 'number' && beforeGen !== undefined && d.gen !== beforeGen)
-    if (changed) return '生效校验：界面已变化（已生效）'
+    // issue #258 §5.1：坐标点击的校验只比较**全局画面**变化，并不验证是否命中目标——
+    // 旧文案「界面已变化（已生效）」会把「打偏到背景应用」也说成生效（issue 实测两次均如此）。
+    // 按 ref 的点击目标已被解析，仍可报「已生效」；按 nx/ny 的点击必须如实标注「未验证目标」。
+    if (changed) {
+      return targetVerified ? '生效校验：界面已变化（已生效）' : '生效校验：画面已变化（未验证目标）'
+    }
     // **「未观察到变化」不等于「没生效」**（0.14.0 模拟器实锤，坑 138）。
     //
     // 实测：点击虚拟屏上的「深色主题」开关，返回「未观察到界面变化——可能未生效」，
@@ -1527,6 +1580,9 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
           displayId: DISPLAY_ID_PROP,
           scope: SCOPE_PROP,
           actionMode: ACTION_MODE_PROP,
+          basis: BASIS_PROP,
+          basisWidth: BASIS_WIDTH_PROP,
+          basisHeight: BASIS_HEIGHT_PROP,
         },
       },
       render: (_args, v: Record<string, unknown>) => [
@@ -1671,12 +1727,17 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
         const clicked = (r.data ?? {}) as { x?: number; y?: number; via?: string }
         // beforeGen 传 undefined：我们手里只有**配置代次**（uiCache.gen），与壳侧
         // 快照代次不同源，拿它比对必然假报「未变」（坑 138）。宁可如实报「未能确认」。
-        const verdict = await verifyClick(undefined, exec as ExecLike)
+        // targetVerified=false：坐标点击只有全局画面变化可观测，**未验证是否命中目标**
+        // （issue #258 §5.1 误报成功）。
+        const verdict = await verifyClick(undefined, exec as ExecLike, false)
+        // issue #258：回显壳侧所用的归一化基准（basis/basisWidth/basisHeight）。
+        const basis = coordBasisNote(r.data)
         return {
           ok: true, denied: false, ref: '', id: `norm(${nx!.toFixed(3)},${ny!.toFixed(3)})`, label: '归一化坐标',
           x: clicked.x ?? 0, y: clicked.y ?? 0,
+          ...basisFields(r.data),
           text: `已按归一化坐标 (${nx!.toFixed(3)},${ny!.toFixed(3)}) 点击（无障碍通道，实际坐标 `
-            + `${Math.round(clicked.x ?? 0)},${Math.round(clicked.y ?? 0)}）；${verdict}`,
+            + `${Math.round(clicked.x ?? 0)},${Math.round(clicked.y ?? 0)}，${basis}）；${verdict}`,
         }
       }
       let cx = 0; let cy = 0; let hitId = ''; let label = ''
@@ -1723,7 +1784,8 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
           label,
           x: cx,
           y: cy,
-          text: `已点击 ${hitId}「${label}」（无障碍通道）——建议重新 dump 验证`,
+          ...basisFields(r.data),
+          text: `已点击 ${hitId}「${label}」（无障碍通道${useRef ? '' : coordBasisNote(r.data)}）——建议重新 dump 验证`,
         }
       }
       if (!priv.execAdbShell) return { ok: false, denied: false, text: 'ADB 执行通道未接通' }

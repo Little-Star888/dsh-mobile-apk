@@ -41,6 +41,8 @@ jobs:
           # --self：只跑本仓自包含面（registry/IMPLS 集合一致、补丁文件在场、tests 清单自洽），
           # 不读对端树；跨仓逐字节一致性由协调仓 CI 的 --require-peer 那一侧守。
           node scripts/check-patch-mirror.mjs --self
+          # 0.14.2 T6：夹具停在上一代引擎时补丁回归测试是结构性假绿（本仓同样携带 tests/ 镜像面）
+          node scripts/check-patch-fixtures.mjs
           node scripts/patches/tests/spj-migration-link-f5.test.mjs
           node scripts/patches/tests/atomic-stale-lock.test.mjs
           node scripts/patches/tests/publish-exclusive-reclaim.test.mjs
@@ -83,7 +85,13 @@ jobs:
           # 上一步的 `npm install` 在 CI 上不会把它带进来）⇒ 本门禁在 CI 结构上取不到判据、
           # 只能直接判红（本轮实锤：PR 恒红）。该包**公开可取**，故显式装到 manage 的 node_modules
           # （门禁的首选候选路径），门禁照常真跑，不用 SKIP 掩盖。
-          (cd plugins/dsh-android-manage && npm install --no-save --no-audit --no-fund @deepseek-ai/dsh-tools@0.1.1-rc.2)
+          #
+          # 版本**从 manage 的 peerDependencies 现取**，不写字面量：追版时 pin 一抬，写死的旧版本就会
+          # 与它冲突（实测 0.1.7-rc.1 的 peer 与写死的 0.1.1-rc.2 触发 ERESOLVE，整步 exit 1）。
+          # 该 pin 是 semver range（^0.1.7-rc.1），npm install 需要确切版本号，故取 range 里的下限。
+          TOOLS_PIN=$(node -e "const r=require('./plugins/dsh-android-manage/package.json').peerDependencies['@deepseek-ai/dsh-tools'];console.log(r.replace(/^[\^~>=]+/,''))")
+          echo "dsh-tools pin (from peerDependencies) = $TOOLS_PIN"
+          (cd plugins/dsh-android-manage && npm install --no-save --no-audit --no-fund "@deepseek-ai/dsh-tools@$TOOLS_PIN")
           node scripts/check-tool-output-schema.mjs
       # 壳侧加固语义（NSC / backup 规则 / exported）与子进程有界读（0.13.8-b FX-208.4 / E1）
       - name: 壳侧加固与有界读门禁
@@ -128,6 +136,8 @@ jobs:
           node scripts/check-bridge-symmetry.mjs
           node scripts/check-gate-skips.mjs
           node scripts/check-kotlin-comments.mjs
+          # 执行地图覆盖与锚点（0.14.2 D7）：纳入聚合声明集后，apk 侧 CI 也必须有独立调用点。
+          node scripts/check-code-map.mjs
           node scripts/check-build-chain-abort.mjs
           node scripts/check-perf-instrumentation.mjs
       # 模型面工具 wire 预算（0.14.0 §4.1 渐进披露）：双口径；名单从 capability-gate 导出。

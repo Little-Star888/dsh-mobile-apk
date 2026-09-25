@@ -1,181 +1,67 @@
-// combo-cache-a3.test.mjs — A3 补丁回归：combo 构建期缓存查表 == 现场生成（0.14.0 启动性能 P1-2）。
+// combo-cache-a3.test.mjs — A3 撤销不变量（0.14.2），并守「撤销理由仍然成立」这条可复核性。
 //
-// 契约（三处同源）：scripts/lib/combo-precompute.mjs（构建期写）/ apply-patches.mjs combo-cache-A3
-// （运行期读）/ scripts/check-combo-cache.mjs（覆盖门禁）。本测试证明「读缓存命中的 buildCombo 输出」
-// 与「未打补丁的现场生成」在 script/sourceMap/rev/url 上逐字节一致，并证明三类 fail-open：
-//   A. 缓存目录缺席（state=absent）→ 现场生成，输出一致；
-//   B. client.js 被篡改（sha 不命中）→ 现场生成，输出一致；
-//   C. entry 的 id 与记录不符 → 现场生成，输出一致。
+// A3（构建期把 identity combo source + section map 预计算成 .combo-cache，运行期按 sha256 查表）
+// 在 0.1.5 上是净收益：compose() 启动期跑 9-14 次，每次对 90 条 bundle 现场 `comboSource` +
+// `identitySectionMap`（后者把整份 source 塞进 sourcesContent 并逐行数 mappings）。
+// 0.1.7-rc.1 上游把 combo 载荷改成懒构造后，**启动路径上只剩** `prepareSource`
+// （utf8 解码 + 两次尾注释剥离）；identity map 只在 `.map` 端点被请求时才构造
+// （Android 上 devtools 不开，等于不发生）。同机同批字节实测（55 个 rc.1 client.js / 4.6 MiB）：
+//   上游 boot 路径        44 ms
+//   A3 现形态（查表）    129 ms   ← 还要 JSON.parse 5.09 MiB 清单 + 逐条读 <sha>.map
+//   A3 收窄形态（不读 map） 78 ms
+// ⇒ A3 在 rc.1 上是**可测量的净亏**，而且 5 MiB 清单本身是产物死重（打包/传输/解包都付）。
+// 撤销不是「锚点找不到所以删」，是「量出来它让体验变差所以删」——本测试把这个结论钉住。
 //
 // 用法：node scripts/patches/tests/combo-cache-a3.test.mjs
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs'
-import { createHash } from 'node:crypto'
-import { tmpdir } from 'node:os'
+import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { comboCacheEntry } from '../../lib/combo-precompute.mjs'
+import { spawnSync } from 'node:child_process'
+import { versionedFixture } from './lib/fixture.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(here, '..', '..', '..')
-const TARGET = 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-modules/lib/index.js'
-const FIXTURE = join(here, 'fixtures', 'dsh-client-modules-0.1.5-rc.1', 'lib', 'index.js')
-
 const failures = []
-function check(label, ok, detail) {
+const check = (label, ok, detail) => {
   console.log((ok ? 'PASS  ' : 'FAIL  ') + label + (ok || detail === undefined ? '' : ' -> ' + detail))
   if (!ok) failures.push(label)
 }
-function extractFunction(source, signature) {
-  const start = source.indexOf(signature)
-  if (start < 0) throw new Error('function not found: ' + signature)
-  let depth = 0
-  for (let i = source.indexOf('{', start); i < source.length; i += 1) {
-    if (source[i] === '{') depth += 1
-    else if (source[i] === '}') {
-      depth -= 1
-      if (depth === 0) return source.slice(start, i + 1)
-    }
-  }
-  throw new Error('unbalanced braces for ' + signature)
-}
-function extractConsts(source) {
-  const wanted = ['SOURCE_MAP_TRAILER', 'SOURCE_URL_TRAILER', 'HASH_REVISION_LENGTH']
-  const out = []
-  for (const name of wanted) {
-    const m = source.match(new RegExp('const ' + name + ' = [^\\n]+'))
-    if (!m) throw new Error('const not found: ' + name)
-    out.push(m[0])
-  }
-  return out.join('\n')
-}
-function extractA3Block(source) {
-  const start = source.indexOf('/* dsh-mobile combo cache (A3)')
-  if (start < 0) throw new Error('A3 helper block not found')
-  const report = extractFunction(source, 'function dshMobileComboCacheReport() {')
-  const end = source.indexOf(report) + report.length
-  return source.slice(start, end)
-}
-/** Build a harness exposing buildCombo for one source text. */
-function buildHarness(source, withA3) {
-  const parts = [
-    extractConsts(source),
-    extractFunction(source, 'function framedHash(domain, parts) {'),
-    extractFunction(source, 'function comboUrl(ids, rev, sourceMap = false) {'),
-    extractFunction(source, 'function comboSource(record) {'),
-    extractFunction(source, 'function comboScript(input, sourceMapUrl) {'),
-    extractFunction(source, 'function newlineCount(value) {'),
-    extractFunction(source, 'function comboSectionMap(record) {'),
-    extractFunction(source, 'function identitySectionMap(source, sourceUrl) {'),
-    extractFunction(source, 'function buildCombo(records, revision) {'),
-  ]
-  if (withA3) parts.push(extractA3Block(source))
-  const factory = new Function('createHash', 'readFileSync', 'existsSync', 'join', 'process', 'console',
-    parts.join('\n') + '\nreturn { buildCombo, dshMobileComboCacheLoad: typeof dshMobileComboCacheLoad === "function" ? dshMobileComboCacheLoad : void 0 };')
-  return factory(createHash, readFileSync, existsSync, join, process,
-    { log: () => {}, warn: () => {}, error: () => {} })
+
+// ① 补丁面：A3 不得复活
+const registry = JSON.parse(readFileSync(join(here, '..', 'registry.json'), 'utf8'))
+const impl = readFileSync(join(here, '..', 'apply-patches.mjs'), 'utf8')
+check('registry 里没有 combo-cache-A3', !registry.patches.some((p) => p.id === 'combo-cache-A3'))
+check('apply-patches 里没有 A3 实现', !impl.includes("'combo-cache-A3'"))
+check('A3 的运行时符号不留存根', !impl.includes('dshMobileComboCacheLookup') && !impl.includes('DSH_MOBILE_COMBO_CACHE_STATS'))
+
+// ② 链路面：写半边不得再被调用（否则快照里躺着 5 MiB 没人读的清单）
+for (const rel of ['scripts/build-snapshot-013.mjs', 'scripts/build-apk.mjs', 'scripts/build-apk-013.ps1', 'scripts/inject-all.py']) {
+  const p = join(repoRoot, rel)
+  const text = existsSync(p) ? readFileSync(p, 'utf8') : ''
+  const code = text.split('\n').filter((l) => !l.trim().startsWith('//') && !l.trim().startsWith('#')).join('\n')
+  check(rel + ' 不再调用 combo 预计算/不接收 delta 目录',
+    !code.includes('combo-precompute.mjs') && !code.includes('combo-cache-delta'))
 }
 
-const scratch = mkdtempSync(join(tmpdir(), 'a3-test-'))
-try {
-  const target = join(scratch, TARGET)
-  mkdirSync(dirname(target), { recursive: true })
-  const fixtureText = readFileSync(FIXTURE, 'utf8').replace(/\r\n/g, '\n')
-  writeFileSync(target, fixtureText)
+// ③ 撤销理由仍可复核：identity map 的构造必须留在「只有 .map 请求才走」的那条路径上。
+//    一旦上游把它挪回 boot 路径（例如又改成现场 compose 全表），上面的 44 ms 结论就不成立了，
+//    本断言会红——那时该重新测量并决定是否重开预计算，而不是照抄今天的数字。
+const src = readFileSync(versionedFixture('dsh-client-modules', 'lib', 'index.js'), 'utf8')
+const scriptFn = src.slice(src.indexOf('function buildComboScript('), src.indexOf('function buildComboSourceMap('))
+const mapFn = src.slice(src.indexOf('function buildComboSourceMap('), src.indexOf('function buildCombo('))
+check('boot 路径（buildComboScript）不构造 identity map', !scriptFn.includes('identitySectionMap') && !scriptFn.includes('newlineCount'))
+check('identity map 只在 .map 端点路径上构造', mapFn.includes('identitySectionMap') && mapFn.includes('newlineCount'))
+check('A3 的预计算模块已随补丁一并移除（不留无人调用的死代码）',
+  !existsSync(join(repoRoot, 'scripts', 'lib', 'combo-precompute.mjs'))
+  && !existsSync(join(repoRoot, 'dsh-mobile-apk', 'scripts', 'lib', 'combo-precompute.mjs')))
 
-  // 只读 fixture 未打补丁：作为「现场生成」的基线（构造前先固化文本）
-  const liveHarness = buildHarness(fixtureText, false)
+// ④ 回流门禁自身可判红（新语义：产物里出现 .combo-cache 即红）
+const gate = spawnSync(process.execPath, [join(repoRoot, 'scripts', 'check-combo-cache.mjs'), '--self-test'], { encoding: 'utf8' })
+check('check-combo-cache --self-test 通过（回流判据有反证）', gate.status === 0,
+  (gate.stdout + gate.stderr).trim().split('\n').slice(-1)[0])
 
-  const apply = () => spawnSync(process.execPath,
-    [join(repoRoot, 'scripts', 'patches', 'apply-patches.mjs'), scratch, '--apply', '--scope', 'engine', '--only', 'combo-lazy-A4,combo-cache-A3'],
-    { encoding: 'utf8' })
-  const applied = apply()
-  check('apply-patches exits 0（A4 + A3）', applied.status === 0, (applied.stderr || '').trim().split('\n').slice(-2).join(' '))
-  const patched = readFileSync(target, 'utf8')
-  check('A3 marker 三处在场', patched.includes('dsh-mobile combo cache (A3)')
-    && patched.includes('dsh-mobile combo cache hit (A3)')
-    && patched.includes('dsh-mobile combo cache report (A3)'))
-  const parse = spawnSync(process.execPath, ['--check', target], { encoding: 'utf8' })
-  check('patched file parses', parse.status === 0, (parse.stderr || '').split('\n')[0])
-  apply()
-  check('re-apply is idempotent', readFileSync(target, 'utf8') === patched)
-  const patchedHarness = buildHarness(patched, true)
-
-  // ── 夹具：带真实 trailer 的 client.js（覆盖 comboSource 的剥离与 fallbackSource 推导）──
-  const pkgDir = join(scratch, 'demo-pkg')
-  mkdirSync(join(pkgDir, 'lib'), { recursive: true })
-  writeFileSync(join(pkgDir, 'package.json'), JSON.stringify({ name: 'demo-pkg', version: '1.0.0' }))
-  const bundleText = [
-    'window.__ModuleLoader__.load({ id: "demo-pkg", factory: function (require) {',
-    '\tvar x = require("react");',
-    '\treturn function () { return x.createElement("div", null, "hello combo"); };',
-    '} });',
-    '//# sourceMappingURL=client.js.map',
-    '',
-  ].join('\n')
-  const clientPath = join(pkgDir, 'lib', 'client.js')
-  writeFileSync(clientPath, bundleText)
-  const bundle = readFileSync(clientPath)
-  const record = { entry: { id: 'demo-pkg', rev: 'rev000000001' }, bundle, meta: { clientPath } }
-
-  // 构建期缓存（同一份字节）
-  const cacheDir = join(scratch, '.combo-cache')
-  mkdirSync(cacheDir, { recursive: true })
-  const entry = comboCacheEntry('demo-pkg', bundle)
-  writeFileSync(join(cacheDir, 'client-combos.json'), JSON.stringify({
-    version: 1,
-    generator: 'combo-precompute.mjs',
-    entries: { [entry.sha256]: { id: 'demo-pkg', source: entry.source, lines: entry.lines, map: entry.sha256 + '.map' } },
-  }, null, 2) + '\n')
-  writeFileSync(join(cacheDir, entry.sha256 + '.map'), entry.sectionJson + '\n')
-
-  const eq = (a, b) => Buffer.compare(a, b) === 0
-  const live = liveHarness.buildCombo([record], record.entry.rev)
-
-  // A. 命中：设 DSH_COMBO_CACHE 后查表
-  process.env.DSH_COMBO_CACHE = cacheDir
-  const cached = patchedHarness.buildCombo([record], record.entry.rev)
-  check('A3 命中：script 逐字节一致', eq(live.script, cached.script), 'len ' + live.script.length + ' vs ' + cached.script.length)
-  check('A3 命中：sourceMap 逐字节一致', eq(live.sourceMap, cached.sourceMap), 'len ' + live.sourceMap.length + ' vs ' + cached.sourceMap.length)
-  check('A3 命中：rev/url/sourceMapUrl 一致',
-    live.rev === cached.rev && live.url === cached.url && live.sourceMapUrl === cached.sourceMapUrl)
-
-  // B. 缓存目录缺席（env 指向不存在的目录）：fail-open → 现场生成（缓存按进程实例加载，必须新开 harness）
-  process.env.DSH_COMBO_CACHE = join(scratch, 'no-such-cache')
-  const absent = buildHarness(patched, true).buildCombo([record], record.entry.rev)
-  check('A3 缓存缺席：fail-open 输出与现场一致', eq(live.script, absent.script) && eq(live.sourceMap, absent.sourceMap))
-
-  // C. client.js 被篡改：sha 不命中 → 现场生成（P-AC-05）
-  process.env.DSH_COMBO_CACHE = cacheDir
-  const tamperedBundle = Buffer.from(bundleText.replace('hello combo', 'hello tampered'))
-  const tampered = patchedHarness.buildCombo([{ ...record, bundle: tamperedBundle }], record.entry.rev)
-  const liveTampered = liveHarness.buildCombo([{ ...record, bundle: tamperedBundle }], record.entry.rev)
-  check('A3 篡改 client.js：sha 不命中 → 现场生成且输出一致',
-    eq(liveTampered.script, tampered.script) && eq(liveTampered.sourceMap, tampered.sourceMap))
-
-  // D. id 不符：条目在场但记录 id 不同 → 现场生成
-  const otherId = patchedHarness.buildCombo([{ ...record, entry: { id: 'other-pkg', rev: 'rev000000001' } }], record.entry.rev)
-  const liveOtherId = liveHarness.buildCombo([{ ...record, entry: { id: 'other-pkg', rev: 'rev000000001' } }], record.entry.rev)
-  check('A3 id 不符：回退现场生成且输出一致',
-    eq(liveOtherId.script, otherId.script) && eq(liveOtherId.sourceMap, otherId.sourceMap))
-
-  // E. 批路径（revision 省略 → framedHash 全量哈希）也逐字节一致
-  const liveBatch = liveHarness.buildCombo([record], undefined)
-  const cachedBatch = patchedHarness.buildCombo([record], undefined)
-  check('A3 命中：批路径（无 revision）拼接与哈希一致',
-    eq(liveBatch.script, cachedBatch.script) && eq(liveBatch.sourceMap, cachedBatch.sourceMap) && liveBatch.rev === cachedBatch.rev)
-
-  // F. 缺省 DSH_HOME + env 覆盖语义：无 DSH_COMBO_CACHE 时回落到 $DSH_HOME/profiles/web/.combo-cache
-  delete process.env.DSH_COMBO_CACHE
-  process.env.DSH_HOME = join(scratch, 'home')
-  const homePatched = buildHarness(patched, true)
-  const homeFallback = homePatched.buildCombo([record], record.entry.rev)
-  check('A3 无 env 覆盖：$DSH_HOME 派生路径缺席时 fail-open', eq(live.script, homeFallback.script) && eq(live.sourceMap, homeFallback.sourceMap))
-} finally {
-  rmSync(scratch, { recursive: true, force: true })
-  delete process.env.DSH_COMBO_CACHE
-  delete process.env.DSH_HOME
+if (failures.length) {
+  console.error(`combo-cache-a3: ${failures.length} 项失败`)
+  process.exit(1)
 }
-
-console.log(failures.length === 0 ? '\nALL PASS' : '\nFAILED ' + failures.length + ': ' + failures.join('; '))
-process.exit(failures.length === 0 ? 0 : 1)
+console.log('combo-cache-a3: 撤销不变量全部成立（含收益反向复核实测依据）')

@@ -652,3 +652,32 @@
      判据（可判红）：① 模块级自证 12 项——白名单命中数、等长、幂等、尾部标记未破坏、非白名单原样保留、**符号链接被跳过且不被写成实体**；把 `lstat` 换回 `stat` 即红。② 设备端 `check-prefix-residue.sh` 新增 **P4b**（静态：`git.real` 内不得残留旧串）与 **P4c**（功能：`credential.helper` 真能被 shell 拉起）——原 P4 只判「git 存在 / `--version` 能跑」，而旧串在场时这两条一样是绿的，自检因此长期假绿。**P4c 必须带 `-c core.askPass=`**：否则 helper 执行失败时 git 会回退到 askpass，可能取到环境里真实存在的凭据，使断言假绿**且会把凭据打印出来**。
      **真机对照（本轮拿真品 git.real 做修前/修后）**：修前 `fatal: cannot exec 'f(){ ... }; f get': No such file or directory`；修后同一命令返回 `username=u`。8 个实体文件修后逐文件字节数与原文**完全相同**（`bin/git.real` 3,562,128 B、`git-remote-http` 2,010,824 B、`git-daemon` 1,950,560 B 等）。
      残留（勿当成已清）：① `pkg upgrade git` 会带回旧串（配方在 Termux 侧，快照侧改不了）——P4b 的静态断言正是为这种复发准备；② `/system/bin/sh` 是 Android 的 mksh 而非快照内 dash，`-c` 与 `!` alias 语义与 Termux 下略有差异，实测可用但不宜假设等价；③ 本轮只完成代码层（无 WSL 构建环境），构建 + 三层验收（CDP + ADB 真机）需在开发机补跑。
+
+174. **上游 peer 门禁与 npm 解析用的是两套 semver 判据，caret 地板留在旧代会在安装期就炸（2026-09-24 追 0.1.7-rc.1 实锤）**：上游 `app-boot/src/plugin-compatibility.ts:77` 判兼容用 `semver.satisfies(runtime, range, { includePrerelease: true })`，而 **npm 自己解析 peer 时不带 `includePrerelease`** ⇒ 同一个 `^0.1.1-rc.2` 在运行时门禁里放行 0.1.7-rc.1、在 `npm install` 里却判不满足。叠上冻结载体就更狠：`@deepseek-ai/dsh-client-runtime` 只发到 **0.1.1-rc.2**（引擎主版本线从来不含它），它自带 16 条 `^0.1.1-rc.2` peer，把它拽进来的仓装 rc.1 时直接 `ERESOLVE`（实测 `plugins/dsh-android-vdisplay`），错误文案指向的却是「dsh-tools 的 peer dsh-agent」——真因在传递图上，不在被点名的那条边。
+    **修法（两件，都不许留）**：① 追版时 caret **地板随版抬**（`scripts/bump-plugin-pins.mjs` 按 `contract.json` 一次性抬，形态保留），别只改精确钉；② 只为拿一个类型而依赖冻结载体 = 把一个时代的引擎图拽进安装面 —— 客户端类型按上游自身写法拿：`import type { Context as ClientContext } from '@deepseek-ai/cordis'`（见 `dsh/packages/client/locale/src/client/index.ts:7`），本仓 `dsh-client-ui-responsive` 一直就是这么写的，只有 bridge/vdisplay 两个入口当年抄了 `dsh-client-runtime/client`。
+    **判据**：`scripts/check-contract.mjs` §7 拿**设备侧同一个 semver 库**在构建前复刻上游判定（`--runtime <不可满足版本>` 是它的反证档），§6 的 `contract-pin-gaps.json` 让「钉未对齐」必须显式声明、一旦对齐不删条目即红。教训半条：**写死版本号的反例会在抬版后静默失效**——本轮 `--self-test` 就有 2 例这么失效（§7 反例从「装成 0.1.7-rc.1」改成「装成 0.0.1-rc.1」，§9 反例改从 `contract.baseline` 取值），反证必须与进度无关才可重跑。
+
+175. **面板宽度有两份公式而其中一份是死代码，转屏又没人重算——横屏体验与「窗口比内容宽」两类假象同源（2026-09-24）**
+    **现象**：横屏（1600x900）上面板看起来「没用上多出来的宽度」；反过来在竖屏打开面板再转横屏，面板保持竖屏宽度；
+    而代码里 `OverlayPanel.buildUnit()` 开头明明也算了一次 `width`（屏宽 - 64dp - 32dp，封顶 400dp）。
+    **真因**：① 那个 `val width` 在 `buildUnit()` 全文**无人消费**（实测：`buildUnit` 作用域内 `width` 只出现在声明行），
+    面板宽的唯一生效口径是 `OverlayService.showPanel()` 里给窗口的 `panelW`——两份公式（还互不相同）只有一份生效，
+    留着会让后来人以为改它能改面板宽；② 两个 Activity 都声明 `configChanges="orientation|screenSize|screenLayout"`
+    （不重建），`OverlayService.onConfigurationChanged()` 只重刷主题 + 球坐标 + `positionPanel()`，
+    **从不重算窗口宽度**（`panelW` 是 `showPanel()` 的一次性局部量），`hidePanel()` 也不清 `unitView`，
+    所以没有任何路径会在转屏后替它换宽——不是概率问题，是结构性无人负责。
+    **修法**：① 删掉 `buildUnit()` 里的死 `val width`，宽度口径收敛到 `OverlayService.panelWindowWidth()` 单一函数；
+    ② `onConfigurationChanged()` 在面板展开时按新屏幕重算 `pp.width` 并 `updateViewLayout` + 重定位。
+    **同类（本条只修了汇报栏，会话选择器**未**改——见下面判据）**：抽屉/浮层窗口高度若只按
+    `heightPixels` 取比例，横屏会被压没。`OverlayReport` 的 `maxH = sh * 0.40f` 已加 300dp 地板，
+    并用「屏高 - 24dp」封顶（地板永不会把抽屉顶出可用屏幕）。
+    同形态还在 `OverlayPanel` 的会话选择器：`maxH = screenH * 0.45f`（横屏 405px=270dp，约 6 行），
+    但它是 **ScrollView 内的窗口高度**（列表可滚，不构成「条目够不到」），
+    ⇒ 本轮**不动它**，等设备层量出「横屏可见行数 / 用户是否需要多次翻页」再决定，不凭比例猜。
+    **设备几何实测（校准基准，勿沿用旧值）**：16416 `user_rotation=0`，natural `900x1600 @320dpi`
+    ⇒ 可用 900x1600、density 2.0、450x800dp；16384 `user_rotation=1`，natural 同为 `900x1600`
+    但 `@240dpi` ⇒ 可用 **1600x900**、density 1.5、1066x600dp。
+    注意 `wm size` 报的是 **natural** 尺寸（两台都显示 900x1600），横屏只能从 `user_rotation` 与
+    `dumpsys window` 的当前 frame 判读——照 `wm size` 判断方向会得出「两台都是竖屏」的错结论。
+    **判据**：几何类改动必须过竖屏 16416 与横屏 16384 两个方向的 tap 级实测（AGENTS §2.1.6）——
+    DOM/CDP 断言看不见这类缺陷（§2.1.4）。
