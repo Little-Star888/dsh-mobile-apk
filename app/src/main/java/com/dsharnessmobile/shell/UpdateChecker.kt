@@ -45,7 +45,7 @@ object UpdateChecker {
     data class Failed(val reason: String) : CheckResult()
   }
 
-  /** 设备 ABI → 资产命名 ABI（与 build-apk-013.ps1 双 ABI 口径一致：arm64 / x86_64）。
+  /** 设备 ABI → ABI 家族名（arm64 / x86_64）。**家族名不是发布资产名**——发布口径见 assetName()。
    *  以 **SUPPORTED_ABIS[0]（设备首选/原生 ABI）**为准：带 ARM 翻译的 x86 设备
    *  （MuMu abilist = x86_64,arm64-v8a,x86）里 arm64 只是翻译层，按「任一含 arm64 即选 arm64」
    *  会下错包——device 实测 v0.13.7fx-1 抓到 arm64 资产。 */
@@ -62,9 +62,18 @@ object UpdateChecker {
 
   private fun deviceAbi(): String = abiFrom(android.os.Build.SUPPORTED_ABIS.toList())
 
-  /** 资产命名契约（须与 scripts/build-apk-013.ps1 的 Copy-Item 命名逐字一致）：
-   *  dsh-mobile-apk-v<版本>-<abi>.apk，abi ∈ {arm64, x86_64}。 */
-  fun assetName(tag: String, abi: String): String = "dsh-mobile-apk-v${tag.removePrefix("v")}-$abi.apk"
+  /** 发布资产命名约定（docs/RELEASE.md 第 6 节，abi = arm64-v8a | x86_64）：
+   *  dsh-mobile-apk-v<版本>-<abi>.apk。
+   *
+   *  这里必须是**发布口径**，不能是开发口径：本仓的 ABI 命名有两条链——
+   *  build-apk-013.ps1（本地/开发产物）出 `-arm64.apk`，
+   *  build-release.ps1（GitHub Release 资产）出 `-arm64-v8a.apk`。
+   *  checkLatest() 拿本函数的返回值去匹配 **Release 资产名**，故归一到发布口径。
+   *  x86_64 两条链同名，所以这个偏差**只在 arm64 设备上暴露**（回归：坑 172）。 */
+  fun assetName(tag: String, abi: String): String {
+    val releaseAbi = if (abi == "arm64") "arm64-v8a" else abi
+    return "dsh-mobile-apk-v${tag.removePrefix("v")}-$releaseAbi.apk"
+  }
 
   /**
    * 查 latest release（镜像链逐级回退）；资产按 dsh-mobile-apk-v<ver>-<abi>.apk 匹配。
