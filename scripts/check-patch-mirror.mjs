@@ -181,6 +181,14 @@ if (peer) {
     // build-snapshot-013.mjs 已在镜像面，其依赖模块若不入册就会出现「构建脚本同源、依赖单边演进」
     // —— 云端自包含构建跑旧净化逻辑，产物照样带 111/113 条设备必然丢弃的软链。
     'scripts/lib/symlink-sanitize.mjs',
+    // 0.14.2（apk#247）：git 编译期 SHELL_PATH 等长重定位模块。build-snapshot-013.mjs 的第 7d2 步
+    // import 它；构建脚本已在镜像面而依赖模块不在 ⇒ 单边演进 = 一侧仍按旧逻辑扫白名单/跟随软链，
+    // 产物照样带 12 处应用域不可达的 SHELL_PATH。**实测两个方向**：本文件不登记时门禁输出里
+    // 连 "git-shell-path" 都不会出现（漂移不可见）；登记后让对端漂移一行即判红。
+    // 同批：check-prefix-residue.sh 是它的设备端判据（P4b 静态 / P4c 功能），两树同源同样必要
+    // —— 它是纯手动设备脚本（不在声明集/快照/APK assets），未登记不会造成自动门禁假绿，故列在其后。
+    'scripts/lib/git-shell-path.mjs',
+    'scripts/check-prefix-residue.sh',
     // 0.14.1 W1：产物新鲜度的**重建哈希裁决**模块。check-tool-output-schema 与 check-protocol-v2
     // 两条门禁共用它——单边演进即「一侧仍按纯 mtime 判（假阳性 SKIP 或假阳性判红），另一侧按内容判」，
     // 同一份工作树在两个仓里得出不同结论，正是镜像面要防的形态。
