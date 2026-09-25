@@ -128,6 +128,12 @@ const GATES = [
   // ci:false 是刻意的：云端 CI 无 gradle 产物环境，故本项由本地链/发布链跑；
   // 无结果时显式 SKIP(#1) 计数（不计入绿），绝不冒充通过。
   { script: 'check-kotlin-test-count.mjs', ciApk: false, ciCoord: false, needsSnapshot: false },
+  // 执行地图覆盖与锚点（0.14.2 D7）：输入全在 apk 仓（app/src、plugins、EXECUTION-MAP.md），
+  // 故归属 apk 侧 CI + 两条链。**此前它只存在于 apk 仓 scripts/ 且只被 apk CI 调用**：
+  // 本地链与发布链的声明集里零命中 —— 即「改代码跑了 check-code-map 才算数」这条约定
+  // 在两条真正出包/发版的路径上都没有执行者，全靠人记得手跑。
+  // needsSnapshot=false：它读的是工作树与文档，不需要快照。
+  { script: 'check-code-map.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
 ]
 const CI_COORD_GATES = GATES.filter((g) => g.ciCoord).map((g) => g.script)
 const CI_APK_GATES = GATES.filter((g) => g.ciApk).map((g) => g.script)
@@ -376,7 +382,11 @@ for (const gate of ALL_GATES) {
   }
   if (gate === 'check-api-route-auth.mjs') {
     if (snapshotDir && abis.length > 0) {
-      for (const abi of abis) runGate([join('scripts', gate), '--snapshot', snapshotTar(abi)], gate + '(' + abi + ')')
+      // 0.14.2 D2：本门禁自本轮起含「上游路由面审计」独立段，它在**上游树缺席**时按 SKIP 计数
+      // 结案（apk 自包含树不含 dsh/）。发布链必须真检，故严格档把 --require 一并传下去：
+      // 否则发布链在有快照面时走这一支、永远收不到 --require，上游面缺席也能以 SKIP 过关
+      // ——「发布环境必须显式判定上游面」这条就只写在注释里，没有执行者。
+      for (const abi of abis) runGate([join('scripts', gate), '--snapshot', snapshotTar(abi), ...(STRICT ? ['--require'] : [])], gate + '(' + abi + ')')
       ran += 1
       console.log('PASS  ' + gate + '（' + abis.join(', ') + ' post-injection artifact）')
       continue

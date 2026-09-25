@@ -249,6 +249,9 @@ if (peer) {
     'scripts/control-ops-pending.json',
     'scripts/check-inject-completeness.mjs',
     'scripts/check-kotlin-comments.mjs',
+    // 0.14.2 D7：执行地图门禁纳入聚合并声明集合，它就必须与产物面同源 ——
+    // 单边演进会让协调仓与 apk 仓对同一棵工作树给出不同的地图结论。
+    'scripts/check-code-map.mjs',
     'scripts/check-strip-noop.mjs',
     // combo 缓存（0.14.0 启动性能 P1-2 / A3）：预计算模块与覆盖门禁是双仓构建链的同一执行面——
     // 云端自包含构建会用 apk 仓副本（单边演进 = 云端算出的缓存与协调仓门禁口径不一致）。

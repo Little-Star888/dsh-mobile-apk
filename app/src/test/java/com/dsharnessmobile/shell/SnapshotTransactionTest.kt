@@ -997,6 +997,19 @@ class SnapshotTransactionTest {
       assertFalse("其包名也不得再出现", text.contains("@aiwayds/dsh-model-sync"))
       assertTrue("其它挂载必须原样保留", text.contains("id: keep-me-too"))
       assertTrue("用户自定义条目不得被误删", text.contains("@user/keep-me-too"))
+      // apk #249（本用例原先**抓不到**的形态）：旧实现 index += 2 只删 id + name 两行，
+      // 于是 - insert: 包装行被留下、底下再无子项 ⇒ YAML 解析成 null 条目，
+      // loader 拿到 nil 即 boot 期 TypeError。上一条断言（不含 "id: dsh-model-sync"）
+      // 对这个残骸**恒为真**，所以缺陷能一路穿到设备——这就是判据必须能反证的意义。
+      // 判据：每个 - insert: 后面必须紧跟一个更深缩进的非空行（= 它有子项）。
+      val patchLines = text.lines()
+      val dangling = patchLines.withIndex().filter { (i, line) ->
+        val own = line.indexOfFirst { !it.isWhitespace() }
+        val next = patchLines.drop(i + 1).firstOrNull { it.isNotBlank() }
+        line.trim() == "- insert:" && (next == null || next.indexOfFirst { !it.isWhitespace() } <= own)
+      }
+      assertTrue("不得留下空壳 - insert:（YAML null 条目，boot 期 TypeError）：" +
+        dangling.map { it.index + 1 }, dangling.isEmpty())
       assertFalse("存量包目录必须删除",
         File(liveWeb, "node_modules/@aiwayds/dsh-model-sync").exists())
       assertFalse("删空的作用域目录也应清理（留着空目录会让人以为包还在）",
@@ -1018,6 +1031,54 @@ class SnapshotTransactionTest {
       )
       assertTrue("第二遍不得再报迁移动作（幂等）：" + second.joinToString("；"),
         second.filter { it.contains("dsh-model-sync") }.isEmpty())
+    } finally {
+      SnapshotFs.deletePath(filesDir)
+    }
+  }
+
+  // ── apk #249 反证：条目独占一个 insert 时，包装行必须整块摘掉 ─────────────────────
+  // 真实 0.14.0 形态就是「- insert: 下只有 dsh-model-sync 一条」。旧实现删两行后留下
+  // 一个 null 条目；本用例把「包装行也必须消失」钉死（这是设备 boot 崩溃的直接来源）。
+  @Test
+  fun removedProfilePluginLeavesNoDanglingInsertWrapper() {
+    val filesDir = tempDir()
+    try {
+      val live = File(filesDir, "live").apply { mkdirs() }
+      val stage = SnapshotTransaction.stageRoot(filesDir)
+      writeRuntime(stage, "new-node", "new-profile")
+      val liveWeb = File(live, "home/.dsh/profiles/web")
+      SnapshotFs.createDirectories(liveWeb)
+      File(liveWeb, "cordis.patch.yml").writeText(
+        listOf(
+          "- id: keep-me",
+          "  name: '@dsh-android/keep-me'",
+          "- insert:",
+          "    - id: dsh-model-sync",
+          "      name: '@aiwayds/dsh-model-sync'",
+          "",
+        ).joinToString("\n"),
+      )
+      File(liveWeb, "package.json").writeText("{}\n")
+
+      SnapshotTransaction.swap(
+        filesDir = filesDir,
+        stagedRoot = stage,
+        usrDir = File(live, "usr"),
+        homeDir = File(live, "home"),
+        preservedNames = preserved,
+        fingerprint = "fp4",
+        startedAt = 5L,
+      )
+
+      val text = File(liveWeb, "cordis.patch.yml").readText()
+      // 注意判据必须落在**条目**上，不能落在裸包名上：迁移成功时会追加一行留档注释
+      // （"# 0.14.1：已摘除 dsh-model-sync…"），裸 contains("dsh-model-sync") 对它恒为真
+      // ——这正是本仓「字符串在场判据必须只看可执行行/剥注释」那条纪律的又一个实例。
+      assertFalse("被摘除插件的挂载条目必须消失", text.contains("id: dsh-model-sync"))
+      assertFalse("其包名条目也不得再出现", text.contains("name: '@aiwayds/dsh-model-sync'"))
+      assertFalse("独占的 insert 包装行也必须整块摘掉（否则是 null 条目）",
+        text.contains("insert:"))
+      assertTrue("无关挂载必须原样保留", text.contains("id: keep-me"))
     } finally {
       SnapshotFs.deletePath(filesDir)
     }

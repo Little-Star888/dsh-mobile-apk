@@ -117,7 +117,7 @@ class GuideAndConsoleBatch6Test {
   }
 
   @Test
-  fun `进度文案在超出估算值时不再印分母（0.14.2 设备实测缺陷）`() {
+  fun `进度文案在超出估算值时不再印分母（设备实测缺陷）`() {
     // 设备读数（16416 冷启动截图）：「已写入 1157 MB / 约 700 MB（99%）」——分子大于分母还报 99%。
     val half = RUNTIME_UNCOMPRESSED_APPROX_BYTES / 2
     assertTrue("半程仍带估算分母", runtimeProgressLabel(half).contains("/ 约 "))
@@ -137,7 +137,10 @@ class GuideAndConsoleBatch6Test {
     assertTrue("百分比 <0 时回不确定态", code.contains("progressBar.isIndeterminate = pct < 0"))
     val flow = codeOnly(source("EngineStartFlow.kt"))
     assertTrue("解压流程必须真的调它", flow.contains("setDeterminateProgress(done, RUNTIME_UNCOMPRESSED_APPROX_BYTES)"))
-    assertTrue("进度行必须同时给已写入量与总量", flow.contains("MB / 约 "))
+    // 0.14.2：文案不再在 flow 里拼字符串，而是走 runtimeProgressLabel 唯一漏斗
+    // （否则「超出估算值只报绝对量」这条修法在 flow 里会分叉成第二份口径）。
+    assertTrue("进度行必须经唯一漏斗渲染", flow.contains("runtimeProgressLabel(done)"))
+    assertFalse("flow 不得再自己拼进度文案", flow.contains("MB / 约 "))
   }
 
   // ── S1-5：诊断包路径不得进标题 ───────────────────────────────────────────

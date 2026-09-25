@@ -105,6 +105,8 @@ const GATE_SCRIPTS = [
   'check-build-parallel-cap.mjs',
   // Kotlin 单测数量反回归（0.14.1 P0）：CI 不跑 Kotlin 单测 + 只按退出码判 = 防线删失仍绿。
   'check-kotlin-test-count.mjs',
+  // 执行地图覆盖与锚点（0.14.2 D7）：输入在 apk 仓（app/src、plugins、EXECUTION-MAP.md）。
+  'check-code-map.mjs',
 ]
 
 // ---- 参数解析 ----
@@ -208,6 +210,10 @@ try {
   // 云端链无 gradle 产物 → --allow-missing 显式 SKIP 计数（不计入绿），本地链才有真结果。
   log('门禁：Kotlin 单测数量反回归（逐类基线只许升 + 无缺席 + 结果新鲜）…')
   run('node', [gate('check-kotlin-test-count.mjs'), '--allow-missing'])
+  // 执行地图覆盖与锚点门禁（0.14.2 D7）：输入在 apk 仓，与本地链/发布链同一份实现。
+  // 声明集合差集必须为 0 —— 只加一侧即被 check-release-gates 判红。
+  log('门禁：执行地图覆盖与锚点（覆盖完整 + 锚点有效 + 编号一致）…')
+  run('node', [gate('check-code-map.mjs')])
   // 制度性门禁（0.13.8-b B2 ST-25/26/31）：与本地链同一份集合（差集 = 0 由 check-release-gates 断言）
   log('门禁：状态登记制（PR 模板四栏 + 登记表 evidence）…')
   run('node', [gate('check-state-registry.mjs')])

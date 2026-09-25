@@ -164,6 +164,13 @@ Write-Host "== Kotlin 单测数量反回归门禁 =="
 node (Join-Path $Root "scripts\check-kotlin-test-count.mjs") --allow-missing 2>&1
 if ($LASTEXITCODE -ne 0) { Write-Host "Kotlin 单测防线数量/新鲜度不达标（可能有用例被删或结果陈旧），拒绝打包"; exit 1 }
 
+# 执行地图覆盖与锚点门禁（0.14.2 D7）：此前只被 apk 仓 CI 调用，本地链与发布链的声明集里
+# 零命中 —— 于是「改了代码必须跑 check-code-map」这条约定在两条真正出包/发版的路径上没有执行者。
+# 它守的是漂移：新加源文件没人挂到查点、锚点指向已删函数、主表与章节对不上。
+Write-Host "== 执行地图覆盖与锚点门禁 =="
+node (Join-Path $Root "scripts\check-code-map.mjs") 2>&1
+if ($LASTEXITCODE -ne 0) { Write-Host "执行地图失真（覆盖缺口/锚点失效/编号不一致），拒绝打包"; exit 1 }
+
 # pi-ai 目录 diff（0.13.3 W1/P2）：baseline -> pin 信息性输出（构建日志 + 报告文件），
 # 删除清单供回归报告引用——不拒绝构建（删除项由 W4 降级补丁兜底）。
 $overlayManifest = Join-Path $Root "scripts\snapshot-config\engine-overlay.json"

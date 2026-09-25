@@ -149,3 +149,20 @@
 - insert:
     - id: android-vdisplay
       name: '@dsh-android/dsh-android-vdisplay'
+
+# Office→PDF（0.14.2 追版决策，2026-09-25 实测）——**显式禁用上游 web-app bundle 的 office-to-pdf 行**。
+# rc.1 新增该行（0.1.5 的 web-app bundle 里 office 零命中），它运行时依赖
+# @deepseek-ai/libreoffice-kit，而该依赖在本平台**无条件不可用**：
+#   libreoffice-kit 的 platformTarget() 只认 darwin/win32/linux-glibc ⇒ Android 下
+#   process.platform === 'android' 返回 undefined ⇒ resolveEngine() 落到
+#   `if (platform !== 'linux') throw new Error('Unsupported LibreOfficeKit host: android-x64')`
+#   —— **无条件抛**。152 MB 的 -wasm 引擎也救不了（同样被 platform !== 'linux' 挡掉），
+#   所以「补依赖」在本平台买不到任何能力，只会：① 快照 +10 MB JS 闭包；② 引入 MPL-2.0 依赖
+#   （本清单原本全为非 copyleft）。不禁该行的后果不是缺能力，而是 **boot 阶段崩**
+#   （Cannot find package '@deepseek-ai/libreoffice-kit'，设备实测），也就是该行本身挡路。
+# 上游对「没有转换器」的既定降级路径就是 UI 的 unavailable 提示（ui-sidebar-documentpreview
+# README：移除 remote.officeToPdf 注入即恢复不可用指引）⇒ 禁行 = 用上游自己的降级面。
+# 凭据：check-engine-overlay 正向闭包的 RUNTIME_MISSING_OK 登记了同一条（两处必须同进同出）。
+# 逆转条件：出现 Android 上真能跑的引擎实现 ⇒ 同时删掉本行与那条豁免。
+- id: office-to-pdf
+  disabled: true

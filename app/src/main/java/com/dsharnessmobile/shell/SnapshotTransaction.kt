@@ -399,18 +399,69 @@ internal object SnapshotTransaction {
           val lines = patch.readLines()
           val kept = mutableListOf<String>()
           var dropped = 0
+          // 摘除单位是**整个条目**（缩进块），不是固定两行。旧实现写死 `index += 2`，在真实形态
+          // 下会把条目摘成空壳键（apk #249，设备实测 boot 期 TypeError）：
+          //   - insert:
+          //       - id: dsh-model-sync          <- 删掉
+          //         name: '@aiwayds/dsh-model-sync'  <- 删掉
+          //   ⇒ 只剩 `- insert:`，YAML 解析成 null ⇒ loader 拿到 nil 条目即崩。
+          // 这里改成「消耗 id 行 + 其后所有更深缩进的行」，并把因此变空的
+          // `- insert:` 包装行一并摘掉（否则它仍是一个 null 条目）。
+          val idIndent = { line: String -> line.indexOfFirst { !it.isWhitespace() } }
+          // 条目边界 = 缩进回到 <= id 行缩进的下一个非空行（空行不算边界，注释算内容）
           var index = 0
           while (index < lines.size) {
             val trimmed = lines[index].trim()
             if (trimmed == "- id: " + removed.mountId) {
-              // 该行与其后的 `name:` 行同属一个 insert 条目；再确认 name 就是被摘除的包名，
-              // 避免误删「同 id 但不同包」的用户自定义条目。
-              val nameLine = lines.getOrNull(index + 1)?.trim().orEmpty()
+              // 再确认 name 就是被摘除的包名，避免误删「同 id 但不同包」的用户自定义条目。
+              // name 行可能不在紧邻下一行（条目里允许有其它键/注释），故在条目跨度内找。
+              val idIndentWidth = idIndent(lines[index])
+              var end = index + 1
+              while (end < lines.size) {
+                val candidate = lines[end]
+                if (candidate.isBlank()) { end += 1; continue }
+                if (idIndent(candidate) <= idIndentWidth) break
+                end += 1
+              }
+              val itemBody = lines.subList(index + 1, end)
+              val nameLine = itemBody.firstOrNull { it.trim().startsWith("name:") }?.trim().orEmpty()
               val matches = nameLine == "name: '" + removed.packageName + "'" ||
                 nameLine == "name: \"" + removed.packageName + "\""
               if (matches) {
                 dropped += 1
-                index += 2
+                // 若本条目是 `- insert:` 的唯一子项，则把该包装行也摘掉（否则留 null 条目）。
+                // 判据不靠「上一行是不是 - insert:」的文字匹配，而是「摘掉本条目后，
+                // 上一个 - insert: 行与它的下一个同级/更浅行之间是否已无任何更深缩进行」。
+                val wrapperIdx = run {
+                  var w = index - 1
+                  while (w >= 0 && lines[w].isBlank()) w -= 1
+                  if (w >= 0 && lines[w].trim() == "- insert:") w else -1
+                }
+                if (wrapperIdx >= 0) {
+                  val wrapperIndent = idIndent(lines[wrapperIdx])
+                  var hasSibling = false
+                  var probe = index
+                  while (probe < lines.size) {
+                    val candidate = lines[probe]
+                    if (candidate.isBlank()) { probe += 1; continue }
+                    val width = idIndent(candidate)
+                    if (width <= wrapperIndent) break
+                    // 落在 wrapper 缩进内、且不在我们正要删掉的 [index, end) 区间内 => 还有兄弟条目
+                    if (probe < index || probe >= end) { hasSibling = true; break }
+                    probe += 1
+                  }
+                  if (!hasSibling) {
+                    // 关键：包装行在处理到它时**已经写进 kept**，这里必须把它连同其后的空行一起回退掉
+                    // （只清空行是不够的——那正是第一版改法的错，测出来条目根本没被摘掉）。
+                    while (kept.isNotEmpty() && kept.last().isBlank()) kept.removeAt(kept.size - 1)
+                    if (kept.isNotEmpty() && kept.last().trim() == "- insert:") {
+                      kept.removeAt(kept.size - 1)
+                    }
+                    index = end
+                    continue
+                  }
+                }
+                index = end
                 continue
               }
             }

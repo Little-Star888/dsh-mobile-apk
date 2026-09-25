@@ -54,6 +54,79 @@ const CARRIERS = [
   { label: 'agent-preset skills/', prefix: NM + 'node_modules/@deepseek-ai/dsh-agent-preset/skills/' },
   { label: 'web-app presets/', prefix: NM + 'node_modules/@deepseek-ai/dsh-web-app/presets/' },
 ]
+/* 行面来源文件（**从快照里读**，不读工作树）：三个 cordis.patch.yml 决定「哪些包真的会被 import」。
+ * 正向闭包只对这张行面问责——不在行面上的包（一堆 experimental provider、test-only 面）
+ * 缺依赖不会影响 boot，对它们判红是假红（本轮实测 66 条里只有 3 条真影响 boot）。
+ * 用**解析器**读 id/name/disabled，不用 grep 判存在性（PLAN §1.1 的 grep 误判教训）。 */
+const ROW_FILES = [
+  NM + 'node_modules/@deepseek-ai/dsh-base/cordis.patch.yml',
+  NM + 'node_modules/@deepseek-ai/dsh-web-app/cordis.patch.yml',
+  'home/.dsh/profiles/web/cordis.patch.yml',
+]
+/** 从一份 cordis.patch.yml 抽出「会被挂载且未 disabled」的行名：Set<name>。
+ *
+ * 手写行式状态机（本仓无 yaml 依赖）。**不用 grep 判 id 存在性**——PLAN §1.1 记过一次
+ * grep 把注释里的 id 与另一个序列混起来的误判；这里的规则是够用的最小状态机：
+ *   - 以 `- ` 开头的行开启一个**新的序列项**（无论缩进，因为 patch 文件是被 patch 的片段序列，
+ *     项的嵌套全部通过 `insert:` 的序列表达）；
+ *   - 其余 `key: value` 行归当前项；
+ *   - 项结束时结算：有 name 且 disabled 非 none/false ⇒ 计入挂载集。
+ * 注释行（`#`）与空行跳过；`!!js` 表达式原样当字符串（只判「有没有值」，不判语义）。
+ * 自证：`--self-test` 用合成 patch 验 disabled/insert 嵌套/注释四个分支。 */
+function mountedRowNames(text) {
+  const out = new Set()
+  const finish = (item) => {
+    if (item === null || item.name === null) return
+    // 只有**字面 true** 才算禁用。`disabled: !!js "<表达式>"` 是条件禁用：我们是 profile 启动器
+    // （存在 profileContext），故 base 里 `!ctx.get('profileContext')` 这类表达式的行实际是**挂载**的
+    // ——这正是 PLAN §1.1 A-6 的发现（hmr / plugin-manager / tool-plugin-manager 三行）。
+    // 把条件行当禁用会漏掉它们的依赖（实测：漏掉 execa，正是本轮 boot 崩的一条）。
+    if (item.disabled === true) return
+    out.add(item.name)
+  }
+  let item = null
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.replace(/\s+#.*$/, '').trim()
+    if (line.length === 0) continue
+    if (/^- /.test(line) || line === '-') {
+      finish(item)
+      item = { name: null, disabled: null }
+      const rest = line === '-' ? '' : line.slice(2).trim()
+      if (rest.length > 0) {
+        const m = /^name:\s*['"]?([^'"]+?)['"]?$/.exec(rest)
+        if (m) item.name = m[1].trim()
+      }
+      continue
+    }
+    if (item === null) continue
+    const mName = /^name:\s*['"]?([^'"]+?)['"]?$/.exec(line)
+    if (mName) { item.name = mName[1].trim(); continue }
+    const mDis = /^disabled:\s*(.+)$/.exec(line)
+    if (mDis) {
+      const v = mDis[1].trim()
+      // 字面 true 才禁用；`!!js <expr>` / false 一律视为挂载（见 finish() 的理由）
+      item.disabled = (v === 'true') ? true : null
+    }
+  }
+  finish(item)
+  return out
+}
+/* 正向闭包豁免：上游声明了运行时依赖、但**故意**不进 overlay 的名字。
+ * 空集是目标态——每加一条必须在注释里写清为什么不需要覆盖（平台可选 / 宿主既有 / 由 profile 提供）。
+ * 不许用「没看见」代替裁决。 */
+const RUNTIME_MISSING_OK = new Set([
+  /* 0.14.2 实测：rc.1 的 dsh-office-to-pdf（web-app bundle 新行）运行时依赖
+   * @deepseek-ai/libreoffice-kit。我们在 profile patch 里**显式禁用该行**（见
+   * scripts/profile-web.cordis.patch.yml 的同名条目），故它不在行面上、也不该进 overlay。
+   * 依据（可复算）：libreoffice-kit 的 platformTarget() 只认 darwin/win32/linux-glibc，
+   * Android 下 process.platform === 'android' ⇒ 返回 undefined ⇒ resolveEngine() 落到
+   * `if (platform !== 'linux') throw new Error('Unsupported LibreOfficeKit host: android-x64')`，
+   * **无条件抛**（152 MB 的 -wasm 引擎也救不了：那一步同样被 platform !== 'linux' 挡掉）。
+   * 上游对「没有转换器」的既定降级路径就是 UI 的 unavailable guidance
+   * （ui-sidebar-documentpreview README：移除 remote.officeToPdf 注入即恢复不可用提示）。
+   * 若日后要恢复该能力，须先给出 Android 上真能跑的引擎实现，再同时删掉本豁免与 profile 的禁用行。 */
+  '@deepseek-ai/libreoffice-kit',
+])
 let presetsEntries = 0
 // 引擎树补丁 marker 随门禁抽验（0.13.5 起登记表驱动）：scripts/patches/registry.json
 // 内每个 scope=engine 补丁，其 target 文件必须带该补丁的 marker——防「补丁未施加/版本漂移」
@@ -69,8 +142,10 @@ import tarfile, json, sys
 want = json.loads(open(sys.argv[2], 'r', encoding='utf-8').read())
 nm = sys.argv[3]
 prefixes = json.loads(open(sys.argv[4], 'r', encoding='utf-8').read())   # 内置预设载体目录，见 CARRIERS
+mounts = set(json.loads(open(sys.argv[5], 'r', encoding='utf-8').read())) # 行面来源文件（bundle/profile patch）
 hits = {}
 present = {}
+rowFiles = {}
 carriers = [0] * len(prefixes)
 looked_non_pkg = 0
 with tarfile.open(sys.argv[1], 'r|xz') as t:
@@ -81,6 +156,10 @@ with tarfile.open(sys.argv[1], 'r|xz') as t:
                 if n.startswith(pre):
                     carriers[idx] += 1
         if not m.isfile():
+            continue
+        # 行面（谁真的被挂载）：bundle/profile 的 cordis.patch.yml 原样取回，供正向闭包定范围
+        if n in mounts:
+            rowFiles[n] = t.extractfile(m).read().decode('utf-8', 'replace')
             continue
         # 关键（0.13.8-b 实锤回归）：want 里既有 package.json，也有 .js/.ts 目标（patch-marker）——
         # 一律要取回内容。曾经这里只放行 package.json，导致 7 个 .js marker 永远「缺失」→ 假红拒打包。
@@ -102,8 +181,9 @@ with tarfile.open(sys.argv[1], 'r|xz') as t:
         present[n] = {'name': j.get('name'), 'version': j.get('version'), 'dir': nm,
                       'deps': list((j.get('dependencies') or {}).keys())
                               + list((j.get('optionalDependencies') or {}).keys())
-                              + list((j.get('peerDependencies') or {}).keys())}
-print(json.dumps({'hits': hits, 'carriers': carriers, 'present': present, 'lookedNonPkg': looked_non_pkg}))
+                              + list((j.get('peerDependencies') or {}).keys()),
+                      'runtimeDeps': list((j.get('dependencies') or {}).keys())}
+print(json.dumps({'hits': hits, 'carriers': carriers, 'present': present, 'rowFiles': rowFiles, 'lookedNonPkg': looked_non_pkg}))
 `
 let res
 try {
@@ -111,16 +191,19 @@ try {
   const tmpPy = join(dirname(snap), `.engine-overlay-scan-${process.pid}.py`)
   const wantFile = join(dirname(snap), `.engine-overlay-want-${process.pid}.json`)
   const carrierFile = join(dirname(snap), `.engine-overlay-carriers-${process.pid}.json`)
+  const mountFile = join(dirname(snap), `.engine-overlay-mounts-${process.pid}.json`)
   writeFileSync(tmpPy, py)
   writeFileSync(wantFile, JSON.stringify([...want.keys(), ...CARRIERS.map(c => c.prefix)]))
   writeFileSync(carrierFile, JSON.stringify(CARRIERS.map(c => c.prefix)))
+  writeFileSync(mountFile, JSON.stringify(ROW_FILES))
   try {
     const snapWin = snap.replace(/\\/g, '/')
-    res = JSON.parse(execSync(`${process.platform === 'win32' ? 'python' : 'python3'} ${JSON.stringify(tmpPy)} ${JSON.stringify(snapWin)} ${JSON.stringify(wantFile)} ${JSON.stringify(NM)} ${JSON.stringify(carrierFile)}`, { encoding: 'utf8', maxBuffer: 128 * 1024 * 1024 }))
+    res = JSON.parse(execSync(`${process.platform === 'win32' ? 'python' : 'python3'} ${JSON.stringify(tmpPy)} ${JSON.stringify(snapWin)} ${JSON.stringify(wantFile)} ${JSON.stringify(NM)} ${JSON.stringify(carrierFile)} ${JSON.stringify(mountFile)}`, { encoding: 'utf8', maxBuffer: 128 * 1024 * 1024 }))
   } finally {
     rmSync(tmpPy, { force: true })
     rmSync(wantFile, { force: true })
     rmSync(carrierFile, { force: true })
+    rmSync(mountFile, { force: true })
   }
 } catch (e) {
   console.error(`ENGINE-OVERLAY CHECK FAILED（扫描执行失败）: ${String(e).slice(0, 400)}`)
@@ -205,6 +288,60 @@ for (const [path, meta] of want) {
     }
   }
   const unaccounted = [...byName.keys()].filter((n) => !declared.has(n) && !reached.has(n)).sort()
+
+  /* ── 正向闭包完备性（0.14.2 设备实锤缺口，G-2 同族）────────────────────────────
+   * 上面那条是**反向**判据（在的都登记/有来源）。它挡不住本轮实锤的三类静默缺席，
+   * 因为那三类恰好都"有来源"或"根本不在树里"：
+   *   ① 上游新增的**非 @deepseek-ai 运行时依赖**（实锤：dsh-plugin-manager 要 execa@^10.0.0）——
+   *      快照里根本没有这个包，反向面看不见"缺席"；
+   *   ② **住 packages/ 之外、却被 packages/ 内包依赖**的 @deepseek-ai 包（实锤：dsh-office-to-pdf
+   *      要 @deepseek-ai/libreoffice-kit）——同样是不在场；
+   *   ③ vendorTop 的**版本**没跟上游抬（实锤：@deepseek-ai/cosmokit 钉 1.8.3，rc.1 要 createVolatile
+   *      ⇒ 必须 1.8.4+）——包在场、版本也"登记一致"，但依赖方要的符号不存在。
+   * 三类的设备后果都是 boot 阶段硬崩（ERR_MODULE_NOT_FOUND / missing export），
+   * 而**本地门禁全绿**：所有判据都只读登记表，没人读"上游声明的依赖有没有被满足"。
+   *
+   * 判据：快照内每个**上游包**（@deepseek-ai/* 与登记过的 vendor）声明的**运行时 dependencies**
+   * 必须能在快照内解析到（或在运行时豁免表里显式登记）。缺口逐条列出**引用者**，
+   * 逼一次显式裁决——不许再靠"没看见"通过。
+   */
+  // 行面：从快照里的三份 cordis.patch.yml 解析出「真会被 import」的包名
+  const mounted = new Set()
+  const rowSources = res.rowFiles ?? {}
+  let mountFilesRead = 0
+  for (const path of ROW_FILES) {
+    const text = rowSources[path]
+    if (typeof text !== 'string') continue
+    mountFilesRead++
+    for (const n of mountedRowNames(text)) mounted.add(n)
+  }
+  // 行面必须都读到（缺文件 = 判据空转，比判红更危险）
+  if (mountFilesRead !== ROW_FILES.length) {
+    fails.push('行面文件未全部取到（' + mountFilesRead + '/' + ROW_FILES.length + '）——正向闭包判据会空转')
+  }
+  const runtimeGaps = new Map()
+  for (const name of mounted) {
+    const meta = byName.get(name)
+    if (meta === undefined) continue // 行面里但树内没有：反向面/装配链另有判据，这里只管依赖
+    for (const dep of meta.runtimeDeps ?? []) {
+      if (byName.has(dep)) continue
+      if (RUNTIME_MISSING_OK.has(dep)) continue
+      if (!runtimeGaps.has(dep)) runtimeGaps.set(dep, [])
+      runtimeGaps.get(dep).push(name)
+    }
+  }
+  console.log('  正向闭包：行面 ' + mountFilesRead + ' 文件 / 挂载点 ' + mounted.size + ' 个 / 运行时依赖缺口 ' + runtimeGaps.size)
+  if (runtimeGaps.size > 0) {
+    for (const [dep, who] of [...runtimeGaps.entries()].sort()) {
+      console.log('    ' + dep + '  <- ' + who.slice(0, 4).join(', ') + (who.length > 4 ? ' 等 ' + who.length + ' 个' : ''))
+    }
+    fails.push('行面（会被挂载的包）的运行时依赖在快照内不可解析 ' + runtimeGaps.size + ' 条（见上方清单）'
+      + '——登记进 engine-overlay.json 的 packages/vendorTop（含传递依赖），'
+      + '或在 check-engine-overlay.mjs 的 RUNTIME_MISSING_OK 里显式豁免并给理由。'
+      + '历史教训：execa / @deepseek-ai/libreoffice-kit / cosmokit@1.8.3 都是这么漏的，'
+      + '漏掉的后果是设备 boot 阶段硬崩而本地门禁全绿。'
+      + '（未挂载的实验性 provider 不在本判据内——它们缺依赖不影响 boot，对它们判红是假红。）')
+  }
   checked += 0
   console.log('  反向面：快照内 ' + byName.size + ' 包 / 登记 ' + declared.size + ' / 依赖闭包可达 ' + reached.size
     + ' / 无来源 ' + unaccounted.length)

@@ -384,6 +384,94 @@ const IMPLS = {
     },
   },
 
+  // ── narb-android-N1：Android 无预编译 node-addon-require-builtin 绑定（0.14.2 追上游 0.1.7-rc.1）──
+  // 0.1.7-rc.1 的 dsh-app-boot 新增依赖 node-addon-require-builtin（0.1.5 的 app-boot 里
+  // require-builtin / internalModules 零命中，已比对 0.1.5 夹具）；它在
+  // packages/boot/app-boot/src/profile-resolution/resolver.ts 的 internalModules() 里用 native
+  // 拿 Node 内部 loader（internal/modules/esm/loader 等）来装 profile 解析拦截。
+  //
+  // 该包只发布 darwin/linux/win32 七元组，**无 android**（npm 上
+  // node-addon-require-builtin-android-x64 = 404；上游 native/system/docs/support-matrix.md
+  // 明写「Other CPU/OS combinations have no published platform package」）。
+  // 设备实测（16416，engine.log 首行 + boot-fail.log 连记 4 轮）：
+  //   dsh: fatal uncaught exception: Error: dsh: host preparation failed:
+  //     No usable native binding found for node-addon-require-builtin-android-x64 (auto)
+  // ⇒ 引擎在 boot 阶段硬崩，**不是** PLAN §2.1 预测的「静默禁用插件」，而是根本没起来。
+  //
+  // 不变量：拿不到 native addon 不能杀死 boot。壳侧本来就以 --expose-internals 起 node
+  // （EngineManager.kt:1036 的 argv 第二项），设备实测该 flag 恰好暴露 rc.1 internalModules()
+  // 需要的五个 internal/modules/*，且形状与它的逐条校验全部吻合（esm.resolveSync /
+  // getOrCreateModuleJob / cjs._resolveFilename / getCjsConditions / getDefaultConditions /
+  // defaultResolve）。故 native 不可用时回落 require(moduleId) —— 与内置模块同一实现，
+  // 不是「假装成功」。
+  'narb-android-N1': {
+    file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/node-addon-require-builtin/lib/index.js',
+    scope: 'engine',
+    check: (s) => s.includes('dsh-mobile native-binding fallback (N1)'),
+    apply: (s) => {
+      if (s.includes('dsh-mobile native-binding fallback (N1)')) return s
+      const OLD = [
+        "const node_path_1 = __importDefault(require(\"node:path\"));",
+        "const { createEntryApi } = require('node-addon-native-custom-loader');",
+        "const api = createEntryApi(node_path_1.default.resolve(__dirname, '..'));",
+      ].join('\n')
+      const NEW = [
+        "const node_path_1 = __importDefault(require(\"node:path\"));",
+        "// dsh-mobile native-binding fallback (N1): no prebuilt addon for this platform (Android has none).",
+        "// The shell already launches node with --expose-internals, which exposes exactly the",
+        "// internal/modules/* entries internalModules() needs; fall back to require() for them",
+        "// instead of crashing host preparation. See scripts/patches/registry.json narb-android-N1.",
+        "let api;",
+        "try {",
+        "    const { createEntryApi } = require('node-addon-native-custom-loader');",
+        "    api = createEntryApi(node_path_1.default.resolve(__dirname, '..'));",
+        "} catch (error) {",
+        "    api = undefined;",
+        "    if (!globalThis.__dshMobileNativeBindingFallbackWarned) {",
+        "        globalThis.__dshMobileNativeBindingFallbackWarned = true;",
+        "        console.warn('node-addon-require-builtin: no prebuilt native binding for this platform; ' +",
+        "            'falling back to require() (dsh-mobile N1, requires --expose-internals): ' +",
+        "            (error && error.message ? error.message : String(error)));",
+        "    }",
+        "}",
+      ].join('\n')
+      const OLD_FNS = [
+        "function requireBuiltin(moduleId) {",
+        "    return api.requireBuiltin(moduleId);",
+        "}",
+        "function isAllowedInternalId(moduleId) {",
+        "    return api.isAllowedInternalId(moduleId);",
+        "}",
+        "function getBindingInfo() {",
+        "    return api.getBindingInfo();",
+        "}",
+      ].join('\n')
+      const NEW_FNS = [
+        "function requireBuiltin(moduleId) {",
+        "    if (api !== undefined) return api.requireBuiltin(moduleId);",
+        "    return require(moduleId);",
+        "}",
+        "function isAllowedInternalId(moduleId) {",
+        "    if (api !== undefined) return api.isAllowedInternalId(moduleId);",
+        "    try { require(moduleId); return true; } catch { return false; }",
+        "}",
+        "function getBindingInfo() {",
+        "    if (api !== undefined) return api.getBindingInfo();",
+        "    return { backend: 'expose-internals', package: undefined, abi: process.versions.modules };",
+        "}",
+      ].join('\n')
+      if (!s.includes(OLD)) {
+        throw new Error('narb-android 锚点未命中：createEntryApi 顶层调用——引擎升级后请人工核对 node-addon-require-builtin/lib/index.js')
+      }
+      if (!s.includes(OLD_FNS)) {
+        throw new Error('narb-android 锚点未命中：三个导出函数体——引擎升级后请人工核对 node-addon-require-builtin/lib/index.js')
+      }
+      s = s.replace(OLD, NEW).replace(OLD_FNS, NEW_FNS)
+      if (!s.includes('dsh-mobile native-binding fallback (N1)')) throw new Error('narb-android 复核失败——不写回')
+      return s
+    },
+  },
+
   // ── flock-android-F3：Android 无预编译 flock 绑定（0.13.7 追上游 0.1.5）──
   // 0.1.5 的 dsh-session-persistence-jsonl 用 @deepseek-ai/node-addon-system/flock 做
   // 会话目录写锁（session.lock，跨进程互斥）；dsh-sandbox-local 用同包的 landlock-run

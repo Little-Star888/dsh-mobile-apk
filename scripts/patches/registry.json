@@ -108,6 +108,14 @@
       "marker": "dsh-mobile undo route auth (U1)"
     },
     {
+      "id": "narb-android-N1",
+      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/node-addon-require-builtin/lib/index.js",
+      "scope": "engine",
+      "summary": "Android 无预编译 node-addon-require-builtin 绑定 → 回落 require(moduleId)（壳侧已以 --expose-internals 起 node，该 flag 恰暴露 rc.1 internalModules() 需要的五个 internal/modules/*）",
+      "provenance": "0.14.2 追上游 0.1.7-rc.1；rc.1 的 dsh-app-boot 新增该依赖（0.1.5 夹具零命中）。设备 boot-fail.log 连记 4 轮 host preparation failed / No usable native binding found for node-addon-require-builtin-android-x64",
+      "marker": "dsh-mobile native-binding fallback (N1)"
+    },
+    {
       "id": "flock-android-F3",
       "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/node-addon-system/lib/flock.js",
       "scope": "engine",
