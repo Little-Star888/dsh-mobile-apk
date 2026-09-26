@@ -261,8 +261,21 @@ export function mountKeybar(host: KeybarHost): KeybarHandle {
     apply(pressKeybarKey(state, key, now()))
   }
 
-  /** 底边留白：四源取最大（壳侧推送 + visualViewport 实测），防形态 A/C。 */
-  const syncInset = (): void => {
+  /** 当前承载留白变量的终端根节点（换根/卸载时要清掉旧的那份）。 */
+  let insetHost: HTMLElement | null = null
+
+  /**
+   * 底边留白：四源取最大（壳侧推送 + visualViewport 实测），防形态 A/C。
+   *
+   * 变量写在**终端根节点**上，不是键条上（0.14.2 真机缺陷实修的关键一步）：
+   * 自定义属性只向**后代**继承，写在键条上祖先读不到，于是
+   * `[data-sidebar-terminal]{padding-bottom:var(...)}` 恒为 0。留白必须由承载者
+   * （根节点）拥有，这样它才是**根节点自己的 padding**（在盒内、无背景 -> 露出页面底色），
+   * 而不是键条自己的 padding（在盒内但有背景 -> 涂成一大片灰）。
+   *
+   * @param host - 当前终端根节点（留白的承载者）。
+   */
+  const syncInset = (host: HTMLElement): void => {
     if (disposed) return
     const view = doc.defaultView
     if (view === null) return
@@ -276,17 +289,20 @@ export function mountKeybar(host: KeybarHost): KeybarHandle {
       visualViewportHeight: view.visualViewport?.height ?? view.innerHeight,
       layoutViewportHeight: view.innerHeight,
     })
-    bar.style.setProperty(KEYBAR_INSET_VAR, inset + 'px')
+    if (insetHost !== null && insetHost !== host) insetHost.style.removeProperty(KEYBAR_INSET_VAR)
+    insetHost = host
+    host.style.setProperty(KEYBAR_INSET_VAR, inset + 'px')
   }
 
   /** 自愈挂载：键条必须是 .root 的最后一个子节点（保证「终端底边 <= 键条顶边」）。 */
   const reconcile = (): void => {
     if (disposed) return
-    const roots = doc.querySelectorAll(TERMINAL_ROOT_SELECTOR)
+    const roots = doc.querySelectorAll<HTMLElement>(TERMINAL_ROOT_SELECTOR)
     const current = roots[roots.length - 1]
     if (current === undefined) {
       bar.remove()
       noticeEl.remove()
+      if (insetHost !== null) { insetHost.style.removeProperty(KEYBAR_INSET_VAR); insetHost = null }
       return
     }
     // 挂在最后：终端 .screen 是 flex:1，键条 flex:none 在流内 -> 不遮挡。
@@ -294,7 +310,7 @@ export function mountKeybar(host: KeybarHost): KeybarHandle {
       current.append(bar)
       current.append(noticeEl)
     }
-    syncInset()
+    syncInset(current)
   }
 
   // visualViewport 兜底：resize **与** scroll 双监听（只监听 resize 会漏掉 offsetTop 变化）。
@@ -325,6 +341,8 @@ export function mountKeybar(host: KeybarHost): KeybarHandle {
       view?.removeEventListener('resize', onViewport)
       bar.remove()
       noticeEl.remove()
+      // 留白变量挂在根节点上：卸载必须清掉，否则下一个键条会继承一个陈旧的非零留白。
+      if (insetHost !== null) { insetHost.style.removeProperty(KEYBAR_INSET_VAR); insetHost = null }
       disposeStyle()
     },
     latch: () => state,

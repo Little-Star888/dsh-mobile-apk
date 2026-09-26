@@ -432,7 +432,6 @@ test('反证：壳侧桥抛异常也必须提示（不得静默崩溃）', { ski
 
 test('底边留白由 CSS 变量驱动，且壳侧 IME 为 0 时靠 visualViewport 收缩救回（防形态 A/C）', { skip: SKIP && 'jsdom 不可用' }, () => {
   const { doc, root, handle } = setup()
-  const bar = doc.querySelector('[' + KEYBAR_ATTR + ']')
   // jsdom 无 visualViewport：注入一个可控替身，模拟键盘弹出（高度 800 -> 500）。
   const win = doc.defaultView
   let vvHeight = 800
@@ -452,23 +451,31 @@ test('底边留白由 CSS 变量驱动，且壳侧 IME 为 0 时靠 visualViewpo
   style.textContent = ':root{--dsh-android-ime-bottom:0px;--dsh-android-system-bottom:0px}'
   doc.head.append(style)
 
-  bar.style.setProperty(KEYBAR_INSET_VAR, '0px')
-  // 手动驱动一次 resize（重新挂载以让监听器绑到新的 visualViewport 上）。
+  // 先卸掉 setup 的那条，再重挂 —— 让监听器绑到新的 visualViewport 替身上。
   handle.dispose()
   const fresh = mountKeybar({ root, write: () => true, applicationCursorKeys: () => false })
   const freshBar = doc.querySelector('[' + KEYBAR_ATTR + ']')
-  assert.equal(freshBar.style.getPropertyValue(KEYBAR_INSET_VAR), '0px', '无键盘时留白 0')
+  assert.notEqual(freshBar, null, '键条必须在场')
+  // 承载者必须是根节点（留白 = 根节点的 padding，在盒内且根节点无背景 -> 露页面底色）。
+  // 自定义属性只向**后代**继承：写在键条上祖先读不到，于是
+  // [data-sidebar-terminal]{padding-bottom:var(...)} 恒为 0。
+  assert.equal(root.style.getPropertyValue(KEYBAR_INSET_VAR), '0px', '无键盘时留白 0（写在根节点上）')
+  assert.equal(freshBar.style.getPropertyValue(KEYBAR_INSET_VAR), '',
+    '反证：键条自己不得携带留白变量（那会把自己的底色涂满让开区 = 真机灰板形态）')
 
   vvHeight = 500
   for (const fn of listeners.get('resize') ?? []) fn()
-  assert.equal(freshBar.style.getPropertyValue(KEYBAR_INSET_VAR), '300px',
+  assert.equal(root.style.getPropertyValue(KEYBAR_INSET_VAR), '300px',
     'visualViewport 收缩 300px 必须变成底部留白（壳侧推送为 0 时唯一的救回通道）')
 
   // scroll 监听也必须生效（只监听 resize 会漏掉 offsetTop 变化）。
   vvHeight = 400
   for (const fn of listeners.get('scroll') ?? []) fn()
-  assert.equal(freshBar.style.getPropertyValue(KEYBAR_INSET_VAR), '400px', 'scroll 监听必须同样触发复算')
+  assert.equal(root.style.getPropertyValue(KEYBAR_INSET_VAR), '400px', 'scroll 监听必须同样触发复算')
   fresh.dispose()
+  // 卸载必须清掉根节点上的留白变量，否则下一个键条继承一个陈旧的非零留白。
+  assert.equal(root.style.getPropertyValue(KEYBAR_INSET_VAR), '',
+    'dispose 必须清掉根节点上的留白变量（防陈旧留白残留）')
 })
 
 test('反证：visualViewport 缺失时不得崩溃（旧内核/桌面）', { skip: SKIP && 'jsdom 不可用' }, () => {

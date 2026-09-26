@@ -119,3 +119,43 @@ test('源码门禁：接线层不得把键位序列写在布局模块里', () =>
     assert.equal(source.includes(sequence), false, '布局模块不得含键位序列: ' + sequence)
   }
 })
+
+// ── 0.14.2 真机缺陷实修：让开的留白不得画成键条底色 ─────────────────────────────
+//
+// 缺陷现场（用户原话「拉伸过度了」）：键盘弹出时键条在真机被撑成一整片灰。
+// 设备读数（1260x2800，dpr 3.5 = 360x800 CSS）：键条应有高 52 CSS，实测绘制高约 214 CSS；
+// 活体实测把 --dsh-android-ime-bottom 从 0 调到 298，键条绘制高 53 -> 351（一比一增长）。
+//
+// 真因：让开键盘的留白此前由**键条自己的 padding-bottom** 承担，而 background/border-top
+// 挂在同一元素上 —— 「留给键盘的空白」被涂成键条底色。
+//
+// 修法：留白改由**终端根节点**的 padding-bottom 承担（根节点无背景 -> 露出页面底色）。
+
+test('反证：让开的留白**不得**由键条自己的 padding 承担（真机灰板缺陷的形态）', () => {
+  // 键条规则块里不得再出现 padding-bottom 引用留白变量 —— 那正是被涂成一大片灰的写法。
+  const barRule = KEYBAR_CSS.slice(KEYBAR_CSS.indexOf(KEYBAR_ATTR + ']{'), KEYBAR_CSS.indexOf('] button'))
+  assert.equal(
+    /padding-bottom[^;}]*'?\s*,?\s*KEYBAR_INSET_VAR/u.test(barRule) ||
+      barRule.includes('calc(6px + var(' + KEYBAR_INSET_VAR),
+    false,
+    '键条不得用 padding-bottom 承担留白（会把自己的底色涂满让开区，真机灰板）',
+  )
+  // 更强的一条：键条规则块里不得出现 KEYBAR_INSET_VAR 本身。
+  assert.equal(
+    barRule.includes(KEYBAR_INSET_VAR), false,
+    '留白变量必须由终端根节点消费，不得出现在键条自己的规则块里',
+  )
+})
+
+test('让开的留白由终端根节点的 padding-bottom 承担（根节点无背景 -> 露页面底色）', () => {
+  const expected = TERMINAL_ROOT_SELECTOR + '{padding-bottom:var(' + KEYBAR_INSET_VAR + ',0px)}'
+  assert.ok(
+    KEYBAR_CSS.includes(expected),
+    '必须由根节点承担留白，实际 CSS 片段: ' + KEYBAR_CSS.slice(0, 120),
+  )
+  // 键条自身只有静态的 6px 上下内边距（40 按钮 + 6 + 6 = 52），不含动态量。
+  assert.ok(
+    KEYBAR_CSS.includes('[', KEYBAR_ATTR, ']{display:flex;flex:none;flex-direction:row;align-items:stretch;gap:4px;', 'padding:6px 8px;'),
+    '键条本体的内边距必须是静态 6px 8px（不含 inset）',
+  )
+})
