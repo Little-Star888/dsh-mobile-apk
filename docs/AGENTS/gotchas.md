@@ -681,3 +681,35 @@
     `dumpsys window` 的当前 frame 判读——照 `wm size` 判断方向会得出「两台都是竖屏」的错结论。
     **判据**：几何类改动必须过竖屏 16416 与横屏 16384 两个方向的 tap 级实测（AGENTS §2.1.6）——
     DOM/CDP 断言看不见这类缺陷（§2.1.4）。
+
+176. **退役 combo-lazy-A4：它的收益声明是 0.1.5 时代的量级，上游 0.1.7 惰性化之后结构性无对象；撤它时又牵出 C5 的两条门禁缺陷（2026-09-25）**
+    **现象**：`combo-lazy-A4`（engine 补丁：把 `compose()` 推迟到首个图读者、启动期 flush 只标脏）账面收益是
+    「9-14 次全表重算（单次 1.8-3.1s，占 LISTEN 墙钟 88%）收敛为 1 次」，看起来是启动性能支柱。实测却不成立。
+    **真因（三支）**：
+    ① **收益的量级属于旧代上游**。0.1.7 已把 combo 载荷原生惰性化（`dsh/packages/client/modules/README.md`
+    「creates combo descriptors without building response bodies」；`src/index.ts:384 lazyBody`），单次
+    compose 只剩个位数 ms（设备真值 5-9ms），「2.8s × 9-14 次」的对象不存在。
+    ② **裸树只 compose 2 次，不是 9-14 次**（同基线 0.1.7-rc.1 离线 A/B，双臂零 failures）：构造函数先空表
+    `this.composed = this.compose()`（records=0，2.27ms），随后 flush 带真记录再 compose（records=67，3.97ms）。
+    A4 省掉的是**空表那次**，并把带真记录那次从构造期挪到**首个图读者**（= 首个页面请求路径）。
+    A4 臂 1 次 5.79ms ⇒ 总量与裸树同量级，**位置反而更靠近 TTFB**（实测 HTTP−LISTEN 竖屏 557ms / 横屏 1472ms），
+    属「位置为负」。
+    ③ **撤它时发现 C5 门禁本身是空的**（两条独立缺陷）：(a) `parseProbe` 的
+    `/\[perf\] boot singles=(\d+|n\/a)/` **缺 `-1` 分支**，而 P1 在计数缺席时故意打 `singles=-1`（绝不省字段）
+    ⇒ 解析返回 `undefined`，C5 对设备真值**恒不可判定**；(b) C5 的正向对照只认
+    `globalThis.__dshMobileComboLazyStats.singleBuilds`——那是**已撤销的 A5** 装的计数器，A5 退役后它
+    **没有任何生产者** ⇒ 对照永远「没跑起来」，于是「boot singles 恒 0」这条断言在任何环境下都不构成证据。
+    **修法**：① registry 31 → 30 条，`apply-patches.mjs` IMPLS 移除 A4 全符号（`ensureComposed` / `composeDirty`），
+    `combo-probe-P1` 的 `requires` 清空（P1 保留：C2/C4/C6 仍消费它）；② C5 解析补 `-1` 分支；③ 正向对照改落
+    **上游自己的惰性契约**——离线直驱打过 P1 的引擎树，断言单条 URL 命中 200 + 载荷含该 id + `body()` 两次
+    调用返回**同一 promise**（`lazyBody` 的 memoize 契约）；④ C5 判据改三态（`0` → 惰性成立；`> 0` → 判红；
+    `-1`/缺读数 → 由正向对照裁定，对照真跑通过即等价成立，跑不起来如实 SKIP），**既不恒绿也不恒红**；
+    ⑤ C3「compose ≤ 2」**不放宽**（裸树正是 2 次，阈值仍可满足，注释改写明裸树事实）。
+    **判据（可证伪）**：① `node scripts/check-boot-budget.mjs --self-test` 必须全绿，且其中 5 条新用例钉住
+    C5 四态——「`-1` + 对照跑过但失败 → 判红」证明判别力没因三态丢失；② 真数据跑
+    `node scripts/check-boot-budget.mjs --segments … --probe …`：设备真值 `singles=-1` 时 C5 由 SKIP 转 PASS
+    （SKIP 1 → 0）；③ 回归测试 `combo-lazy-a4.test.mjs` 已改写成「撤销不变量守卫」，把 A4 id 塞回 registry 即
+    判红（实测 2 项失败），还原即绿。
+    **为什么记进坑位**：「补丁的收益声明会随上游版本过期，但补丁自身不会自动消失」——退役判据必须落在
+    **同基线 A/B 实测**上，而不是补丁注释里那句当年成立的数字；连带发现的门禁缺陷还说明「门禁的正向对照
+    依赖一个会退役的补丁符号」本身就是漂移源。

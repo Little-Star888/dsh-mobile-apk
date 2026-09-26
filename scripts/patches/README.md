@@ -184,15 +184,14 @@ node scripts/patches/apply-patches.mjs vendor --list
     改前第三方臂 `BOOT-FAIL`、改后 `BOOT-OK` 且点名；官方臂改前改后均 `BOOT-FAIL`。
   - **未确证**：A/B 在宿主（Node v24.17.0 x64 + 解包引擎树）完成，**未在设备上**装真坏插件跑冷启动。
 
-## 2026-09-24 0.14.2 追上游 0.1.7-rc.1（重锚 A4/G3/N2；撤销 N1/G1/A3/A5/C3）
+## 2026-09-24 0.14.2 追上游 0.1.7-rc.1（重锚 G3/N2；撤销 N1/G1/A3/A5/C3）
 
 **唯一可信的锚点判据**：`node scripts/probe-engine-anchors.mjs`——按 `engine-overlay.json` 的
 (包名, 版本) 回读构建期同一批 tgz 的**未打补丁字节**，在探针根上跑 `apply-patches --apply`。
 不要用 stage 目录（本轮实测它停在 `0.1.2-rc.1`），也不要用测试夹具（0.1.5 时代写死在目录名里，
 真树断 9 条而 16 个补丁测试全绿）。现况：engine 14 条 **14/14 ALL OK**。
 
-重锚的三条：
-- `combo-lazy-A4`：`bundleResource` 变 `async` 方法（薄壳 `serveBundle` 不是读图点）；插 `this.ensureComposed()`。
+重锚的两条（A4 已于 2026-09-25 退役，见下节）：
 - `boot-third-party-isolation-G3`：`boot()` 的 `async` 仍在，漂移在 `mountRootInclude(..., binName)` 第 5 参；
   隔离器内部调用与反 no-op 断言同步改 5 参，`binName` 一路透传（诊断前缀不再退化成默认 `"dsh"`）。
 - `perf-compile-cache-flush-N2`：根包不再 `import { readFileSync } from "node:fs"`，锚改末条顶层 import；
@@ -222,3 +221,34 @@ node scripts/patches/apply-patches.mjs vendor --list
 「台账完备 / 夹具随版 / 禁写死版本」。**因此撤销条目的回归测试不删除，而是就地改写成
 「撤销不变量守卫」**：既钉住「不许顺手加回来」，也钉住「撤销理由今天仍然成立」（例如
 `combo-single-lazy-a5.test.mjs` 直接查上游 `buildCombo` 是否还返回 `lazyBody`）。
+## 2026-09-25 退役 combo-lazy-A4（0.14.2；连带修 C5 两条门禁缺陷）
+
+**退役理由（实测，见 `.deploy-tmp/retire-sweep/REPORT.md` §3.1.2/§3.1.3）**：
+- 上游 0.1.7 已原生惰性化 combo 载荷（`dsh/packages/client/modules/README.md`「creates combo
+  descriptors without building response bodies」；`src/index.ts:384 lazyBody`）。
+- **裸树**启动期只有 **2 次** compose（空表 2.27ms + 真记录 3.97ms；设备真值单次 5-9ms）。
+  A4 宣称的「9-14 次 × 1.8-3.1s 收敛为 1 次」在当前上游架构下**结构性无对象**。
+- A4 实际只做了两件事：省掉空表那次 + 把带真记录那次从构造期挪到**首个图读者**（= 首个页面请求路径，
+  TTFB 侧；实测 HTTP−LISTEN 竖屏 557ms / 横屏 1472ms）。总量约 0，位置为负。
+- 成本：1 个 engine 补丁 + 7 个脆弱锚点 + P1 对它的 `requires` 依赖。
+
+**落地**：registry 移除 `combo-lazy-A4`（31 → 30 条）；`apply-patches.mjs` 的 IMPLS
+移除其实现（含 `ensureComposed` / `composeDirty` 全部符号）；`combo-probe-P1` 的
+`requires: ['combo-lazy-A4']` 一并移除（A4 退役后 P1 无前置，它本身仍被 check-boot-budget 的 C2/C4/C6 消费）。
+回归测试就地改写成「撤销不变量守卫」（`combo-lazy-a4.test.mjs`）：钉住「不许顺手加回来」+
+「A4 的收益归零依据今天仍成立」（上游 `buildCombo` 仍返回 `lazyBody`、构造函数仍自行 compose 一次）。
+
+**连带修的两条 C5 门禁缺陷**（`scripts/check-boot-budget.mjs`，lead 实测复现）：
+1. 解析正则 `[perf] boot singles=(\d+|n/a)` 缺 `-1` 分支，而 P1 在计数缺席时**故意**
+   写 `singles=-1`（绝不省字段）⇒ `parseProbe` 返回 undefined、C5 对设备真值恒不可判定。
+   已补 `-1` 分支。
+2. C5 的正向对照原先只认 `globalThis.__dshMobileComboLazyStats.singleBuilds`（A5 装的计数器）。
+   A5 撤销后该计数器**没有任何生产者**，对照永远「没跑起来」⇒ C5 的「恒 0」在任何环境下都不构成证据。
+   改为落回**上游自己的惰性契约**：离线直驱打过 P1 的引擎树，断言单条 URL 命中 200、载荷含该 id、
+   且 `body()` 两次调用返回同一 promise（`lazyBody` 的 memoize 契约）。
+   C5 判据同时改成三态（与 C4 同形）：计数为 0 → 惰性成立；计数 > 0 → 判红；计数缺席（-1/undefined）
+   → 由正向对照裁定，对照真跑通过即等价成立、跑不起来如实 SKIP，**既不恒绿也不恒红**。`--self-test`
+   补 5 条用例钉住这四态（含「-1 且对照失败 → 判红」，判别力不因三态丢失）。
+
+**C3 阈值不放宽**：C3「compose 调用数 ≤ 2」的依据原写 A4 的「1 vs 9-14」；A4 退役后裸树是 2 次，
+阈值**仍然可满足**，注释已重写为「裸树 ctor 2 次」的事实与出处。`COMPOSE_CALLS_BUDGET = 2` 不变。

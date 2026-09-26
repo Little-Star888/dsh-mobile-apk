@@ -91,7 +91,7 @@ const VD_STYLE = `
 .dsh-vdisplay-empty{margin:0;padding:10px;font:var(--dsw-font-markdown-small);color:var(--dsw-alias-label-secondary)}
 .dsh-vdisplay-list{display:flex;flex-wrap:wrap;gap:6px}
 .dsh-vdisplay-item{min-width:36px;min-height:32px;padding:0 10px;border:1px solid var(--dsw-alias-border-l4);border-radius:8px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);font:var(--dsw-font-markdown-small)}
-.dsh-vdisplay-item-selected{border-color:var(--dsw-specific-primary);color:var(--dsw-specific-primary)}
+.dsh-vdisplay-item-selected{border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary)}
 .dsh-vdisplay-item:disabled{opacity:.45}
 /* 手动关机：与编号同排，用危险色区分「切换」与「关闭」两种动作。 */
 .dsh-vdisplay-shutdown{margin-left:auto;border-color:var(--dsw-alias-border-l4);color:var(--dsw-alias-label-secondary)}

@@ -132,4 +132,114 @@ class PluginMountsTest {
     assertTrue("内容变化指纹必须变", a != PluginMounts.digest(fixture + "\n# x"))
     assertEquals("sha256 十六进制 64 位", 64, a.length)
   }
+
+  // ── 0.14.2 D12：显示名不得进入插件集合 ────────────────────────────────
+
+  /** 设备实读形态的 llm-pi-ai 条目：36 个模型显示名，一个都不得进条目名集合。 */
+  private val displayNameFixture = """
+    - id: llm-pi-ai
+      name: "@deepseek-ai/dsh-llm-pi-ai"
+      config:
+        providers:
+          opencode-go:
+            models:
+              - id: mimo-v2.5
+                name: MiMo 2.5
+              - id: glm-5.3
+                name: GLM-5.3
+          xiaomi-token-plan-cn:
+            models:
+              - id: mimo-v2.5
+                name: MiMo-V2.5
+    - insert:
+        - id: android-manage
+          name: '@dsh-android/dsh-android-manage'
+    - id: ui-theme
+      name: "@deepseek-ai/dsh-client-ui-theme"
+      config:
+        preference: dark
+  """.trimIndent() + "\n"
+
+  @Test
+  fun 模型显示名不得进入插件条目名集合() {
+    val entries = PluginMounts.entryNames(displayNameFixture)
+    assertEquals(
+      "只认 - name: 条目（顶层 + insert 子条目）",
+      listOf("@deepseek-ai/dsh-llm-pi-ai", "@dsh-android/dsh-android-manage", "@deepseek-ai/dsh-client-ui-theme"),
+      entries,
+    )
+    assertFalse("模型显示名不是插件名", entries.contains("MiMo 2.5"))
+    assertFalse(entries.contains("GLM-5.3"))
+    assertFalse(entries.contains("MiMo-V2.5"))
+    // 宽松口径仍然认得出它们（兼容展示/诊断用途，但不得用于「插件在不在场」判定）
+    assertTrue(PluginMounts.mountedNames(displayNameFixture).contains("GLM-5.3"))
+  }
+
+  @Test
+  fun 必需插件判定用条目名且能抓出缺席() {
+    val required = listOf("@dsh-android/dsh-android-manage", "@dsh-android/dsh-android-bridge")
+    val missing = PluginMounts.missingRequired(displayNameFixture, required)
+    assertEquals("bridge 不在场", listOf("@dsh-android/dsh-android-bridge"), missing)
+    assertTrue(PluginMounts.missingRequired(displayNameFixture, listOf("@dsh-android/dsh-android-manage")).isEmpty())
+    assertTrue("显示名不得伪造在场", PluginMounts.missingRequired(displayNameFixture, listOf("GLM-5.3")).isNotEmpty())
+  }
+
+  // ── 0.14.2 D11：摘除只作用于目标条目，不连坐 ──────────────────────────
+
+  /**
+   * D11 反证：两个子条目同处一个 \`- insert:\` 组时，摘除其中一个**不得**连带删掉另一个。
+   * 旧实现按「缩进区间里还有没有兄弟」判定，误判即整组消失（同组里我们自己的硬清单插件一起没了）。
+   */
+  @Test
+  fun 同组摘除不得连坐删除兄弟条目() {
+    val two = """
+      - id: bash-sandbox
+        disabled: true
+      - insert:
+          - id: shell-termux
+            name: '@dsh-android/dsh-shell-termux'
+          - id: host-web-compat
+            name: '@dsh-android/dsh-host-web-compat'
+      - id: open-in-app
+        disabled: true
+    """.trimIndent() + "\n"
+
+    val after = PluginMounts.removeEntry(two, "@dsh-android/dsh-host-web-compat", "host-web-compat")
+
+    assertNotNull(after)
+    assertFalse("目标条目必须消失", after!!.contains("host-web-compat"))
+    assertTrue("同组兄弟必须一字不动（D11）", after.contains("shell-termux"))
+    assertTrue("组包装行必须保留（还剩一个子条目）", after.contains("- insert:"))
+    assertTrue(after.contains("bash-sandbox") && after.contains("open-in-app"))
+    assertEquals(listOf("@dsh-android/dsh-shell-termux"), PluginMounts.entryNames(after))
+  }
+
+  /** 摘掉组内**最后一个**子条目时，\`- insert:\` 空壳必须一并清理（YAML 里它是 null 条目）。 */
+  @Test
+  fun 摘除组内最后一条时清掉空壳() {
+    val one = """
+      - insert:
+          - id: only-child
+            name: 'some-plugin'
+      - id: keep-me
+        disabled: true
+    """.trimIndent() + "\n"
+
+    val after = PluginMounts.removeEntry(one, "some-plugin", "only-child")
+
+    assertNotNull(after)
+    assertFalse("空壳 - insert: 必须消失", after!!.contains("- insert:"))
+    assertFalse(after.contains("only-child"))
+    assertTrue(after.contains("keep-me"))
+  }
+
+  @Test
+  fun 必需进场集合与缺失集合互补() {
+    val required = listOf("@dsh-android/dsh-android-manage", "@dsh-android/dsh-android-bridge", "GLM-5.3")
+    val present = PluginMounts.requiredPresent(displayNameFixture, required)
+    val missing = PluginMounts.missingRequired(displayNameFixture, required)
+    assertEquals(setOf("@dsh-android/dsh-android-manage"), present)
+    assertEquals(listOf("@dsh-android/dsh-android-bridge", "GLM-5.3"), missing)
+    assertEquals("两口径必须互补", required.toSet(), present + missing.toSet())
+  }
 }

@@ -271,6 +271,11 @@ if (peer) {
     'scripts/gen-protocol-v2-fixture.mjs',
     'scripts/profile-web.cordis.patch.yml',
     'scripts/snapshot-config/engine-overlay.json',
+    // 快照瘦身清单（0.14.2 T2）：slim.json 是**供给侧数据面**——两条构建链
+    // （协调仓本地链 + apk 仓云端自包含链）都读它（build-snapshot-013.mjs:61 的 readCfg('slim.json')），
+    // 却长期不在镜像面：单边演进 = 本地链删了 man/.d.ts 而云端链没删，且门禁完全看不见
+    // （幽灵缺陷形态，正是铁律 6 要防的那一类）。0.14.2 T2 的 recon 实测发现此缺口并在此登记。
+    'scripts/snapshot-config/slim.json',
     // 模型面工具 wire 预算门禁（0.14.0 §4.1）：脚本 + 基线双仓同源——只有一侧更新基线会让
     // 另一侧以旧阈值判红/判绿（基线是「事实值」，单边演进即口径分裂）。
     'scripts/check-tool-surface-budget.mjs',
@@ -294,6 +299,9 @@ if (peer) {
     // 复制成壳侧单测资源，是「引擎侧第一道门」与「壳侧执行点第二道门」等价的唯一真值链。
     // 脚本单边演进 = 一侧按旧规则生成/校验副本，等价性无声失效。
     'scripts/gen-screen-scope-fixture.mjs',
+    // 死 token 门禁（0.14.2 D3 / B6）：它是两条构建链与协调仓 CI 的同一执行面——单边演进会让
+    // 云端自包含构建跑到旧副本（对端缺文件即 SKIP），与 ST-17 同型缺陷。
+    'scripts/check-dead-tokens.mjs',
   ]
   /** 递归列出目录下所有文件（相对路径；node_modules/.git 排除）——目录级镜像面用。 */
   const walkAll = (dir, prefix = '') => {

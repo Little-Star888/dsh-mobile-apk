@@ -91,6 +91,20 @@ const REQUIRED = [
     deps: [],
     why: '同上：死键即「某步被删」的确定性证据',
   },
+  {
+    id: 'tree-delete-slim',
+    label: '瘦身：清单驱动整树裁剪（treeDelete，如 usr/share/man）',
+    needle: 'SLIM.treeDelete',
+    deps: ['assertRelSafe'],
+    why: '步骤被删会让 treeDelete 变死键；assertRelSafe 是相对路径安全前置（防清单写 .. 删到树外）',
+  },
+  {
+    id: 'extension-delete-slim',
+    label: '瘦身：清单驱动扩展名裁剪（extensionDelete，如引擎子树 .d.ts）',
+    needle: 'SLIM.extensionDelete',
+    deps: ['assertRelSafe'],
+    why: '同上：步骤被删会让 extensionDelete 变死键，裁剪静默失效而门禁全绿',
+  },
 ]
 
 function runChecks() {

@@ -3,7 +3,7 @@
 // P1 的产品意义：设备上 `t_compose_total` 曾恒为 -1，因为 `[perf] TOTAL` 只有**测量 preload** 会产，
 // 而发行路径里没有探针——「我们在量」与「壳侧读得到」互相假装成立。P1 把探针装进引擎产物本身。
 //
-// 本测试守四件事（combo 家族 A3/A5/C3 撤销后，P1 是仅存的 combo 侧补丁，前置只剩 A4）：
+// 本测试守四件事（combo 家族 A3/A4/A5/C3 全部撤销后，P1 是仅存的 combo 侧补丁，且已无前置）：
 //   ① 前置声明与登记表一致（requires 里的 id 都存在，且不牵连已撤销的补丁）；
 //   ② 在**未打补丁的 rc.1 真产物夹具**上可施加、幂等、且 `node --check` 过；
 //   ③ 打印的三行字段集合是壳侧/count-compose 的解析契约，字段不得随补丁增减而消失；
@@ -31,8 +31,10 @@ const check = (label, ok, detail) => {
 const registry = JSON.parse(readFileSync(join(here, '..', 'registry.json'), 'utf8'))
 const p1 = registry.patches.find((p) => p.id === 'combo-probe-P1')
 check('P1 在登记表内且 scope=engine', Boolean(p1) && p1.scope === 'engine')
-check('P1 前置全部存在（不牵连已撤销的 combo 补丁）',
+check('P1 前置全部存在（不牵连已撤销的 combo 补丁；A4 退役后应为空）',
   (p1.requires ?? []).every((id) => registry.patches.some((x) => x.id === id)), JSON.stringify(p1.requires ?? []))
+check('P1 的 requires 为空（A4 退役后无前置）',
+  JSON.stringify(p1?.requires ?? []) === JSON.stringify([]), JSON.stringify(p1?.requires ?? null))
 
 const scratch = mkdtempSync(join(tmpdir(), 'p1-test-'))
 try {
@@ -44,9 +46,9 @@ try {
 
   const apply = () => spawnSync(process.execPath,
     [join(repoRoot, 'scripts', 'patches', 'apply-patches.mjs'), scratch, '--apply', '--scope', 'engine',
-      '--only', 'combo-lazy-A4,combo-probe-P1'], { encoding: 'utf8' })
+      '--only', 'combo-probe-P1'], { encoding: 'utf8' })
   const first = apply()
-  check('A4+P1 在 rc.1 真产物上施加成功', first.status === 0,
+  check('P1 在 rc.1 真产物上施加成功（A4 已于 2026-09-25 退役，不再作为前置）', first.status === 0,
     (first.stdout + first.stderr).trim().split('\n').slice(-2).join(' | '))
   const patched = readFileSync(target, 'utf8')
   check('探针标记与打印器在场',

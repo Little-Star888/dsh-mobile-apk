@@ -72,9 +72,22 @@ export function reportOutcomeLabel(kind: TurnEndKindOrUnknown): string {
 }
 
 /**
- * 是否允许弹窗（NT-05：aborted 是用户自己按停，不得弹）。
- * `cancelled` 类取消原因（用户主动停）与 `aborted` 一律静默；其余四种（completed /
- * error / blocked / max-tokens / interrupted）必弹。
+ * 是否允许弹窗。
+ *
+ * 静默（return false）——「不是用户要的结果」且**不需要用户当场处理**的两类：
+ *  - `aborted`：NT-05，用户自己按停，弹窗是噪声；
+ *  - `interrupted`：0.14.2 D15-B 裁定。reason.kind=interrupted 的文案是「被中断（进程重启）」，
+ *    它由**引擎崩溃/自动重启**产生，不是用户动作的结果。自动重启风暴下每轮 turn/end 都产一条
+ *    report 通知 ⇒ 每轮 heads-up 一次，用户看到的就是「频繁弹窗」，而弹窗里没有任何可操作内容。
+ *    注意：本函数只决定 **popup（heads-up）**，不决定投递——report 条目照常产出、照常进通知栏
+ *    （见 :364 的 popup 字段与壳侧 NotifyCenter.formDecision 的降级分支），所以「任务被中断」
+ *    这条事实仍然可见，只是不再打断用户。
+ *
+ * 弹窗（return true）——其余四种 completed / error / blocked / max-tokens：这些要么是用户
+ * 主动发起的任务有了结果，要么是需要用户知道并可能处理的终态。
+ *
+ * default（未知 kind）保持 return true：上游新增 kind 时必须可见（否则用户永远收不到
+ * 「任务结束了」），由调用方同时记日志。
  */
 export function shouldPopupReport(kind: TurnEndKindOrUnknown): boolean {
   switch (kind) {
@@ -82,9 +95,10 @@ export function shouldPopupReport(kind: TurnEndKindOrUnknown): boolean {
     case 'error':
     case 'blocked':
     case 'max-tokens':
-    case 'interrupted':
       return true
     case 'aborted':
+    case 'interrupted':
+      // 同组理由：都不是「用户要的结果」，且都不需要用户当场处理（详见上方文档注释）。
       return false
     default:
       // 未知 kind 也必须可见（否则上游新增 kind 时用户永远收不到「任务结束了」），

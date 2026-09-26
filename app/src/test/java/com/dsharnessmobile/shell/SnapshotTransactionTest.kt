@@ -1084,4 +1084,58 @@ class SnapshotTransactionTest {
     }
   }
 
+
+  /**
+   * 0.14.2（D11）反证：被摘除的条目与**同组的其它子条目**共处一个 @BQ@- insert:@BQ@ 组时，
+   * 摘除**只作用于目标条目**，同组的硬清单兄弟必须一字不动。
+   *
+   * 旧实现把「本条目是 insert 组子项」的清理逻辑与「组内还有没有兄弟」的缩进启发式绑在一起，
+   * 误判即整组消失——设备实读形态（@BQ@shell-termux@BQ@ + @BQ@host-web-compat@BQ@ 同组）一旦被
+   * 摘除清单命中就是「更新后静默少两个插件」，而日志只说摘了 1 处。
+   */
+  @Test
+  fun removedProfilePluginDoesNotCollaterallyDropItsGroupSiblings() {
+    val filesDir = tempDir()
+    try {
+      val live = File(filesDir, "live").apply { mkdirs() }
+      val stage = SnapshotTransaction.stageRoot(filesDir)
+      writeRuntime(stage, "new-node", "new-profile")
+      val liveWeb = File(live, "home/.dsh/profiles/web")
+      SnapshotFs.createDirectories(liveWeb)
+      File(liveWeb, "cordis.patch.yml").writeText(
+        listOf(
+          "- insert:",
+          "    - id: dsh-model-sync",
+          "      name: '@aiwayds/dsh-model-sync'",
+          "    - id: host-web-compat",
+          "      name: '@dsh-android/dsh-host-web-compat'",
+          "- id: keep-me",
+          "  name: '@dsh-android/keep-me'",
+          "",
+        ).joinToString("\n"),
+      )
+      File(liveWeb, "package.json").writeText("{}\n")
+
+      SnapshotTransaction.swap(
+        filesDir = filesDir,
+        stagedRoot = stage,
+        usrDir = File(live, "usr"),
+        homeDir = File(live, "home"),
+        preservedNames = preserved,
+        fingerprint = "fp5",
+        startedAt = 6L,
+      )
+
+      val text = File(liveWeb, "cordis.patch.yml").readText()
+      assertFalse("被摘除的条目必须消失", text.contains("id: dsh-model-sync"))
+      assertTrue(
+        "D11：同组的硬清单兄弟必须一字不动（旧实现会连坐整组）",
+        text.contains("id: host-web-compat") && text.contains("@dsh-android/dsh-host-web-compat"),
+      )
+      assertTrue("组里还剩一个子条目 ⇒ 组包装行必须保留", text.contains("- insert:"))
+      assertTrue("无关顶层条目原样保留", text.contains("id: keep-me"))
+    } finally {
+      SnapshotFs.deletePath(filesDir)
+    }
+  }
 }

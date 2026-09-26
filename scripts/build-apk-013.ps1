@@ -44,6 +44,13 @@ Write-Host "== 补丁测试夹具随版门禁 =="
 node (Join-Path $Root "scripts\check-patch-fixtures.mjs") 2>&1
 if ($LASTEXITCODE -ne 0) { Write-Host "夹具未随版，拒绝打包（跑 node scripts\probe-engine-anchors.mjs --fixtures 重生成）"; exit 1 }
 
+# 0.14.2 D3 / B6：死 token 防漂移——我们 CSS 引用的 --dsw-* 必须在上游现存令牌集合里（上游树缺席即 SKIP 计数）。
+# 注意：本门禁**必须紧随自己的守卫**，不得插在别的门禁调用与其 $LASTEXITCODE 守卫之间——
+# PowerShell 的 $LASTEXITCODE 是单一变量，只反映最后一条原生命令；插在中间会让**前一道**门禁的失败被本道覆盖（0.14.2 实修）。
+Write-Host "== 死 token 门禁（D3 防复发）=="
+node (Join-Path $Root "scripts\check-dead-tokens.mjs") 2>&1
+if ($LASTEXITCODE -ne 0) { Write-Host "死 token 引用不在上游现存令牌集合里，拒绝打包（先对齐上游 ui-theme 令牌或删除该引用）"; exit 1 }
+
 # 适配层契约门禁（review C6）：上游 bundle 行引用 / 注入包 lib 产物 / 客户端槽位 / 版本钉台账。
 # 本地链 --require 严格档（上游 dsh/ 与本机 node_modules 都在场）；云端自包含链无这些本机产物，
 # 对应小节按 SKIP 计数（check-release-gates --run --require 在发布链上强制齐全）。

@@ -46,9 +46,15 @@ const checks = [
   ['左栏 position 与实测 viewport 形态一致（手机形态 fixed / 桌面形态非 fixed）',
     formExpr("const col = document.querySelector('[data-dsh-frame] > [class*=sidebarCol]'); return { w: window.innerWidth, mobile, position: col ? getComputedStyle(col).position : 'no-sidebar-col' }"),
     (v) => !!v && v.position !== 'no-sidebar-col' && (v.position === 'fixed') === v.mobile],
-  ['拖拽手柄可见性与实测 viewport 形态一致（手机形态全 display:none；手柄缺席即红）',
-    formExpr("const hs = [...document.querySelectorAll('[data-dsh-frame] [class*=handle]')]; return { w: window.innerWidth, mobile, count: hs.length, hidden: hs.length > 0 && hs.every(h => getComputedStyle(h).display === 'none') }"),
-    (v) => !!v && v.count >= 1 && v.hidden === v.mobile],
+  // 2026-09-26 修正：锚点从 [class*=handle] 换成上游自己的 [data-width-handle]。
+  // 旧锚点恒红的真因是 CSS 属性选择器的子串匹配**大小写敏感** —— 上游真实类名是
+  // wSkVaW_widthHandle（大写 H，见 ui-conversation/.../ConversationWidthControls.tsx:118），
+  // 而 [class*=handle]（小写 h）实测 0 命中；产品侧手柄一直在场且行为正确。
+  // 手柄只在 conversation phase==='active' 时渲染（同文件 :171 phase !== 'active' 即 return null），
+  // 故另加 phase 前置：hero 空白态下手柄本就不该存在，判它等于把「跑到哪个 UI 状态」写进门禁。
+  ['拖拽手柄可见性与实测 viewport 形态一致（手机形态全 display:none；仅 active 会话判）',
+    formExpr("const active = !!document.querySelector('[data-dsh-frame] [data-phase=\"active\"]'); const hs = [...document.querySelectorAll('[data-dsh-frame] [data-width-handle]')]; return { w: window.innerWidth, mobile, active, count: hs.length, hidden: hs.length > 0 && hs.every(h => getComputedStyle(h).display === 'none') }"),
+    (v) => !!v && (v.active ? (v.count >= 1 && v.hidden === v.mobile) : v.count === 0)],
   // 2026-09-24 基线实测（.deploy-tmp/0142-verify-1/probe-table.md）：corner 座位在竖屏 16416 与
   // 横屏 16384（freeform 浮窗 281x522）**都渲染**，故座位存在性两方向都判，不按 --wide 降级。
   // 判据与原「上游附件按钮未被遮蔽」同构：座位存在 + computed display !== none。
@@ -65,7 +71,14 @@ const checks = [
   ['右栏展开键存在性与面板展开态互斥（展开键存在 === 面板未展开）',
     CORNER_PROBE,
     (v) => !!v && v.corner === true && v.button === !v.open],
-  ['我们的「在文件中打开」入口存在（两方向都判）', "!!document.querySelector('[aria-label=\"在文件中打开\"]')", true],
+  // 2026-09-26 修正：加「会话已就绪」前置。上游 ConversationSession.tsx:65-70 在 hideChrome
+  // （无 session / 全 blank）时整段不渲染标题行与工具位 —— 空白 hero 态本就不该有该入口，
+  // 旧断言无条件判存在，结论随「跑前 UI 停在哪个状态」漂移（竖屏有会话恒绿、横屏 hero 恒红，
+  // 上一轮被误读成两方向行为不一致）。会话就绪的真源是 conversation root 的 data-phase="active"；
+  // hero 态按「不该存在」判，两条分支都可证伪。
+  ['我们的「在文件中打开」入口存在（hero 空白态豁免；两方向都判）',
+    "(() => { const active = !!document.querySelector('[data-dsh-frame] [data-phase=\"active\"]'); return { active, present: !!document.querySelector('[aria-label=\"在文件中打开\"]') } })()",
+    (v) => !!v && (v.active ? v.present === true : v.present === false)],
   ['桥 openPathChooser 已注入', "typeof window.androidBridge?.openPathChooser === 'function'", true],
   ['桥 downloadDebugLogs 已退役', "typeof window.androidBridge?.downloadDebugLogs === 'undefined'", true],
   ['桥 pickImage 已退役', "typeof window.androidBridge?.pickImage === 'undefined'", true],
@@ -118,13 +131,18 @@ const checks = [
   ['返回层栈逐层类型全局在场（数组）', "Array.isArray(window.__dshBackKinds)", true],
   ['返回层栈上行桥 dshBackBridge 成对在场（set/get）',
     "typeof window.dshBackBridge?.setAvailable === 'function' && typeof window.dshBackBridge?.getBackAvailable === 'function'", true],
-  // 判据：浮层必须被登记为层、且壳侧同步缓存为真（层数增减由下一条「消费」断言覆盖，避免点击幂等性带来的噪声）。
-  // 形态差异只放一项：2026-09-24 两方向基线实测 —— 桌面分支没有 drawer（读数 kinds=["dialog","menu"]
-  // depth=2 cached=true），手机分支有；而「点入口 → 注册成层 → 壳侧缓存为真 → 消费后层数下降」
-  // 这条链两方向都成立。故只放弃 kinds.includes('drawer')，其余（depth/cached/数组在场）全判；
+  // 判据：浮层必须被登记为层、且壳侧同步缓存为真（层数增减由下一条「消费」断言覆盖）。
+  // 形态差异：手机分支有 drawer、桌面分支没有，故 drawer 形态项只按实测形态判。
   // 分支取自页内实测 innerWidth，不取自 --wide（281x522 的 freeform 浮窗就是手机形态）。
-  ['抽屉/浮层成为返回层且壳侧同步缓存为真（drawer 形态项仅实测手机形态判）',
-    "(async () => { const sleep = (ms) => new Promise(r => setTimeout(r, ms)); const kinds = () => Array.isArray(window.__dshBackKinds) ? window.__dshBackKinds : []; const mobile = window.innerWidth <= " + MOBILE_FORM_MAX_WIDTH + "; if (mobile && !kinds().includes('drawer')) { const b = document.querySelector('[data-dsh-mobile-topbar] button'); if (!b) return 'no-topbar'; b.click(); await sleep(500); } return { mobile, depth: window.__dshBackDepth, kinds: kinds(), cached: window.dshBackBridge?.getBackAvailable?.() }; })()",
+  //
+  // 2026-09-26 修正（D6-c）：旧写法只在手机分支**主动建层**（点顶栏开关开抽屉），桌面分支
+  // 直接读层栈——它的绿依赖「本条之前的检查恰好留了一个 @ 菜单层」。跑到 hero 空白态、或
+  // 前置检查正好把菜单关干净时 depth=0 就恒红（横屏 16384 实测复现：depth=0 kinds=[] cached=false，
+  // 同机点开设置后立刻 depth=1 kinds=['dialog']）。这是「判据真值依赖跑前 UI 状态」的另一种形态。
+  // 现在两条分支都**自己建层**，且都用真实点击（非合成 click）：手机点顶栏开关（抽屉层），
+  // 桌面点侧栏的设置入口（dialog 层）。已在竖屏/横屏两方向各自实测：建层后 depth>=1、cached=true。
+  ['抽屉/浮层成为返回层且壳侧同步缓存为真（两条分支各自建层；drawer 形态项仅手机判）',
+    "(async () => { const sleep = (ms) => new Promise(r => setTimeout(r, ms)); const kinds = () => Array.isArray(window.__dshBackKinds) ? window.__dshBackKinds : []; const mobile = window.innerWidth <= " + MOBILE_FORM_MAX_WIDTH + "; const tap = (el) => { const r = el.getBoundingClientRect(); const x = r.x + r.width / 2; const y = r.y + r.height / 2; el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: x, clientY: y })); el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: x, clientY: y })); el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: x, clientY: y })); el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientX: x, clientY: y })); el.click(); }; if (mobile && !kinds().includes('drawer')) { const b = document.querySelector('[data-dsh-mobile-topbar] button'); if (!b) return 'no-topbar'; tap(b); await sleep(700); } if (!mobile && kinds().length === 0) { const s = [...document.querySelectorAll('button')].find(x => (x.getAttribute('aria-label') || '').trim() === '设置'); if (!s) return 'no-settings-entry'; tap(s); await sleep(1600); } return { mobile, depth: window.__dshBackDepth, kinds: kinds(), cached: window.dshBackBridge?.getBackAvailable?.() }; })()",
     (v) => v && v.depth >= 1 && v.cached === true && Array.isArray(v.kinds)
       && (v.mobile ? v.kinds.includes('drawer') : true)],
   ['层栈消费（__dshBack 弹出该层）→ 层数下降且壳侧缓存回读 false',

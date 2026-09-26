@@ -1,5 +1,5 @@
 {
-  "$comment": "快照瘦身清单（体积审计 2026-08-23/09-07）。node-pty prebuilds：win32/darwin 纯死重（Android 永不加载，含 ~52MB .pdb）；reflinkGlobs：pnpm standalone 跨平台 reflink .node（glob 在双引号内不被 shell 展开——删除必须走 find -name）；misplacedDirs：relocate-snapshot 错位产物（usr/data/data/com.termux 子树，PATH 不会搜到）；orphanGlobalNodePackages：global node_modules 中没有任何消费者、而引擎内嵌副本仍保留的重复包；sourcemapDelete：全树 .map（上游包 35.2MB raw，生产不调试源码）。 engineStalePackages = 基座引擎树里带出的**上一代**包（登记表没有、闭包到不了）：构建期剔除，check-engine-overlay 反向断言其缺席；若上游将来重新引入同名包，构建会主动中止并要求把该条从这里删掉。",
+  "$comment": "快照瘦身清单（体积审计 2026-08-23/09-07）。node-pty prebuilds：win32/darwin 纯死重（Android 永不加载，含 ~52MB .pdb）；reflinkGlobs：pnpm standalone 跨平台 reflink .node（glob 在双引号内不被 shell 展开——删除必须走 find -name）；misplacedDirs：relocate-snapshot 错位产物（usr/data/data/com.termux 子树，PATH 不会搜到）；orphanGlobalNodePackages：global node_modules 中没有任何消费者、而引擎内嵌副本仍保留的重复包；sourcemapDelete：全树 .map（上游包 35.2MB raw，生产不调试源码）。 treeDelete：整树删除（相对 stage/root 的路径）——用于 man 手册页这类整目录死重；extensionDelete：某子树内按扩展名删除（root 相对 stage/root）——用于引擎子树的 .d.ts 类型声明。两者都是**清单驱动**的通用裁剪步（此前只有 sourcemapDelete 一条硬编码特例），由 check-snapshot-builder-output 守「无死键」。 engineStalePackages = 基座引擎树里带出的**上一代**包（登记表没有、闭包到不了）：构建期剔除，check-engine-overlay 反向断言其缺席；若上游将来重新引入同名包，构建会主动中止并要求把该条从这里删掉。",
   "nodePtyPrebuilds": [
     "win32-arm64",
     "win32-x64",
@@ -17,6 +17,19 @@
     "@img/sharp-wasm32"
   ],
   "sourcemapDelete": true,
+  "treeDelete": [
+    {
+      "path": "usr/share/man",
+      "reason": "man 手册页：设备上无任何消费者（无 man 浏览路径），整树删除同时降字节/条目/符号链接三个维度"
+    }
+  ],
+  "extensionDelete": [
+    {
+      "root": "usr/lib/node_modules/@deepseek-ai/dsh",
+      "ext": ".d.ts",
+      "reason": "引擎子树类型声明：Node 运行期执行的是 lib/*.js，.d.ts 不参与执行；全树扫「.js 用 require/import 拉 .ts 说明符」= 0 命中"
+    }
+  ],
   "engineStalePackages": [
     {
       "name": "@deepseek-ai/dsh-code-runtime",

@@ -220,8 +220,9 @@ export async function applyModelPatch(
   settings: SettingsWriteLike | undefined,
   route: string,
   patches: ModelPatch[],
-  logger?: { info?: (msg: string) => void; warn?: (msg: string) => void },
+  logger?: { info?: (msg: string) => void; warn?: (msg: string) => void; trace?: (msg: string) => void },
   stamps?: StampStore,
+  descriptorOverride?: SettingsDescriptorLike,
 ): Promise<WriteResult> {
   if (!settings) return { wrote: false, reason: 'settings-unavailable', changes: [], skipped: [] }
   if (patches.length === 0) return { wrote: false, reason: 'nothing-to-apply', changes: [], skipped: [] }
@@ -229,7 +230,11 @@ export async function applyModelPatch(
   const sourceOf = new Map(patches.map((patch) => [patch.id, patch.source ?? '']))
 
   const run = async (retry: boolean): Promise<WriteResult> => {
-    const descriptor = settings.describe({ namespaces: ['llm-pi-ai'] }).find((d) => d.ns === 'llm-pi-ai')
+    // 复用调用方刚读到的描述符可省掉一次全量 describe（见 index.ts tick 的成本注释）；
+    // 重试路径必须重读（冲突意味着手里那份 revision 已过期）。
+    const descriptor = (!retry && descriptorOverride !== undefined)
+      ? descriptorOverride
+      : settings.describe({ namespaces: ['llm-pi-ai'] }).find((d) => d.ns === 'llm-pi-ai')
     if (!descriptor) return { wrote: false, reason: 'namespace-absent', changes: [], skipped: [] }
     const plan = planModelPatch(modelsOf(descriptor, route), patches, stamps)
     if (plan.changes.length === 0) {
@@ -247,7 +252,14 @@ export async function applyModelPatch(
         logger?.info?.(`dsh-model-capability: SETTINGS_CONFLICT for route ${route}; retrying once`)
         return run(true)
       }
-      logger?.warn?.(`dsh-model-capability: write-back failed for route ${route}: ${(error as Error)?.message ?? String(error)}`)
+      // 诊断（X1，2026-09-25）：logger.warn 在本部署没有落盘承接，写回被拒的真因长期不可见。
+      // 把异常文本 + code + 栈同时交给 logger 与 diag，单行便于 grep。纯增量：不改控制流与返回值。
+      const detail = (error as Error)?.message ?? String(error)
+      const stack = (error as Error)?.stack ?? ''
+      logger?.warn?.(`dsh-model-capability: write-back failed for route ${route}: ${detail}`)
+      logger?.trace?.(`write-back REJECTED route=${route} revision=${String(descriptor.revision)} retry=${String(retry)}`
+        + ` code=${String(code)} exname=${(error as Error)?.name ?? '?'} message=${detail}`
+        + (stack ? ` stack=${stack.replace(/\s+/g, ' ').slice(0, 900)}` : ''))
       return { wrote: false, reason: code === 'SETTINGS_CONFLICT' ? 'conflict-retry-failed' : 'mutate-rejected', changes: [], skipped: plan.skipped, written: [] }
     }
   }
