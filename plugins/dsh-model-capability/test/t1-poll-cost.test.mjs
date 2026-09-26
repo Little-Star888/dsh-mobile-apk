@@ -402,3 +402,218 @@ test('X1-⑧ 反证：不经 deferrer 直接调用会在事务内（说明判据
   })
   assert.equal(inside, true, '对照夹具失效：普通调度应继承上下文')
 })
+
+// ── E-P2-4：S3/S5 合流后，tick 仍不得触发任何网络（T1 常驻 CPU 前科）─────────────
+// 判据是**可数的 fetch 次数**，不是字符串在场：给自动补给喂一个计数 fetch，
+// 断言它一次都没被调用；并断言 describe 次数不因本轮改动增加。
+// 【精确化（P2-S3 启动刷新，2026-09-26）】
+// 旧断言是「自动补给期间 0 次网络」。方案 §2.2 的降级链要求「无缓存/陈旧 -> 后台拉一次」，
+// 所以现在正确的判据是**分档**的，不是放宽：
+//   - 总次数 <= 1（每次进程启动最多一次刷新）；
+//   - 第 2 次及以后恒为 0（tick / 事件 / 轮询路径绝不联网）；
+//   - 无缓存 -> 恰好 1 次；有新鲜缓存 -> 0 次。
+// 两条变异反证见文件末（删刷新 -> 无缓存那档判红；把刷新塞进 tick -> tick 那档判红）。
+const MODELSDEV_URL = 'https://models.dev/api.json'
+
+/** 在隔离 DSH_HOME 下跑一次 apply()，返回该窗口内的 fetch 调用。 */
+async function runWithFetchCounter({ opts = {}, seedCache = null, settleMs = 200 } = {}) {
+  const os = await import('node:os')
+  const fs = await import('node:fs')
+  const path = await import('node:path')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'modelsdev-fetch-'))
+  const savedHome = process.env.DSH_HOME
+  process.env.DSH_HOME = dir
+  if (seedCache) fs.writeFileSync(path.join(dir, 'models-dev.json'), JSON.stringify(seedCache))
+  const calls = []
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    calls.push(String(url))
+    // 返回一个形状正确的最小响应，让刷新路径能走完并落盘
+    return {
+      ok: true, status: 200,
+      text: async () => JSON.stringify({ p: { id: 'p', name: 'P', models: { m: { id: 'm', limit: { context: 1000, output: 100 }, modalities: { input: ['text'] } } } } }),
+    }
+  }
+  let c
+  try {
+    c = makeCtx({ gateway: { baseURL: 'https://a.example/v1', api: 'openai-completions', models: [{ id: 'gw-model' }] } })
+    apply(c.ctx, { startupDelaySeconds: 0, pollIntervalSeconds: 3600, ...opts })
+    await new Promise((r) => setTimeout(r, settleMs))
+    return { calls, state: c.state, dir, home: dir }
+  } finally {
+    globalThis.fetch = realFetch
+    if (c) c.dispose()
+    if (savedHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = savedHome
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+const freshCache = () => ({
+  schema: 1, source: 'models.dev', generatedAt: new Date().toISOString(), modelCount: 0, models: [],
+})
+const staleCache = () => ({
+  schema: 1, source: 'models.dev', generatedAt: new Date(Date.now() - 8 * 86400000).toISOString(), modelCount: 0, models: [],
+})
+
+test('P2-S3 无缓存 -> 启动后台刷新恰好拉 1 次（干净安装上 S3 必须自动生效）', async () => {
+  const { calls } = await runWithFetchCounter({ seedCache: null })
+  assert.equal(calls.length, 1, '无缓存时应恰好拉 1 次，实际 ' + calls.length + '：' + calls.join(', '))
+  assert.equal(calls[0], MODELSDEV_URL)
+})
+
+test('P2-S3 有新鲜缓存 -> 启动不拉（0 次）', async () => {
+  const { calls } = await runWithFetchCounter({ seedCache: freshCache() })
+  assert.deepEqual(calls, [], '新鲜缓存不应产生流量，实际 ' + calls.length + ' 次')
+})
+
+test('P2-S3 缓存陈旧 -> 启动后台刷新恰好拉 1 次', async () => {
+  const { calls } = await runWithFetchCounter({ seedCache: staleCache() })
+  assert.equal(calls.length, 1, '陈旧缓存应恰好重拉 1 次，实际 ' + calls.length)
+})
+
+test('P2-S3 config.modelsDev=false -> 整个 S3 关闭，含启动刷新（0 次）', async () => {
+  const { calls } = await runWithFetchCounter({ opts: { modelsDev: false }, seedCache: null })
+  assert.deepEqual(calls, [], 'S3 关闭时不得拉取，实际 ' + calls.length + ' 次')
+})
+
+test('E-P2-4 tick/事件/轮询路径恒 0 次网络（总次数 <=1，第二次及以后为 0）', async () => {
+  const os = await import('node:os')
+  const fs = await import('node:fs')
+  const path = await import('node:path')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'modelsdev-tick-'))
+  const savedHome = process.env.DSH_HOME
+  // 必须显式隔离 DSH_HOME 并**放入新鲜缓存**：否则这一轮自己就会发起合法的启动刷新，
+  // 判据会依赖开发机上真实 DSH_HOME 的状态（曾因此误判一次）。放新鲜缓存后，
+  // 启动刷新本就不该发生，于是「任何一次 fetch」都是越界，断言最严且确定。
+  process.env.DSH_HOME = dir
+  fs.writeFileSync(path.join(dir, 'models-dev.json'), JSON.stringify(freshCache()))
+  const calls = []
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async (url) => { calls.push(String(url)); throw new Error('tick 不应联网') }
+  let c
+  try {
+    c = makeCtx({ gateway: { baseURL: 'https://a.example/v1', api: 'openai-completions', models: [{ id: 'gw-model' }] } })
+    apply(c.ctx, { startupDelaySeconds: 0, pollIntervalSeconds: 3600 })
+    await new Promise((r) => setTimeout(r, 150))
+    // 主动再触发几轮事件 tick，覆盖 event 路径
+    for (let i = 0; i < 3; i++) { c.emit(EV, 'llm-pi-ai', i + 1); await new Promise((r) => setTimeout(r, 60)) }
+    assert.deepEqual(calls, [], '启动轮/事件路径发生了网络：' + calls.join(', '))
+    assert.ok(calls.length <= 1, '总网络次数应 <=1，实际 ' + calls.length)
+  } finally {
+    globalThis.fetch = realFetch
+    if (c) c.dispose()
+    if (savedHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = savedHome
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('E-P2-4 反证：该计数面确实能观测 fetch（否则上面的空数组毫无判别力）', async () => {
+  const calls = []
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async (url) => { calls.push(String(url)); throw new Error('x') }
+  try {
+    await globalThis.fetch('https://example.invalid/probe').catch(() => undefined)
+    assert.equal(calls.length, 1, '计数面失效：无法观测 fetch')
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
+test('E-P2-4 tick 的 describe 次数不因 S3/S5 合流增加（上界仍为 2）', async () => {
+  const c = makeCtx({
+    gateway: { baseURL: 'https://a.example/v1', api: 'openai-completions', models: [{ id: REAL_ID }] },
+  })
+  apply(c.ctx, { startupDelaySeconds: 0, pollIntervalSeconds: 3600 })
+  await new Promise((r) => setTimeout(r, 150))
+  const used = c.state.describes
+  assert.ok(used <= 2, '启动轮用了 ' + used + ' 次 describe（>2）：S3/S5 合流增加了描述符读取')
+  c.dispose()
+})
+
+// ── E-P2-2 端到端：S3 命中 -> 真的写回 settings ──────────────────────────────
+// 前面的 models-dev.test.mjs 验的是合流函数；这条验的是「合流出来的字段确实走到了 mutate」，
+// 即 S3 不是只在报告里好看。做法：把 models.dev 快照放到 DSH_HOME 下的缓存路径（读缓存，不联网），
+// 启动一轮后断言 settings 里被写入了 models.dev 提供的字段。
+test('E-P2-2 端到端：S3 提供的长尾字段真的写回 settings（离线读缓存）', async () => {
+  const os = await import('node:os')
+  const fs = await import('node:fs')
+  const path = await import('node:path')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'modelsdev-e2e-'))
+  const savedHome = process.env.DSH_HOME
+  process.env.DSH_HOME = dir
+  try {
+    // 造一个「引擎目录里没有、models.dev 里有」的 id
+    const LONG_TAIL = 'vendor-only-long-tail-9b'
+    fs.writeFileSync(path.join(dir, 'models-dev.json'), JSON.stringify({
+      schema: 1, source: 'models.dev', generatedAt: new Date().toISOString(), modelCount: 1,
+      models: [{ id: LONG_TAIL, provider: 'encyclopedia', contextWindow: 131072, maxTokens: 8192, input: ['text'] }],
+    }))
+    const c = makeCtx({ gateway: { baseURL: 'https://a.example/v1', api: 'openai-completions', models: [{ id: LONG_TAIL }] } })
+    apply(c.ctx, { startupDelaySeconds: 0, pollIntervalSeconds: 3600 })
+    await new Promise((r) => setTimeout(r, 200))
+    const entry = c.section.providers.gateway.models.find((m) => m && m.id === LONG_TAIL)
+    assert.ok(c.state.mutates >= 1, 'S3 命中却没有写回（mutates=' + c.state.mutates + '）')
+    assert.equal(entry.contextWindow, 131072, 'models.dev 的 contextWindow 应写回')
+    assert.equal(entry.maxTokens, 8192, 'models.dev 的 maxTokens 应写回')
+    c.dispose()
+  } finally {
+    if (savedHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = savedHome
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('E-P2-2 端到端反证：无 models.dev 缓存时同一 id 不写回（未知保持未知）', async () => {
+  const os = await import('node:os')
+  const fs = await import('node:fs')
+  const path = await import('node:path')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'modelsdev-e2e-'))
+  const savedHome = process.env.DSH_HOME
+  process.env.DSH_HOME = dir
+  try {
+    const LONG_TAIL = 'vendor-only-long-tail-9b'
+    const c = makeCtx({ gateway: { baseURL: 'https://a.example/v1', api: 'openai-completions', models: [{ id: LONG_TAIL }] } })
+    apply(c.ctx, { startupDelaySeconds: 0, pollIntervalSeconds: 3600 })
+    await new Promise((r) => setTimeout(r, 200))
+    const entry = c.section.providers.gateway.models.find((m) => m && m.id === LONG_TAIL)
+    assert.equal(c.state.mutates, 0, '无任何来源却发生了写回（凭空造事实）')
+    assert.equal(entry.contextWindow, undefined)
+    c.dispose()
+  } finally {
+    if (savedHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = savedHome
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// ── P2-S3 结构守卫（与运行期计数互补：一个防「实现被改掉」，一个防「行为退化」）──────
+const SRC_INDEX = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
+const CODE_INDEX = SRC_INDEX.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1')
+
+test('P2-S3 结构：启动刷新有「每进程最多一次」闩锁', () => {
+  assert.match(CODE_INDEX, /let startupRefreshStarted = false/, '找不到启动刷新闩锁声明')
+  // 闩锁必须在真正拉取之前置位，否则失败后会被反复重试（重试风暴）
+  const fn = /const refreshModelsDevOnStartup = async \(\)[\s\S]*?\n  \}/.exec(CODE_INDEX)
+  assert.ok(fn, '找不到 refreshModelsDevOnStartup')
+  const setAt = fn[0].indexOf('startupRefreshStarted = true')
+  const fetchAt = fn[0].indexOf('ensureModelsDev(true')
+  assert.ok(setAt >= 0, '闩锁未被置位')
+  assert.ok(fetchAt > setAt, '闩锁必须在拉取之前置位（否则失败会重试风暴）')
+})
+
+test('P2-S3 结构：自动补给（tick）调用点必须显式禁网', () => {
+  const call = /const found = await discover\(route, \{([^}]*)\}/.exec(CODE_INDEX)
+  assert.ok(call, '找不到 runAutoPass 的 discover 调用')
+  assert.match(call[1], /allowModelsDevNetwork: false/, 'tick 未显式禁网')
+  assert.match(call[1], /useCachedModelsDev: true/, 'tick 未声明只用缓存')
+})
+
+test('P2-S3 结构：apply() 的 diag 行必须报告 modelsDev 状态（可观测性）', () => {
+  assert.match(CODE_INDEX, /modelsDev=\$/m, 'diag 行未报告 modelsDev 状态')
+  assert.match(CODE_INDEX, /const modelsDevStatus = \(\): string =>/, '找不到 modelsDevStatus')
+  for (const s of ['disabled', 'no-cache', 'stale', 'fresh']) {
+    assert.ok(CODE_INDEX.includes("'" + s + "'"), 'modelsDevStatus 缺少状态 ' + s)
+  }
+})

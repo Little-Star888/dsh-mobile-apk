@@ -31,6 +31,31 @@ function Deny-Abi([string]$Abi, [string]$Reason) {
     $script:rejectedAbis += $Abi
 }
 
+# 注入集产物重建（0.14.2 P1 实锤，task-54 F-1）：本地链此前**没有任何构建步**，直接让 inject-all.py
+# 读各包的 lib/。而 lib/ 在两仓都被 gitignore（不随提交走），于是「改了 src 忘了 build」时注入的是
+# **旧产物**——编译、门禁全绿，功能静默缺席（铁律 5 定义的幽灵缺陷）。实测：UI 仓 src 已含「重置链接」
+# （00a5084），lib/client.js 仍是 09-25 旧产物、resetShizukuConnection 命中 0 次；照原链打包，按钮不会出现。
+# 云端链（build-apk.yml）与发布链（build-release.ps1）都先 npm run build，唯独本地链缺——三链口径不一。
+# 放在镜像门禁**之前**：重建若改变了产物，紧接着的镜像门禁会如实判红（提示同步到 apk 副本），
+# 而不是让旧副本混进快照。无 build 脚本的包（dsh-host-web-compat 只有 lib/）跳过。
+Write-Host "== 注入集产物重建（npm run build） =="
+$buildManifest = Get-Content (Join-Path $Root "scripts\plugin-dirs.json") -Raw | ConvertFrom-Json
+# 用前置过滤而不是 continue：本段不是 per-ABI 拒绝路径，而 check-build-chain-abort 按词法把
+# 任何裸 continue 视为「未记账的拒绝」。不为本段去放宽门禁，改写成无 continue 的形态。
+$buildable = @($buildManifest.dirs | Where-Object {
+    $pj = Join-Path (Join-Path $Root $_) "package.json"
+    (Test-Path $pj) -and ((Get-Content $pj -Raw | ConvertFrom-Json).scripts.build)
+})
+foreach ($rel in $buildManifest.dirs) { if ($buildable -notcontains $rel) { Write-Host "  跳过 $rel（无 build 脚本）" } }
+foreach ($rel in $buildable) {
+    Push-Location (Join-Path $Root $rel)
+    npm run build 2>&1 | Out-Host
+    $code = $LASTEXITCODE
+    Pop-Location
+    if ($code -ne 0) { Write-Host "产物重建失败（$rel，exit $code），停止构建"; exit 1 }
+    Write-Host "  已重建 $rel"
+}
+
 # 补丁镜像一致性门禁（0.13.8 PR-A1 / apk #171 残留）：scripts/patches 是双仓镜像面
 # （云端自包含构建用 apk 仓副本），单边演进 = 云端快照静默缺引擎补丁（幽灵缺陷）。
 # registry / apply-patches / README 逐字节 + tests 清单，差异即拒打包。

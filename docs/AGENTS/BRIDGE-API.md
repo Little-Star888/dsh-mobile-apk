@@ -163,6 +163,23 @@ cd ..\plugins\dsh-android-<pkg> && npm run build
 - `unlockRestrictedSettings()`：Android 13+ 一键解锁受限设置（`appops set <pkg> ACCESS_RESTRICTED_SETTINGS allow`，**0.14.0 起走 Shizuku 特权 shell**——内置 adb 已退役，旧文写的「壳侧 ADB 通道」是遗留措辞；未授权/未就绪失败关闭，返回 `{ok,message}`）。
 - 引擎侧只读状态端点 `/api/android/privilege/status` 新增 `control:{a11yEnabled,queue,tokenConfigured}` 与工具 `android_privilege_status` 的 `gates`/`control` 字段。
 
+## 0.14.2 增量（Shizuku「重置链接」——P1，2026-09-26）
+
+> 背景：现场报障 —— Shizuku 已授权、通道一度「可创建」，随后跳成「需要准备」，**重新授权与重启 App 均无效**。
+> 「App 重启无效」排除了「进程内标志位脏了」（那会被重启清掉），指向 **Shizuku 侧的 UserService 实例已僵尸化**。
+> 既有 `readyService` 文案早就写着「在设置页「手机控制」重新连接 Shizuku 会重启 UserService（无需重装）」，
+> 但那条路此前**并不存在**。本节是该承诺被真正实现后的桥面增量。
+
+| 方向 | 方法 | 位置 | 说明 |
+|---|---|---|---|
+| 页面 → 壳 | `resetShizukuConnection()` | `AndroidBridge.kt`（`@JavascriptInterface`）→ MainActivity `onResetShizukuConnection` → `ShizukuTransport.resetConnection(context)` | 用户显式「重置链接」。**非阻塞**：本方法在设置页每次点击上同步执行，**绝不 await 新绑定**（与 `kickBind` 同纪律），重置后的收敛交给既有 2s 轮询 + `kickBind`。**写后回读**：返回 `ShizukuTransport.status()` 的 status JSON（`ok/installed/running/granted/bound/binding/bindAttempts/bindAgeMs/lastError/code/guidance`），页面据此如实展示，**不承诺「已修好」**——能否恢复取决于 Shizuku 服务本身是否还在运行 |
+| 同上（承重墙） | — | `ShizukuTransport.resetConnection` | 三件事缺一不可：① 调 `Shizuku.unbindUserService(args(app), connection, remove = true)` 让 Shizuku 管理器**移除**该 UserService（AAR 实现 = `IShizukuService.removeUserService(conn, forRemove = true)`，本仓实测 disassemble 确认），下次绑定重建干净的；**失败不中断**（`runCatching` + `Log.w`）。② 清我们这一侧：`service/connectedAt` 归零、**僵尸 `bindLatch` countDown 并置 null**（留着会让下一次 `ensureBound` 复用一个永不 countDown 的 latch）、`ShizukuBindState.onReset()` 令 `bindingFlag=false` 使下一次 `beginAttempt` 放行。③ `ControlCarrier.invalidateShizukuCache()` 让 caps 的 5s TTL 缓存立即失效 |
+| 同上（新增结构化 code） | `ShizukuBindCodes.RESET` = `shizuku-user-service-reset` | `ShizukuBindState.kt` | 语义边界：既有四个 mutator 描述「一次尝试的结果」，`onReset()` 描述「用户主动放弃当前通道」——它不假装连上也不假装失败，而是回到「尚未发起」的可重试起点，并让 UI 如实说「已重置」而不是「正在建立」 |
+| 同上（页面消费） | — | `dsh-client-ui-responsive` 手机控制「刷新状态」同行新增「重置链接」 | 复用既有 `settleLinkCall` 结算口径，**不新造口径、不新增定时器**（沿用既有 2s 轮询） |
+
+**计数**：`@JavascriptInterface` 方法数一律由 `scripts/check-bridge-symmetry.mjs` 从源码现取，本节不写死数字。
+**门禁面（已更新）**：`check-bridge-symmetry.mjs` 现扫**三个** surface —— `androidBridge`、`backGateBridge`、**`consoleBridge`（0.14.2 新纳入；此前该桥面的方法不在任何门禁面）**。各 surface 的方法与成员数一律由门禁从源码现取（`node scripts/check-bridge-symmetry.mjs` 的输出行），本节不写死。
+
 ## 0.14.1 增量（Shizuku 引导面与外部链接通道，2026-09-22）
 
 > 背景：0.14.1 UI 审查发现设置页「手机控制」的 Shizuku 区块**读的是 `vdisplayStatus()`**——

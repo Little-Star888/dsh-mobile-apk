@@ -57,6 +57,19 @@ internal object ControlCarrier {
     return ready
   }
 
+  /**
+   * 让 Shizuku caps 缓存立即失效（设置页「重置链接」调用）。
+   *
+   * 为什么必须由重置路径调用：本类用 [SHIZUKU_CACHE_MS]（5s）缓存 `shizukuReady`，目的是
+   * 「回填信封不为此反复打 binder」。但那个缓存在**用户主动重置**后就成了假信息源：
+   * 重置后最多 5 秒内 `caps.shizuku` 仍报旧值，用户会认为按钮没生效。
+   * 只把时间戳置 0（而不是顺手改 ready 值）：下一次读取会**重新真问一次** Shizuku——
+   * 那是唯一权威面，猜一个值就把「缓存失效」变成了「伪造状态」。
+   */
+  fun invalidateShizukuCache() {
+    shizukuCheckedAt = 0L
+  }
+
   /** 幂等启动（EngineService.onCreate 与无障碍服务连接路径都可调用）。 */
   @Synchronized
   fun ensureStarted(context: Context) {

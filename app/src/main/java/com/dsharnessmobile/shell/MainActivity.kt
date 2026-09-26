@@ -983,6 +983,10 @@ class MainActivity : ComponentActivity() {
           ShizukuTransport.kickBind(this)
           ShizukuTransport.status(this).toString()
         },
+        // 0.14.2 P1：设置页「手机控制」的「重置链接」。重置必须在**用户显式点击**时发生
+        // （它会强制移除 Shizuku 侧 UserService），故不做任何自动触发；resetConnection 内部
+        // 绝不同步等待新绑定（UI 路径），重置后的收敛交给既有 2s 轮询 + kickBind。
+        onResetShizukuConnection = { ShizukuTransport.resetConnection(this).toString() },
       ),
       "androidBridge",
     )

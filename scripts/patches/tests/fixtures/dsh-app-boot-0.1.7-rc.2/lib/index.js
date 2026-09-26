@@ -508,6 +508,14 @@ function bundlePatchPaths(packageDir, bundle) {
 	return bundlePatchFiles(bundle).map((file) => join(packageDir, file));
 }
 /**
+* Print each skipped bundle once; loading never prints, so launchers call this once per start.
+* @param binName - the diagnostic prefix.
+* @param profile - the loaded profile.
+*/
+function reportSkippedBundles(binName, profile) {
+	for (const { packageName, reason } of profile.skippedBundles) process.stderr.write(`${binName}: skipping profile bundle ${JSON.stringify(packageName)}: ${reason}\n`);
+}
+/**
 * Resolve a profile's directory under the Harness home.
 * @param name - the profile name (`dsh --profile <name>`).
 * @param home - the Harness home; defaults to {@link resolveDshHome}.
@@ -536,10 +544,16 @@ const DEFAULT_PROFILE_BUNDLES = ["@deepseek-ai/dsh-base"];
 /**
 * The bundles the dsh installation ships for a person to switch on: each a
 * runtime dependency of the installation that declares `dsh.bundle.patch`,
-* selected by no shipped template, and offered switched off by the plugin
-* manager ([rationale](../../../../.agents/notes/implemented/process/2026-09-15-shipped-optional-bundles.md)).
+* an `icon`, and `./locale/*.json` display metadata, selected by no shipped
+* template, and offered switched off by the plugin manager
+* ([rationale](../../../../.agents/notes/implemented/process/2026-09-15-shipped-optional-bundles.md),
+* [admission](../../../../.agents/notes/implemented/architecture/2026-09-21-experimental-capabilities-as-optional-bundles.md)).
 */
-const OPTIONAL_BUNDLES = ["@deepseek-ai/dsh-experimental-voice-input-bundle", "@deepseek-ai/dsh-experimental-agent-team-profile"];
+const OPTIONAL_BUNDLES = [
+	"@deepseek-ai/dsh-experimental-agent-team-profile",
+	"@deepseek-ai/dsh-experimental-voice-input-bundle",
+	"@deepseek-ai/dsh-experimental-auto-review"
+];
 const PROFILE_PATCH_TEMPLATE = `# Your patch layer for this dsh profile, applied after every bundle layer:
 # a top-level YAML array of loader patch entries (id-targeted config
 # overrides, disables, and insert lists; \`!!js\` expressions allowed).
@@ -717,7 +731,7 @@ async function createRuntimeResolution(options) {
 	const { installAnchor, profile, home = resolveDshHome() } = options;
 	const profilesDir = join(home, PROFILES_DIR);
 	const manifest = readOptionalProfileManifest(profile);
-	const { packageNames, packageDirs, declarers, versions } = collectInstallationScopePackages(installAnchor, skippedProfileBundles(profile, manifest));
+	const { packageNames, packageDirs, declarers, versions } = collectInstallationScopePackages(installAnchor, new Set(profile?.skippedBundles.map((skipped) => skipped.packageName)));
 	const profileDeclarers = /* @__PURE__ */ new Map();
 	const profileVersions = /* @__PURE__ */ new Map();
 	const localPackageNames = profile === void 0 ? [] : installedProfilePackageNames(profile, manifest);
@@ -752,17 +766,6 @@ function readOptionalProfileManifest(profile) {
 		if (error.code === "ENOENT") return void 0;
 		throw error;
 	}
-}
-/**
-* Identify selected bundles that did not produce a loaded layer.
-* @param profile - loaded profile, when present.
-* @param manifest - its parsed manifest, when present.
-* @returns selected bundle names missing from the loaded layers, for resolution and diagnostics.
-*/
-function skippedProfileBundles(profile, manifest) {
-	const selected = manifest?.dsh?.profile?.bundles ?? [];
-	const loaded = new Set(profile?.layers.map((layer) => layer.packageName));
-	return new Set(selected.filter((name) => !loaded.has(name)));
 }
 /** Return installed direct dependencies that Node resolves before profile fallback. */
 function installedProfilePackageNames(profile, manifest) {
@@ -905,8 +908,8 @@ function resolveBundleDir(binName, packageName, installAnchor, profileDir) {
 * Load an already initialized profile directory without resolving it through
 * the shared Harness home. This is used by application-owned profiles whose
 * package project and lifecycle belong to that application.
-* Unreadable bundles, and bundles whose own dsh peers the profile does not exempt, are reported
-* on stderr and skipped without changing the manifest.
+* Unreadable bundles, and bundles whose own dsh peers the profile does not exempt, are skipped
+* without changing the manifest and listed in `skippedBundles`; nothing is printed.
 * @param binName - the diagnostic prefix on thrown errors.
 * @param dir - absolute profile package directory.
 * @param installAnchor - absolute path of the owning dsh app's package.json.
@@ -916,6 +919,7 @@ function resolveBundleDir(binName, packageName, installAnchor, profileDir) {
 function loadProfileDirectory(binName, dir, installAnchor, options = {}) {
 	const bundles = readProfileManifest(binName, dir).dsh?.profile?.bundles ?? [];
 	const layers = [];
+	const skippedBundles = [];
 	const exemptions = bundles.length === 0 ? {} : readProfileVersionExemptions(dir);
 	for (const packageName of bundles) try {
 		const packageDir = resolveBundleDir(binName, packageName, installAnchor, dir);
@@ -933,7 +937,10 @@ function loadProfileDirectory(binName, dir, installAnchor, options = {}) {
 			patches
 		});
 	} catch (error) {
-		process.stderr.write(`${binName}: skipping profile bundle ${JSON.stringify(packageName)}: ${String(error)}\n`);
+		skippedBundles.push({
+			packageName,
+			reason: String(error)
+		});
 	}
 	const patchPath = join(dir, PROFILE_PATCH_FILENAME);
 	const patches = options.userLayer !== false && existsSync(patchPath) ? loadOverlayPatches(binName, patchPath) : [];
@@ -942,13 +949,14 @@ function loadProfileDirectory(binName, dir, installAnchor, options = {}) {
 		dir,
 		layers,
 		patchPath,
-		patches
+		patches,
+		skippedBundles
 	};
 }
 /**
 * Load a profile: resolve every `dsh.profile.bundles` entry to its patch
 * layer and parse the profile's own patch file. Unreadable or incompatible bundles
-* are reported on stderr and skipped; profile manifest and user patch errors still throw.
+* are skipped and listed in `skippedBundles`; profile manifest and user patch errors still throw.
 * @param binName - the diagnostic prefix on thrown errors.
 * @param name - the profile name.
 * @param installAnchor - absolute path of the dsh app's package.json (first resolution anchor).
@@ -1583,17 +1591,27 @@ function internalModules() {
 		modern
 	};
 }
+/**
+* Replace a resolver error's message and the same text in its stack.
+* Node's module-hooks thread serializes errors and returns the stack accessor as a read-only configurable
+* data property, so a rejected stack assignment redefines the property value.
+* @param error - resolver error to update in place.
+* @param message - replacement message.
+*/
+function replaceErrorMessage(error, message) {
+	const { message: originalMessage, stack } = error;
+	error.message = message;
+	/* v8 ignore next -- Node's resolver errors always carry a stack */
+	if (stack === void 0) return;
+	const replaced = stack.replace(originalMessage, message);
+	if (!Reflect.set(error, "stack", replaced)) Object.defineProperty(error, "stack", { value: replaced });
+}
 function throwWithImporter(error, routedParent, parent) {
 	const code = error.code;
 	if (error instanceof Error && (code === "ERR_MODULE_NOT_FOUND" || code === "ERR_PACKAGE_PATH_NOT_EXPORTED")) {
 		const routedPath = fileURLToPath(routedParent);
 		const parentPath = fileURLToPath(parent);
-		const originalMessage = error.message;
-		const message = originalMessage.replaceAll(routedParent, parent).replaceAll(routedPath, parentPath);
-		const stack = error.stack;
-		error.message = message;
-		/* v8 ignore next -- Node's resolver errors always carry a stack */
-		if (stack !== void 0) error.stack = stack.replace(originalMessage, message);
+		replaceErrorMessage(error, error.message.replaceAll(routedParent, parent).replaceAll(routedPath, parentPath));
 	}
 	throw error;
 }
@@ -3144,21 +3162,19 @@ async function collectConfigSchemas(profile, entries, resolution, diagnostics = 
 /** Profile schema generation: composition diagnostics, runtime resolution, and boot-free discovery. */
 /**
 * Generate JSON Schema for a prepared profile's ordered patch layers without mounting plugins or evaluating expressions.
-* Reads the profile manifest; imports, Config getters, and lazy builders execute trusted code. Native validators and
+* Imports, Config getters, and lazy builders execute trusted code. Native validators and
 * transform callbacks are not executed. Calls must not overlap another profile-resolution interception; collection
 * releases its interception on success or rejection, while Node retains imported modules. Supplied layers are not mutated.
 * Profile preparation, layer selection, process streams, and exit policy belong to the caller.
-* @param binName - the diagnostic prefix on thrown manifest errors.
 * @param profile - prepared on-disk profile whose directory anchors root module and include resolution.
 * @param layers - already parsed patch lists in application order, including caller-selected home and argv overlays.
 * @param installAnchor - package manifest anchoring the installation's runtime dependencies.
 * @returns a JSON Schema document with declaration references, partial results, and diagnostics under `x-cordis`.
-* @throws when profile metadata, composition, or runtime resolution cannot be prepared.
+* @throws when composition or runtime resolution cannot be prepared.
 */
-async function generateConfigSchema(binName, profile, layers, installAnchor) {
+async function generateConfigSchema(profile, layers, installAnchor) {
 	const diagnostics = [];
-	const manifest = readProfileManifest(binName, profile.dir);
-	for (const packageName of skippedProfileBundles(profile, manifest)) diagnostics.push({
+	for (const { packageName } of profile.skippedBundles) diagnostics.push({
 		level: "error",
 		message: `Selected profile bundle ${JSON.stringify(packageName)} could not be loaded; repair or remove its bundle selection.`
 	});
@@ -4117,4 +4133,4 @@ function addHarnessSourceSection(ctx, sourceRoot) {
 	});
 }
 //#endregion
-export { DEFAULT_PROFILE_BUNDLES, FAIL_LOUD_RELEASE_TIMEOUT_MS, HARNESS_SOURCE_SECTION, LOADER_EXPRESSION_SCHEMA, OPTIONAL_BUNDLES, PROFILES_DIR, PROFILE_COMPATIBILITY_FILENAME, PROFILE_PATCH_FILENAME, PROFILE_TEMPLATES, PluginPackages, StartupError, addHarnessSourceSection, auditStartupEntries, boot, bundlePatchFiles, bundlePatchPaths, composeEntries, createConfigProjector, createRuntimeResolution, evaluatePluginCompatibility, generateConfigSchema, getDshRuntimeVersion, initProfile, installFailLoud, isNativeConfigSchema, loadEnv, loadLayeredEnv, loadOptionalPatches, loadOverlayPatches, loadProfile, loadProfileDirectory, mountRootInclude, pluginCompatibilityWarning, prepareProfileEntries, prepareProfilePatches, readPluginMeta, readProfileCompatibility, readProfileManifest, readProfilePatches, readProfilePlugins, readProfileVersionExemptions, reconcileProfilePatches, reconcileProfilePlugins, removeLinkProjections, renderConfigDump, resolveBundleDir, resolveConfigPath, resolveProfileDir, resolveTelemetryPatch, sanitizeProfile, setProfileVersionExemption, writeProfileBundles, writeProfileManifest };
+export { DEFAULT_PROFILE_BUNDLES, FAIL_LOUD_RELEASE_TIMEOUT_MS, HARNESS_SOURCE_SECTION, LOADER_EXPRESSION_SCHEMA, OPTIONAL_BUNDLES, PROFILES_DIR, PROFILE_COMPATIBILITY_FILENAME, PROFILE_PATCH_FILENAME, PROFILE_TEMPLATES, PluginPackages, StartupError, addHarnessSourceSection, auditStartupEntries, boot, bundlePatchFiles, bundlePatchPaths, composeEntries, createConfigProjector, createRuntimeResolution, evaluatePluginCompatibility, generateConfigSchema, getDshRuntimeVersion, initProfile, installFailLoud, isNativeConfigSchema, loadEnv, loadLayeredEnv, loadOptionalPatches, loadOverlayPatches, loadProfile, loadProfileDirectory, mountRootInclude, pluginCompatibilityWarning, prepareProfileEntries, prepareProfilePatches, readPluginMeta, readProfileCompatibility, readProfileManifest, readProfilePatches, readProfilePlugins, readProfileVersionExemptions, reconcileProfilePatches, reconcileProfilePlugins, removeLinkProjections, renderConfigDump, reportSkippedBundles, resolveBundleDir, resolveConfigPath, resolveProfileDir, resolveTelemetryPatch, sanitizeProfile, setProfileVersionExemption, writeProfileBundles, writeProfileManifest };

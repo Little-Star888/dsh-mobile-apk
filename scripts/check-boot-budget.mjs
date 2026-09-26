@@ -242,7 +242,15 @@ export function parseProbe(text) {
   const body = String(text ?? '')
   const composeDur = [...body.matchAll(/\[perf\] compose #(\d+) at=(\d+)ms dur=(\d+)ms/g)]
     .map((m) => ({ n: Number(m[1]), at: Number(m[2]), dur: Number(m[3]) }))
-  const total = /\[perf\] TOTAL calls=(\d+) totalMs=(\d+)/.exec(body)
+  // G-1 修复（2026-09-25）：原实现用 String.prototype.exec 只取**首条** TOTAL 行——P1 探针是
+  // 在**每次** compose() 返回处各打一对 compose/TOTAL 行，A4 退役后设备 compose 由 1 次变 8 次，
+  // 于是 exec 读到第一条 calls=1 而真值 8，C3 打印「compose 调用数 = 1 ≤ 2 PASS」。
+  // 这是「防线消失却显示绿色」的同形复发：判据本身没写错，是**取值口径**把末次真值丢了。
+  // 改为 matchAll 取**全部**：末条（进程累计计数，单调不减，末条即真值）给出 composeCalls，
+  // 所有行的最大值（maxComposeCalls，防行序被日志轮转/交错打乱时低估）留给 C3 判据。
+  const totalLines = [...body.matchAll(/\[perf\] TOTAL calls=(\d+) totalMs=(\d+)/g)]
+    .map((m) => ({ calls: Number(m[1]), totalMs: Number(m[2]) }))
+  const total = totalLines.length > 0 ? totalLines[totalLines.length - 1] : null
   // P1 在 A5 计数缺席时**故意**打 singles=-1（绝不省字段），所以正则必须收 -1：
   // 缺了这条分支，解析返回 undefined，C5 对设备真值永远不可判定（2026-09-25 实测复现）。
   const bootLines = [...body.matchAll(/\[perf\] boot singles=(-?\d+|n\/a)/g)].map((m) => m[1])
@@ -253,8 +261,14 @@ export function parseProbe(text) {
   const samples = /loopSamples=(\d+)/.exec(body)
   return {
     hasProbe: total !== null,
-    composeCalls: total ? Number(total[1]) : undefined,
-    totalMs: total ? Number(total[2]) : undefined,
+    // composeCalls 取**末条** TOTAL 的 calls：P1 的 stats.calls 是进程内累计计数器，末条即真值。
+    composeCalls: total === null ? undefined : total.calls,
+    totalMs: total === null ? undefined : total.totalMs,
+    // G-1 反向判据面：全部 TOTAL 行 + 行数。C3 用 maxComposeCalls 兜住「末条被截断/乱序」低估，
+    // totalLineCount 让「行数与会话数不符」可判（行数与末次 calls 应当一致）。
+    totalLines,
+    totalLineCount: totalLines.length,
+    maxComposeCalls: totalLines.length > 0 ? Math.max(...totalLines.map((t) => t.calls)) : undefined,
     maxComposeDur: composeDur.length > 0 ? Math.max(...composeDur.map((c) => c.dur)) : undefined,
     composeDur,
     // C5：boot 行是「首次全量 compose 之后」的读数，正是要断言的量（TOTAL 是退出时刻读，不能用）。
@@ -432,14 +446,24 @@ export function runChecks(input, budgets = resolveBudgets([])) {
   }
 
   // ── C3 compose 调用数 ≤ 2（回归哨兵；A4 退役后裸树 2 次，阈值仍可满足，见常量处依据）──
+  //
+  // G-1 修复（2026-09-25）：判据取值改用**全部** TOTAL 行的最大值，而不是首条。原实现下
+  // 多行产物只读到第一条 calls=1，真值 8 时照样打印 PASS（见 parseProbe 处的复现说明）。
+  // 同时断言「TOTAL 行数 == 末次 calls」：P1 的 calls 是进程内累计计数器，每次 compose 返回处
+  // 打一行，故两者必须相等；不等即说明有行被日志轮转截断/解析漏读，读数不可信——判红而非静默取小。
   {
-    const calls = probe.hasProbe ? probe.composeCalls : undefined
+    const calls = probe.hasProbe ? probe.maxComposeCalls : undefined
+    const last = probe.hasProbe ? probe.composeCalls : undefined
+    const lines = probe.totalLineCount ?? 0
     if (calls === undefined) {
       add('C3', 'C3 compose 调用数 ≤ ' + budgets.composeCalls, false, '缺 TOTAL calls= 读数',
         strict ? 'fail' : 'skip')
     } else {
-      add('C3', 'C3 compose 调用数 = ' + calls + ' ≤ ' + budgets.composeCalls, calls <= budgets.composeCalls,
-        'calls=' + calls)
+      const consistent = lines === last
+      add('C3', 'C3 compose 调用数 = ' + calls + '（全部 ' + lines + ' 条 TOTAL 的最大值）≤ ' + budgets.composeCalls,
+        consistent && calls <= budgets.composeCalls,
+        consistent ? 'calls=' + calls + ' 超预算 ' + budgets.composeCalls : ('TOTAL 行数 ' + lines
+          + ' ≠ 末次 calls=' + last + '（累计计数器每次 compose 打一行，不等即有行被截断/漏读，读数不可信）'))
     }
   }
 
@@ -500,6 +524,24 @@ function selfTest() {
       + ' instances=1 firstAt=4000ms singles=' + (o.exitSingles ?? 0)
       + ' loopP99Ms=' + (o.p99 ?? 12) + ' loopSamples=' + (o.samples ?? 5000),
   ].join('\n')
+  // G-1（2026-09-25）：A4 退役后设备一次启动会打 N 条 TOTAL（P1 在每次 compose 返回处各打一行）。
+  // 这个构造器造「最后一次 calls = final、共 lines 条」的真形态，用于 C3 的多行判据反证。
+  const multiTotalProbe = (lines, final) => {
+    const out = []
+    const lastCompose = Math.max(1, final)
+    for (let i = 1; i <= lastCompose; i += 1) {
+      out.push('[perf] compose #' + i + ' at=' + (3400 + i * 40) + 'ms dur=6ms instances=1 records=65 singles=-1')
+    }
+    // TOTAL 行的 calls 序列：前 lines-1 条递增，**末条**强制为 final。
+    // lines === final 时两者自洽（完整体）；lines < final 时末次 calls 大于行数（有行被截断/漏读）。
+    for (let i = 1; i <= lines; i += 1) {
+      const callsValue = i === lines ? final : i
+      out.push('[perf] TOTAL calls=' + callsValue + ' totalMs=' + (i * 6) + ' instances=1 firstAt=3480ms singles=-1'
+        + ' loopP99Ms=12 loopSamples=40')
+    }
+    out.push('[perf] boot singles=-1 records=65')
+    return out.join('\n')
+  }
   const run = (segText, probeOut) => runChecks({
     segments: parseSegments(segText), probe: parseProbe(probeOut), require: true,
   }, resolveBudgets([]))
@@ -532,6 +574,34 @@ function selfTest() {
   {
     const r = run(segLine(), probeText({ dur: 2795, total: 2795, single: true }))
     check('反向对照：单次 compose dur=2795ms → C2 判红', okOf(r, 'C2') === false, 'C2 ok=' + okOf(r, 'C2'))
+  }
+
+  // ④b 【G-1 修复】多行 TOTAL：解析取全部而不是首条；真值 8 必须判红。
+  //     旧实现（`.exec` 取首条）在本输入上读到 calls=1 → 打印 PASS，正是「防线消失却显示绿色」。
+  {
+    const body = multiTotalProbe(8, 8)
+    const parsed = parseProbe(body)
+    check('④b-① 多行 TOTAL 解析取末条（composeCalls=8 而非首条 1）',
+      parsed.composeCalls === 8, 'composeCalls=' + String(parsed.composeCalls))
+    check('④b-② 多行 TOTAL 全部收进 totalLines（8 条）',
+      parsed.totalLineCount === 8, 'totalLineCount=' + String(parsed.totalLineCount))
+    const r = run(segLine(), body)
+    check('④b-③ 真值 calls=8 > 阈值 2 → C3 判红（旧实现此处打印 PASS）',
+      okOf(r, 'C3') === false, 'C3 ok=' + okOf(r, 'C3') + ' label=' + String(resultOf(r, 'C3')?.label ?? ''))
+    check('④b-④ 判红理由点名真值 8 与「全部 N 条」口径',
+      String(resultOf(r, 'C3')?.label ?? '').includes('8') && String(resultOf(r, 'C3')?.label ?? '').includes('全部 8 条'),
+      String(resultOf(r, 'C3')?.label ?? ''))
+    // 行数 ≠ 末次 calls（行被截断/漏读）→ 读数不可信，必须判红而不是静默取小。
+    const truncated = run(segLine(), multiTotalProbe(3, 8))
+    check('④b-⑤ TOTAL 行数(3) ≠ 末次 calls(8) → C3 判红（读数不可信，不静默取小）',
+      okOf(truncated, 'C3') === false, 'C3 ok=' + okOf(truncated, 'C3'))
+    check('④b-⑥ 行数不一致的判红理由点名截断/漏读',
+      String(resultOf(truncated, 'C3')?.detail ?? '').includes('截断'),
+      String(resultOf(truncated, 'C3')?.detail ?? ''))
+    // 多行但都在阈值内 → 必须判绿（证明不是「多行即红」的恒红改写）
+    const within = run(segLine(), multiTotalProbe(2, 2))
+    check('④b-⑦ 多行 TOTAL 且真值 2 ≤ 阈值 → C3 判绿（不是「多行即红」）',
+      okOf(within, 'C3') === true, 'C3 ok=' + okOf(within, 'C3'))
   }
 
   // ⑤ 反向对照：boot singles=56（未延迟）→ C5 必须判红

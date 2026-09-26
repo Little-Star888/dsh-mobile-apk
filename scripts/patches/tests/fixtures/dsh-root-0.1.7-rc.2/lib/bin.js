@@ -228,17 +228,17 @@ async function runCli() {
 			break;
 		}
 		case "plugin": {
-			const { runPlugin } = await import("./plugin-Dr5KNRuz.js");
+			const { runPlugin } = await import("./plugin-DkYIj96-.js");
 			process.exit(await runPlugin(invocation.profile, invocation.args));
 			break;
 		}
 		case "dump-config": {
-			const { runDumpConfig } = await import("./dump-config-D8-AsuR8.js");
+			const { runDumpConfig } = await import("./dump-config-crgOY3tW.js");
 			runDumpConfig(invocation.profile, invocation.defaultOnly, invocation.patches, invocation.fromDefaultProfile);
 			break;
 		}
 		case "dump-config-schema": {
-			const { runDumpConfigSchema } = await import("./dump-config-schema-DyIQpuQH.js");
+			const { runDumpConfigSchema } = await import("./dump-config-schema-DhhNOaro.js");
 			await runDumpConfigSchema(invocation.profile, invocation.patches, invocation.fromDefaultProfile);
 			break;
 		}

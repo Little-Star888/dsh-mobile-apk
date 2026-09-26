@@ -8,6 +8,19 @@ import {
   DEVICE_TOOL_GROUPS,
 } from '../lib/capability-gate.js'
 
+/**
+ * 每个用例一个**隔离的内存解锁态存储**。
+ *
+ * 为什么必须注入：installCapabilityGate 的第三个参数默认是**真文件存储**（落在 DSH_HOME）。
+ * 测试不注入 => 解锁会写进开发者本机真实的 ~/.dsh，并且**第二次运行会读到上次的解锁记录**，
+ * 让「启动时三组全锁」这条既有断言在重复运行下变红（实现期实测踩到，已清理泄漏文件）。
+ * 测试必须自封闭：这里注入内存实现，绝不碰真实文件系统。
+ */
+function isolatedStore() {
+  let saved = []
+  return { read: () => [...saved], write: (groups) => { saved = [...groups] } }
+}
+
 function harness() {
   const registered = []
   const skills = []
@@ -41,7 +54,7 @@ function harness() {
 
 test('facade 常驻注册且名字固定', () => {
   const h = harness()
-  installCapabilityGate(h.ctx)
+  installCapabilityGate(h.ctx, () => ({ a11y: false }), isolatedStore())
   assert.equal(h.registered.length, 1)
   assert.equal(h.registered[0].name, CAPABILITY_TOOL_NAME)
   assert.equal(DEVICE_TOOLS.includes(CAPABILITY_TOOL_NAME), false)
@@ -49,7 +62,7 @@ test('facade 常驻注册且名字固定', () => {
 
 test('skill 目录登记三个能力组（发现 + 先调 facade 指引）', () => {
   const h = harness()
-  installCapabilityGate(h.ctx)
+  installCapabilityGate(h.ctx, () => ({ a11y: false }), isolatedStore())
   const names = h.skills.map((s) => s.name).sort()
   assert.deepEqual(names, ['android-ai-browser', 'android-phone-control', 'android-virtual-display'])
   for (const skill of h.skills) {
@@ -59,7 +72,7 @@ test('skill 目录登记三个能力组（发现 + 先调 facade 指引）', () 
 
 test('agent/created 时按组分别掩蔽；facade 调用后逐组解锁并如实回报', async () => {
   const h = harness()
-  installCapabilityGate(h.ctx, () => ({ a11y: true, shizuku: false }))
+  installCapabilityGate(h.ctx, () => ({ a11y: true, shizuku: false }), isolatedStore())
   const handler = h.events.find(([event]) => event === 'agent/created')?.[1]
   assert.equal(typeof handler, 'function')
   handler({ agent: h.state.agent })
@@ -81,7 +94,7 @@ test('agent/created 时按组分别掩蔽；facade 调用后逐组解锁并如�
 
 test('skill 条目必须带 source（上游 SkillSummary 必填；缺了会在加载时抛错）', () => {
   const h = harness()
-  installCapabilityGate(h.ctx)
+  installCapabilityGate(h.ctx, () => ({ a11y: false }), isolatedStore())
   for (const skill of h.skills) {
     assert.equal(typeof skill.source, 'string')
     assert.ok(skill.source.length > 0)
@@ -91,7 +104,7 @@ test('skill 条目必须带 source（上游 SkillSummary 必填；缺了会在�
 
 test('缺失 skills 服务或作用域注入时降级不抛（fail-open 到今天的可见性）', () => {
   const registered = []
-  installCapabilityGate({ tools: { register: (tool) => { registered.push(tool) } } })
+  installCapabilityGate({ tools: { register: (tool) => { registered.push(tool) } } }, () => ({ a11y: false }), isolatedStore())
   assert.equal(registered.length, 1)
 })
 
@@ -104,7 +117,7 @@ test('缺失 skills 服务或作用域注入时降级不抛（fail-open 到今�
 
 test('A1：未探测（键缺席）不得渲染成「未就绪」，且必须给出可执行动作', async () => {
   const h = harness()
-  installCapabilityGate(h.ctx, () => ({ a11y: true }))
+  installCapabilityGate(h.ctx, () => ({ a11y: true }), isolatedStore())
   const one = await h.registered[0].execute({ group: 'all' }, { agent: h.state.agent })
   assert.deepEqual(one.channels, { a11y: true })
   assert.equal('shizuku' in one.channels, false, '未探测必须是键缺席，不能是 false')
@@ -118,7 +131,7 @@ test('A1：三态必须是三条互不相同的文案（就绪 / 实测未就绪
   const seen = []
   for (const facts of [{ a11y: true, shizuku: true }, { a11y: true, shizuku: false }, { a11y: true }]) {
     const h = harness()
-    installCapabilityGate(h.ctx, () => facts)
+    installCapabilityGate(h.ctx, () => facts, isolatedStore())
     const one = await h.registered[0].execute({ group: 'all' }, { agent: h.state.agent })
     seen.push(one.text.split('\n').find((l) => l.startsWith('- Shizuku')))
   }
@@ -133,7 +146,7 @@ test('A1：channels 允许异步（引擎补探），门禁必须 await 得到�
   installCapabilityGate(h.ctx, async () => {
     await new Promise((resolve) => setTimeout(resolve, 5))
     return { a11y: true, shizuku: true }
-  })
+  }, isolatedStore())
   const one = await h.registered[0].execute({ group: 'all' }, { agent: h.state.agent })
   assert.deepEqual(one.channels, { a11y: true, shizuku: true })
   assert.match(one.text, /Shizuku 特权通道：就绪/)

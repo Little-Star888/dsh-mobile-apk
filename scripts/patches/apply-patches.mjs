@@ -520,88 +520,14 @@ const IMPLS = {
     },
   },
 
-  // ── atomic-stale-lock-F4：孤儿写锁回收（2026-09-10 模拟器实测，scope=engine）──
-  // withFileLock 用 wx 建 <file>.lock 做跨进程写互斥，锁内容就是持有者 pid；释放走 operation 的
-  // finally（rm）。进程被硬杀（用户划掉应用 / 系统 OOM / am force-stop / 壳侧看门狗重启）时 finally
-  // 不执行 → 锁文件永久残留 → 之后每一次写该文件都等到 deadline 抛
-  // "atomic-write: timed out waiting for the writer lock at …/.credentials.yaml.lock"。
-  // 上游注释明写「contender never removes an existing lock… orphan recovery is an operator action」——
-  // 桌面/服务器有位「运维」可以删锁，Android 应用私有目录（/data/data/<pkg>/…）用户无任何可达手段，
-  // 症状等于应用永久起不来（实测：重复引擎进程被清掉后仍 boot 失败，只因残留 .credentials.yaml.lock）。
-  //
-  // 不变量：仅当锁记录的 pid 已消失且锁内容二次核验一致时才回收，且每次获取最多回收一次。
-  // pid 存活用 process.kill(pid, 0)：ESRCH=不存活（可回收），EPERM=存活但非本进程（不回收）。
-  // 读取失败 / 内容非 pid / 二次核验不一致 / 任何异常 → 一律不动锁（退回上游的等待-超时语义）。
-  'atomic-stale-lock-F4': {
-    file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-atomic-write/lib/index.js',
-    scope: 'engine',
-    check: (s) => s.includes('dsh-mobile stale-lock recovery (F4)'),
-    apply: (s) => {
-      if (s.includes('dsh-mobile stale-lock recovery (F4)')) return s
-      const IMPORT_OLD = 'import { lstat, mkdir, rename, rm, writeFile } from "node:fs/promises";'
-      const IMPORT_NEW = 'import { lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";'
-      const HELPER_OLD = '/**\n* Retry cadence for a contended lock.'
-      const HELPER_NEW = [
-        '/**',
-        '* dsh-mobile stale-lock recovery (F4): remove a writer lock whose recorded owner is gone.',
-        '* Returns whether the lock was removed; any unproven case leaves the lock untouched so the',
-        '* upstream wait-and-timeout semantics stay authoritative.',
-        '* @param lockPath - the `<file>.lock` sibling to inspect.',
-        '* @returns `true` when an orphaned lock was removed.',
-        '*/',
-        'async function recoverStaleLock(lockPath) {',
-        '\ttry {',
-        '\t\tconst owner = Number.parseInt((await readFile(lockPath, "utf8")).trim(), 10);',
-        '\t\tif (!Number.isInteger(owner) || owner <= 0) return false;',
-        '\t\tlet alive = true;',
-        '\t\ttry {',
-        '\t\t\tprocess.kill(owner, 0);',
-        '\t\t} catch (error) {',
-        '\t\t\talive = error?.code === "EPERM"; // EPERM: the process exists but is not ours',
-        '\t\t}',
-        '\t\tif (alive) return false;',
-        '\t\tconst confirmed = Number.parseInt((await readFile(lockPath, "utf8")).trim(), 10);',
-        '\t\tif (confirmed !== owner) return false; // a live contender re-took the lock meanwhile',
-        '\t\tawait rm(lockPath, { force: true });',
-        '\t\tconsole.warn(`atomic-write: removed the orphaned writer lock at ${lockPath} (owner pid ${owner} is gone; dsh-mobile F4)`);',
-        '\t\treturn true;',
-        '\t} catch {',
-        '\t\treturn false; // unreadable/unremovable lock: let the deadline decide, as upstream does',
-        '\t}',
-        '}',
-        '/**',
-        '* Retry cadence for a contended lock.',
-      ].join('\n')
-      const LOOP_OLD = '\tlet delay = LOCK_RETRY_INITIAL_MS;'
-      const LOOP_NEW = '\tlet delay = LOCK_RETRY_INITIAL_MS;\n\tlet recovered = false; // dsh-mobile F4: at most one orphan recovery per acquisition'
-      // 上游把 deadline 声明为 const（只读一次就够，因为从不延长）；回收后要重新给一点宽限，
-      // 故这里必须改成 let——功能测试实测：不改则 TypeError: Assignment to constant variable。
-      const DEADLINE_DECL_OLD = '\tconst deadline = Date.now() + (options?.waitMs ?? DEFAULT_LOCK_WAIT_MS);'
-      const DEADLINE_DECL_NEW = '\tlet deadline = Date.now() + (options?.waitMs ?? DEFAULT_LOCK_WAIT_MS); // dsh-mobile F4: extended once after an orphan recovery'
-      const DEADLINE_OLD = '\t\tif (Date.now() >= deadline) throw new Error(`atomic-write: timed out waiting for the writer lock at ${lockPath}`);'
-      const DEADLINE_NEW = [
-        '\t\tif (Date.now() >= deadline) {',
-        '\t\t\tif (!recovered && await recoverStaleLock(lockPath)) {',
-        '\t\t\t\trecovered = true;',
-        '\t\t\t\tdeadline = Date.now() + LOCK_RETRY_MAX_MS * 5;',
-        '\t\t\t\tcontinue;',
-        '\t\t\t}',
-        '\t\t\tthrow new Error(`atomic-write: timed out waiting for the writer lock at ${lockPath}`);',
-        '\t\t}',
-      ].join('\n')
-      for (const [old, label] of [[IMPORT_OLD, 'import 行'], [HELPER_OLD, 'LOCK_RETRY 常量注释'], [LOOP_OLD, 'delay 初始化'], [DEADLINE_DECL_OLD, 'deadline 声明'], [DEADLINE_OLD, '超时 throw']]) {
-        if (!s.includes(old)) throw new Error(`atomic-stale-lock 锚点未命中（${label}）——引擎升级后请人工核对 dsh-atomic-write/lib/index.js`)
-      }
-      s = s.replace(IMPORT_OLD, IMPORT_NEW)
-      s = s.replace(HELPER_OLD, HELPER_NEW)
-      s = s.replace(LOOP_OLD, LOOP_NEW)
-      s = s.replace(DEADLINE_DECL_OLD, DEADLINE_DECL_NEW)
-      s = s.replace(DEADLINE_OLD, DEADLINE_NEW)
-      if (!s.includes('dsh-mobile stale-lock recovery (F4)')) throw new Error('atomic-stale-lock 复核失败——不写回')
-      return s
-    },
-  },
-
+  // ── atomic-stale-lock-F4：0.14.2 rc.2 追版退役（上游原生满足前提）──
+  // 上游 rc.2 的 withFileLock 已自带孤儿锁回收 takeOverExitedLock()：重试循环里 isLockContention
+  // 命中后立即尝试回收（claim 文件独占仲裁 + 回收前二次读锁 + 重新探活），语义比 F4 更严谨——
+  // F4 的「二次核验」仍留 TOCTOU 窗口，上游用带 sha256 的 claim 文件关闭了它，并额外防护
+  // 「死者的 pid 被活进程复用」。实测（rc.2 真产物，.deploy-tmp/lead-verify/f4probe.mjs）：
+  // 孤儿锁 15ms 内成功执行且锁被清除；活锁对照正确超时且锁保留 ⇒ F4 的前提已被上游吸收。
+  // 退役不等于失去守卫：回归就地改写为「撤销不变量守卫」
+  // （scripts/patches/tests/atomic-stale-lock.test.mjs 改为直接对上游真产物断言该能力仍在）。
   // ── attach-durable-F2：附件持久化 Android 三件套（0.13.7 重出对齐，scope=engine）──
   // ① 祖先 fsync 守卫（2026-09-10 实测）：attachment-local 的 ensureDurableDirectory 从 DSH_HOME
   //    一路 fsync 到文件系统根（boundary = parse(home).root），而 Android 应用私有路径的祖先

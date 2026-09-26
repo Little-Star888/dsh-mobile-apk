@@ -53,7 +53,19 @@ adb -s <serial> install -r -t out\v<版本>\dsh-mobile-apk-v<版本>-arm64.apk
 
 **CDP 调试**：`adb shell "cat /proc/net/unix | grep webview_devtools"` → `adb forward tcp:29225 localabstract:<socket>` → `ws://127.0.0.1:29225/devtools/page/<id>`。
 
-**热重载（仅 JS 插件，不含 Kotlin）**：`node scripts/hot-push.mjs --serial <s> --plugin <dir> [--pkg ...] [--restart]`。
+**热推（仅 JS 插件，不含 Kotlin）**：`node scripts/hot-push.mjs --serial <s> --plugin <dir> [--pkg ...] [--restart]`。
+
+**什么时候可以用热推 —— 它是免打包通道，不是绕过验收的通道**：
+
+- **适用**：改动**完全落在快照内 runtime**（`@dsh-android` 插件的 `lib/**`、`client.js`、引擎树 JS）。这类改动的生效链是
+  「本地 `npm run build` → 推进设备快照树 → 引擎重读」，与 APK 打包无关 ⇒ 热推后跑三层验收，**结论对最终 APK 成立**。
+- **不适用（必须走 `build-apk-013.ps1` 全链）**：壳侧 Kotlin（`.kt` 要编译进 dex）、签名/权限/清单、assets 与 `snapshot.tar.xz` 本身，
+  以及任何**面向发布的最终产物**。改了这些还热推 = 验的是旧壳，属假绿。
+- **仍须三层验收**：热推只省掉「打包 + 装机 + 快照重解压」这段等待，**不省任何一层判据**（§2.1）。代码层、CDP 层、ADB 用户层一个不能少。
+- **发布前必须回全链**：热推产物**不进 APK**。任何要随版本发出去的东西，最后都必须由 `build-apk-013.ps1` 重出一遍并重验。
+- **实修（0.14.2 rc.2）**：此前脚本每个落点恒失败（`cp: …/lib/.: Permission denied`）——`adb push` 在 `/data/local/tmp` 建的目录是
+  `0771`（others 可穿越、**不可列目录**），而 `cp -r <stage>/lib/.` 必须列目录；已修为推送后 `chmod -R 755`。
+  根因与复现见 `docs/AGENTS/gotchas.md`，遇到 Permission denied 先查那里，不要手工 `cp` 绕。
 
 ### 2.1 模拟器测试规范（强制；详档 `docs/AGENTS/emulator-test-protocol.md`）
 

@@ -302,6 +302,10 @@ if (peer) {
     // 死 token 门禁（0.14.2 D3 / B6）：它是两条构建链与协调仓 CI 的同一执行面——单边演进会让
     // 云端自包含构建跑到旧副本（对端缺文件即 SKIP），与 ST-17 同型缺陷。
     'scripts/check-dead-tokens.mjs',
+    // 开发期热推（0.14.2 rc.2 纳入）：apk 仓 AGENTS.md §2 明文教这条命令，而脚本此前**只存在于
+    // 协调仓** —— apk 自包含树里那条文档指向一个不存在的文件（实测 ABSENT）。文档承诺与可执行面
+    // 不同源，正是镜像面要防的形态；纳入后任一侧漂移即判红。
+    'scripts/hot-push.mjs',
   ]
   /** 递归列出目录下所有文件（相对路径；node_modules/.git 排除）——目录级镜像面用。 */
   const walkAll = (dir, prefix = '') => {

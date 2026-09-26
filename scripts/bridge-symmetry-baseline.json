@@ -13,6 +13,14 @@
       "kotlinStart": "class BackGateBridge(",
       "ts": "dsh-client-ui-responsive/src/client/mobile/back-stack.ts",
       "tsInlineBlock": "dshBackBridge?:"
+    },
+    {
+      "$comment": "G-6（2026-09-25）：ConsoleActivity.ConsoleBridge 的 6 个方法此前不在任何门禁扫描面（本门禁只扫 androidBridge / backGateBridge）。它的消费者是 assets/console.html 里的普通 JS，没有 TS 类型声明，故用 jsCallMarker 从**真实调用点**取面。",
+      "id": "consoleBridge",
+      "kotlin": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/ConsoleActivity.kt",
+      "kotlinStart": "inner class ConsoleBridge",
+      "ts": "dsh-mobile-apk/app/src/main/assets/console.html",
+      "jsCallMarker": "window.consoleBridge"
     }
   ],
   "pairs": [
@@ -29,7 +37,8 @@
     { "surface": "androidBridge", "method": "copyText", "reason": "页面侧类型面未声明；composer 回退路径直读" },
     { "surface": "androidBridge", "method": "requestAllFilesAccess", "reason": "页面侧类型面未声明；设置页权限引导由壳侧 Intent 承担" },
     { "surface": "androidBridge", "method": "getPickToken", "reason": "页面侧类型面未声明；token 由引擎侧 pick 端点消费，页面不读" },
-    { "surface": "backGateBridge", "method": "getBackAvailable", "reason": "页面侧只声明了上行 setAvailable；getter 供设备侧断言/自证，页面声明待补（本轮登记为已知缺口，不假绿）" }
+    { "surface": "backGateBridge", "method": "getBackAvailable", "reason": "页面侧只声明了上行 setAvailable；getter 供设备侧断言/自证，页面声明待补（本轮登记为已知缺口，不假绿）" },
+    { "surface": "consoleBridge", "method": "ready", "reason": "页面不轮询 ready()：会话状态由壳侧主动 pushStatus() 推给页面（ConsoleActivity.kt:68/114），页面用推来的 state==='ready' 驱动按钮使能，故无调用点。保留为壳侧只读探针面（供调试与外部断言）；G-6 把它纳入扫描面后必须登记，否则删掉它不会有任何门禁报警" }
   ],
   "tsOnly": [],
   "setterWithoutGetter": [],

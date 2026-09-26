@@ -16,15 +16,15 @@
   "private": true,
   "scripts": {
     "build": "tsc -p .",
-    "test": "npm run build && node --test test/capability-probe.test.mjs test/catalog-lookup.test.mjs test/settings-writer.test.mjs test/dialect-gate.test.mjs test/signature-stamp.test.mjs test/t1-poll-cost.test.mjs"
+    "test": "npm run build && node --test test/capability-probe.test.mjs test/catalog-lookup.test.mjs test/settings-writer.test.mjs test/dialect-gate.test.mjs test/signature-stamp.test.mjs test/t1-poll-cost.test.mjs test/models-dev.test.mjs"
   },
   "dependencies": {},
   "peerDependencies": {
-    "@deepseek-ai/dsh-tools": "^0.1.7-rc.1",
+    "@deepseek-ai/dsh-tools": "^0.1.7-rc.2",
     "@deepseek-ai/cordis": "4.0.4"
   },
   "devDependencies": {
-    "@deepseek-ai/dsh-tools": "0.1.7-rc.1",
+    "@deepseek-ai/dsh-tools": "0.1.7-rc.2",
     "@deepseek-ai/cordis": "4.0.4",
     "@types/node": "^24.0.0",
     "typescript": "^5.5.0"

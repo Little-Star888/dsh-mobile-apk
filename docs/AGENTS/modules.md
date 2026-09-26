@@ -30,6 +30,9 @@
 | **ShizukuSupport.kt** | Shizuku 反射探活（历史：引导页状态行只读展示，不参与授权链） | — |
 | **ShizukuTransport.kt** / **ShizukuUserService.kt** | 0.14 新增：特权 transport（应用侧 UserService 生命周期 + shell/root 侧 AIDL v1 实现） | 固定 argv、16KB 输出上限；页面/引擎拿不到原始 binder 或任意 shell 面；授权只能由用户在 Shizuku App 授予（api/provider 13.1.5 已入 gradle） |
 | **ShizukuProbe.kt** | 0.14 新增：Shizuku 五态探针（absent/not-running/denied/prev11/…，fail-closed + guidance） | 与 ShizukuSupport 同走反射；调试/诊断面 |
+| **ShizukuBindState.kt** | 0.14.2 P1 补：绑定态**结构化 code** 单一真源（跨层契约，插件 `shellFailureText` 按 `CONNECTING` 分流） | `binding/attempts/lastError` + 四个既有 mutator（描述「一次尝试的结果」）+ **`onReset()`**（描述「用户主动放弃当前通道」：`bindingFlag=false` + `error=ShizukuBindCodes.RESET`，回到「尚未发起」的可重试起点，**不假装连上也不假装失败**）；`reapIfStale` 为看门狗执行点（非阻塞、幂等） |
+| **ShizukuTransport.resetConnection(context)** | 0.14.2 P1 新增函数：设置页「重置链接」 | 三件事缺一不可——① **承重墙** `Shizuku.unbindUserService(args(app), connection, remove = true)` 让 Shizuku 管理器**移除**僵尸 UserService（失败 `runCatching` + `Log.w`，**不中断重置**）；② 清本侧记账 `service/connectedAt` 归零 + **僵尸 `bindLatch` countDown 并置 null** + `bindState.onReset()`；③ `ControlCarrier.invalidateShizukuCache()` 令 caps 的 5s TTL 立即失效。**同步执行、绝不 await 新绑定**（UI 高频路径，同 `kickBind` 纪律）；返回**写后回读**的 `status()` JSON |
+| **ControlCarrier.invalidateShizukuCache()** | 0.14.2 P1 新增函数：令 `shizukuReady` 缓存立即失效 | **只把时间戳置 0、不顺带改 ready 值**——下一次读取会重新真问一次 Shizuku（唯一权威面）；猜一个值就把「缓存失效」变成了「伪造状态」 |
 | **VdisplayController.kt** / **VdisplayHost.kt** / **VirtualDisplayProbe.kt** | 0.14 新增：虚拟屏 controller（建屏/销毁/`input -d` 探针）+ viewer SurfaceView 宿主 + 建屏 flags 探针 | viewer 几何来自可信 Files stage；`virtual-1` 建成前一律 `screen-not-ready`，绝不映射 display 0 |
 | **BackGate.kt** | 0.14 新增：返回网关（页内层栈信号 → Activity 决策） | `dshBackBridge`（setAvailable/getBackAvailable）供注入层回传层栈可用性 |
 | **ConsoleActivity/ConsoleSession** | 内置终端 | 环境与引擎一致 |
@@ -43,6 +46,28 @@
 | **AdbKeyboardService.kt** / **AdbKeyboardReceiver.kt** | 内嵌 ADBKeyboard 协议 IME（0.13.2 W6） | ADB_INPUT_TEXT/CLEAR 广播 → commitText；实例活跃才提交（canCommit） |
 
 `app/src/main/assets/`：`snapshot.tar.xz`、`snapshot.sha256`、`undo-emergency.mjs`（急救 CLI，UndoGate 用）、`licenses/`（LICENSES 标准文本 + THIRD_PARTY_NOTICES.md，GPL 合规 A2）、`console.html`。
+
+### 4.1 引擎侧插件文件（协调仓 `plugins/`，镜像到本仓同名目录）
+
+> 本表只登记**本轮（0.14.2 P2）新增或职责变化**的插件文件；其余插件文件见协调仓对应 `plugins/*/src/`。
+
+| 文件 | 职责 | 关键点 |
+|---|---|---|
+| `plugins/dsh-model-capability/src/models-dev.ts`（**0.14.2 P2 新增**） | **来源梯 S3**：models.dev 跨厂商百科，补引擎随包目录（S4）查不到的**长尾模型** | 字段路径**本仓实测**（2026-09-26 真实抓取，非抄自他人实现）：provider map `{ <providerId>: { id, name, models: { <modelId>: <entry> } } }`；`entry.limit.context`→contextWindow（8181/8181 在场）、`entry.limit.output`→maxTokens、`entry.modalities.input[]`→input、`entry.reasoning_options[]`→thinkingLevels（4796/8181 在场）。**`values` 数组只存在于 `effort` 变体**（实测四种条目形态：仅 type / type+values / type+min+max / type+min），裸 `type:'toggle'` 或 `budget_tokens` 不点名任何档位。**只保留上列字段、其余全丢**；落盘前先量尺寸，超 `MODELS_DEV_MAX_BYTES`（8 MiB）拒写。`MODELS_DEV_URL = https://models.dev/api.json`（单请求、无 body、无凭据）、`MODELS_DEV_TTL_MS = 7 天`。**S3 与 S4 逐字段仲裁：分歧字段记为冲突且不写入**（`mergeModelsDev`） |
+
+**来源梯全貌**（`capability-probe.ts` 文件头明载，0.14.2 P2 起为六级）：
+
+| 级 | source | 说明 |
+|---|---|---|
+| S1 | `endpoint-descriptor` | 被动 GET 端点自己返回的元数据（无 body、无花费、无副作用） |
+| S2 | `vendor-descriptor` | 按**响应形状**解析厂商 schema |
+| **S3** | `models-dev` | **本批新增**：models.dev 百科（见上行） |
+| S4 | `engine-catalog` | pi-ai 随包目录的精确 model-id 命中 |
+| **S5** | `user-fallback` | **本批新增**：只在用户显式配了 `fallbacks` 时存在，**出厂无默认值** |
+| S6 | `active-probe` | 仅在调用方显式批准时（会发真实最小补全请求） |
+
+**不变量**：没有任何一级报出的能力**保持缺失（绝不猜测）**；每个报出的能力**都带 `source`**；`reasoningEfforts` 是**逐模型**值，本模块**从不**产出供应商级设置。
+**合流不是替换**：S3/S5 是插进既有四级的两级，不是用一个实现替换另一个（判据见 `docs/0.14.2-preview-SHIZUKU-RESET-AND-MODEL-FILL.md` §1）。
 
 ## 5. 桥与通道说明
 
