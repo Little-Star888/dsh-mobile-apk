@@ -64,7 +64,13 @@ export interface PluginConfig {
   autoApply?: boolean
   /** Seconds to wait after startup before the automatic pass (default 8). */
   startupDelaySeconds?: number
-  /** Seconds between capability-signature polls (default 5; in-memory read, no disk I/O). */
+  /**
+   * Fallback safety-net poll interval in seconds (default 120), used only when the
+   * event-driven trigger below is unavailable. The trigger path is
+   * `settings/document-updated`, so this is a backstop rather than the primary
+   * mechanism — see the auto-apply comment in `apply()` for the measured reason it
+   * cannot be 5s.
+   */
   pollIntervalSeconds?: number
   /** Restrict the automatic pass to these routes (default: every declared route). */
   routes?: string[]
@@ -239,14 +245,16 @@ export function apply(ctx: Context, config: PluginConfig = {}) {
   const c = ctx as unknown as CtxLike
   const settings = c.settings
   const log = c.logger?.('dsh-model-capability')
+  // diag() 落在 $DSH_HOME/model-capability.log：引擎 stdout 轮转太快，写回被拒的真因只有这里留得住。
+  const logWithTrace = log === undefined ? undefined : { ...log, trace: diag }
   const snapshot = loadCatalogSnapshot()
   diag(`apply(): settings=${settings ? 'yes' : 'no'} catalog=${snapshot ? `${snapshot.source} models=${String(snapshot.modelCount ?? 0)}` : 'absent'} autoApply=${String(config.autoApply)} startupDelay=${String(config.startupDelaySeconds ?? 8)}`)
   if (snapshot) log?.info?.(`catalog snapshot: ${snapshot.source} / ${String(snapshot.modelCount ?? 0)} models`)
   else log?.info?.('catalog snapshot absent — engine-catalog stage disabled')
 
   /** Resolves the route's API key: explicit settings value first, then the credential ref. */
-  async function resolveConfig(route: string) {
-    const config = providerFromSettings(settings, route)
+  async function resolveConfig(route: string, sectionOverride?: unknown) {
+    const config = providerFromSettings(settings, route, sectionOverride)
     if (!config) return undefined
     const credentials = optionalService<CredentialsLike>(ctx, 'credentials')
     if (!config.apiKey && config.apiKeyEnv && credentials) {
@@ -260,8 +268,12 @@ export function apply(ctx: Context, config: PluginConfig = {}) {
     return config
   }
 
-  async function discover(route: string, options: { active?: boolean; confirm?: boolean; levels?: string[]; offline?: boolean } = {}) {
-    const providerConfig = await resolveConfig(route)
+  async function discover(
+    route: string,
+    options: { active?: boolean; confirm?: boolean; levels?: string[]; offline?: boolean } = {},
+    sectionOverride?: unknown,
+  ) {
+    const providerConfig = await resolveConfig(route, sectionOverride)
     if (!providerConfig) {
       diag(`discover(${route}): providerFromSettings 返回 undefined（路由或 baseURL 不在 llm-pi-ai 里）`)
       return undefined
@@ -347,7 +359,7 @@ export function apply(ctx: Context, config: PluginConfig = {}) {
       const { report } = found
       let applied: Record<string, unknown> | undefined
       if (args.apply) {
-        const result = await applyModelPatch(settings, args.provider, patchesFrom(report), log)
+        const result = await applyModelPatch(settings, args.provider, patchesFrom(report), logWithTrace)
         applied = result as unknown as Record<string, unknown>
         report.notes.push(result.wrote
           ? `已写回 ${result.changes.length} 项：${result.changes.join('；')}`
@@ -386,7 +398,7 @@ export function apply(ctx: Context, config: PluginConfig = {}) {
       if (!found) {
         return { ok: false, text: `未找到提供商路由「${args.provider}」。` } as never
       }
-      const result = await applyModelPatch(settings, args.provider, patchesFrom(found.report), log)
+      const result = await applyModelPatch(settings, args.provider, patchesFrom(found.report), logWithTrace)
       const lines = [summarize(found.report)]
       lines.push(result.wrote
         ? `已写回：${result.changes.join('；')}`
@@ -404,18 +416,60 @@ export function apply(ctx: Context, config: PluginConfig = {}) {
   // 只写「缺失且无歧义」的字段；失败静默落日志。
   //
   // 回归场景（2026-09-10 用户口径）：用户在设置页「添加自定义供应商」后，
-  // 不重启、不手改 settings.yaml，思考档位就应出现。settings 服务只对**自有命名空间**
-  // 暴露 watch，故此处用「轻量签名轮询」：每 pollIntervalSeconds 读一次内存里的
-  // llm-pi-ai 描述符（无磁盘 I/O），签名变化（新增路由/模型）即跑一轮补给。
+  // 不重启、不手改 settings.yaml，思考档位就应出现。
+  //
+  // 【T1 常驻 CPU（2026-09-25）】旧实现用「每 5 秒全量 describe 取签名」实现该回归，
+  // 实测代价是常驻 24-26% CPU（4 次 --cpu-prof：w3 24% / w4 26% / c3 25% / c4 24%，
+  // 证据 .deploy-tmp/boot-attribution/REPORT.md §5）。真因不在本插件的循环，
+  // 而在 describe 的实现：settings 服务没有「只读自有命名空间」的轻量路径，
+  // 每次 describe 都走 configEditor.configuration() → 对**全 profile 每个 entry**
+  // 重做 inherited() = flatten(composeEntries(全量层 patch)) + structuredClone。
+  // 单次 describe 实测 300-1500 ms inclusive（w3 七次调用合计 4218 ms）。
+  // **所以「把 poll 从 5s 调到 30s」只是把同样的全量重算摊薄，不改变单次成本**；
+  // 真正要减的是**describe 的调用次数**。三条并行手段：
+  //   ① 事件驱动：上游在「raw 段变化」时 emit settings/document-updated（出货
+  //      dsh-settings/lib/index.js:521-547 bumpRevision → emitDocumentUpdated，
+  //      经 ctx.events 共享总线派发）。这是**唯一能同时做到「即时」与「零轮询」**的路子。
+  //   ② 兜底轮询：默认 120s（从 5s 提高两个量级），只在上游事件面不可用时兜底。
+  //   ③ 每次 tick 只读一次描述符并在内部复用（旧实现同一 tick 内 describe 2-3 次：
+  //      signatureOf + routesToConsider + 每个 route 的 providerFromSettings）。
+  //
+  // 为什么用事件而不是「只保留轮询但调大间隔」：调大间隔会把「用户添加供应商 → 档位出现」
+  // 的延迟从秒级拉到分钟级，等于用功能退化换 CPU；而事件正是「设置变了」的权威信号，
+  // 既不轮询也不延迟。事件的**数据面**（为什么事件够用、以及与 settings.watch 的关系）
+  // 见下方 subscribeSettingsEvents 的注释。
   if (config.autoApply !== false && settings) {
     const delayMs = Math.max(0, config.startupDelaySeconds ?? 8) * 1000
-    const pollMs = Math.max(2, config.pollIntervalSeconds ?? 5) * 1000
     let signature = ''
+    /** 是否已建立签名基线：未建立时首轮直接跑，省掉一次无意义的比较读。 */
+    let baselineSet = false
+    /** 本 tick 内共享的描述符：避免同一 tick 对 llm-pi-ai 重复 describe。 */
+    let tickSection: unknown
+    /** 事件已触发但本轮尚未消费时置真：tick 看到它即跑一轮，保证「先到的事件不丢」。 */
+    let eventPending = false
+    /** effect 是否已停止（deferrer 的回调在事务外跑，需自行判断存活）。 */
+    const stoppedRef = { value: false }
+
+    /**
+     * 读一次 llm-pi-ai 描述符，并在**本 tick 内**复用给 routesToConsider / signatureOf /
+     * providerFromSettings / applyModelPatch。这是 T1 的第三条手段：旧实现在同一 tick 里
+     * describe 2-3 次，每次都付一次全量 configuration() + structuredClone。
+     * @returns 描述符，读失败时 undefined（调用方按「无路由」处理）。
+     */
+    const readDescriptor = () => {
+      if (tickSection === undefined) {
+        try {
+          tickSection = settings.describe({ namespaces: ['llm-pi-ai'] }).find((d) => d.ns === 'llm-pi-ai')
+        } catch {
+          tickSection = null
+        }
+      }
+      return tickSection === null ? undefined : tickSection as { ns: string; value: unknown; revision: number } | undefined
+    }
 
     const routesToConsider = (): string[] => {
       // describe(options) 的 options 被实现忽略 → 必须按 ns 查找（不能用 [0]）
-      const descriptor = settings.describe({ namespaces: ['llm-pi-ai'] }).find((d) => d.ns === 'llm-pi-ai')
-      const section = descriptor?.value as { providers?: Record<string, unknown> } | undefined
+      const section = readDescriptor()?.value as { providers?: Record<string, unknown> } | undefined
       return config.routes ?? Object.keys(section?.providers ?? {})
     }
 
@@ -426,8 +480,7 @@ export function apply(ctx: Context, config: PluginConfig = {}) {
      */
     const signatureOf = (): string => {
       try {
-        const descriptor = settings.describe({ namespaces: ['llm-pi-ai'] }).find((d) => d.ns === 'llm-pi-ai')
-        return capabilitySignature(descriptor?.value, config.routes)
+        return capabilitySignature(readDescriptor()?.value, config.routes)
       } catch {
         return ''
       }
@@ -439,15 +492,16 @@ export function apply(ctx: Context, config: PluginConfig = {}) {
     const runAutoPass = async () => {
       const routes = routesToConsider()
       diag(`runAutoPass: routes=${JSON.stringify(routes)}`)
+      const descriptor = readDescriptor()
       for (const route of routes) {
         try {
-          const found = await discover(route, { offline: true })
+          const found = await discover(route, { offline: true }, descriptor?.value)
           if (!found) continue
           diag(`runAutoPass(${route}): models=${found.report.models.length} efforts=${JSON.stringify(found.report.models.map((m) => [m.id, m.reasoningEfforts ?? null]))}`)
           const patches = patchesFrom(found.report).filter((patch) => patch.reasoningEfforts !== undefined)
           diag(`runAutoPass(${route}): patches=${patches.length}`)
           if (patches.length === 0) continue
-          const result = await applyModelPatch(settings, route, patches, log, stamps)
+          const result = await applyModelPatch(settings, route, patches, logWithTrace, stamps, descriptor)
           diag(`runAutoPass(${route}): wrote=${result.wrote} reason=${result.reason} changes=${JSON.stringify(result.changes)}`)
           if (result.wrote) log?.info?.(`auto-apply ${route}: ${result.changes.join('；')}`)
         } catch (error) {
@@ -457,25 +511,180 @@ export function apply(ctx: Context, config: PluginConfig = {}) {
       }
     }
 
-    const tick = async () => {
-      const next = signatureOf()
-      diag(`tick: signature=${next.slice(0, 120)} changed=${next !== signature}`)
-      if (next === signature) return
-      signature = next
-      await runAutoPass()
-      // 写回会改变签名，刷新一次基线避免下一轮重复执行
-      signature = signatureOf()
+    /**
+     * 一轮补给检查。`force` 为真时跳过签名短路（事件已经告诉我们「设置变了」，
+     * 不必再花一次 describe 去重新求签名——这正是省 CPU 的关键：事件路径下每轮
+     * 只 describe 一次，轮询路径才需要「先签名后决定」的两次读）。
+     * @param force - 事件驱动路径为 true。
+     */
+    // 轮询 tick 与事件 tick 可能并发；两者共用 tickSection（每 tick 的描述符缓存），
+    // 交叠会互相清掉对方的缓存并多做一次全量 describe。用一个在跑标志串行化：
+    // 跑动期间到达的请求只置 rerun，由当前这轮结束后补跑（不丢事件、不并发）。
+    let ticking = false
+    let rerun = false
+
+    const tick = async (force = false) => {
+      if (ticking) {
+        rerun = true
+        return
+      }
+      ticking = true
+      try {
+        do {
+          rerun = false
+          tickSection = undefined
+          eventPending = false
+          // 首轮（baseline 尚未建立）必须直接跑，不做「先取签名再比较」——
+          // signature 初值是空串，比较必然不等，那次 describe 是纯浪费
+          // （离线实测：启动轮 2 次 describe 里正好有 1 次是它）。
+          if (!force && baselineSet) {
+            const next = signatureOf()
+            diag(`tick: signature=${next.slice(0, 120)} changed=${next !== signature}`)
+            if (next === signature) break
+          } else {
+            diag(force ? 'tick: event-driven (settings/document-updated)' : 'tick: first pass (baseline)')
+          }
+          await runAutoPass()
+          // 写回会改变签名，刷新一次基线避免下一轮重复执行
+          tickSection = undefined
+          signature = signatureOf()
+          baselineSet = true
+          // 跑动期间设置又变了 → 再跑一轮（事件只来自真实写入，不会自旋）
+          if (eventPending) rerun = true
+          force = true
+        } while (rerun)
+      } finally {
+        ticking = false
+      }
+    }
+
+    /**
+     * 把回调送出当前异步上下文（X1 修复，2026-09-25）。
+     *
+     * 为什么必须送出：hmr 用 `AsyncLocalStorage` 标记「事务执行中」
+     * （dsh-hmr/src/index.ts:130 `executing`，:140 嵌套即抛
+     * `HMR transactions cannot be nested`）。`settings/document-updated` 是在**用户那次
+     * 写事务之内**同步 emit 的（出货 settings 的 write → configEditor.edit → hmr.runExclusive），
+     * 所以事件回调里再调 `settings.mutate` → `configEditor.edit` → 又一次 `runExclusive` 就被拒。
+     *
+     * 关键：**在事务内新调度的普通调度器会继承该上下文**——setTimeout / setImmediate /
+     * queueMicrotask / process.nextTick / Promise.then 全部继承（离线实测，
+     * `.deploy-tmp/fix-b1/als-escape.mjs`）。只有**在事务外预建**的 async 资源不会继承：
+     * 预建 MessageChannel 的 onmessage 落在干净上下文（`.deploy-tmp/fix-b1/als3.mjs`，ESCAPED）。
+     * 因此这里在 effect 装配时（彼时不在任何事务内）预建通道，事件到来时只 postMessage。
+     * @returns 送出函数与释放函数。
+     */
+    const createDeferrer = () => {
+      if (typeof MessageChannel === 'function') {
+        const channel = new MessageChannel()
+        let queued: (() => void) | undefined
+        channel.port1.onmessage = () => {
+          const run = queued
+          queued = undefined
+          run?.()
+        }
+        // 不让诊断通道拖住进程退出（Android 上尤其重要）
+        ;(channel.port1 as unknown as { unref?: () => void }).unref?.()
+        ;(channel.port2 as unknown as { unref?: () => void }).unref?.()
+        return {
+          defer: (fn: () => void) => { queued = fn; channel.port2.postMessage(0) },
+          dispose: () => { queued = undefined; channel.port1.close(); channel.port2.close() },
+        }
+      }
+      // 兜底：预建 promise 链（continuation 在事务外注册，同样不继承上下文）
+      // 判据同 als3.mjs 的 premade-gate：第二跳仍为 ESCAPED。
+      let wake: (() => void) | undefined
+      let pending: (() => void) | undefined
+      let closed = false
+      const arm = (): Promise<void> => new Promise<void>((resolve) => { wake = resolve })
+      let gate = arm()
+      void (async () => {
+        for (;;) {
+          await gate
+          if (closed) return
+          gate = arm()
+          const run = pending
+          pending = undefined
+          run?.()
+        }
+      })()
+      return {
+        defer: (fn: () => void) => { pending = fn; wake?.() },
+        dispose: () => { closed = true; pending = undefined; wake?.() },
+      }
+    }
+
+    /**
+     * 订阅「设置文档变化」事件作为主触发器。
+     *
+     * 依据（出货 0.14.1 `dsh-settings/lib/index.js:515-547`）：该服务在**raw 段**变化时
+     * bumpRevision → emitDocumentUpdated('settings/document-updated', ns, revision)，
+     * 经共享的 `ctx.events` 总线 emit 派发；同一总线对所有插件可见（cordis Context
+     * 只在 root 构造一个 EventsService，见 vendor/cordis/src/context.ts:80）。
+     * 因此本插件不需要 `settings.watch`（那是「自有命名空间」的接口，见
+     * `register()` 返回的 scope.watch；llm-pi-ai 归 llm-pi-ai 插件所有，我们不是它的 owner），
+     * 也不需要轮询：事件本身就是「用户改了配置」的权威信号。
+     *
+     * 事件只带 (ns, revision)，不带值——所以回调里仍然要读一次描述符。这次读是**必要的**
+     * 而不是浪费：没有它无从知道新值；而它每「一次真实用户修改」只发生一次，
+     * 不再是「每 5 秒一次」。
+     * @param deferrer - 把 tick 送出当前 HMR 事务的通道（见 createDeferrer）。
+     */
+    const subscribeSettingsEvents = (deferrer: { defer: (fn: () => void) => void }) => {
+      const on = (ctx as unknown as {
+        on?: (name: string, listener: (...args: unknown[]) => void) => () => void
+      }).on
+      if (typeof on !== 'function') {
+        diag('settings/document-updated 不可订阅（ctx.on 缺席）→ 退化为轮询兜底')
+        return undefined
+      }
+      try {
+        return on.call(ctx, 'settings/document-updated', (...args: unknown[]) => {
+          const ns = String(args[0] ?? '')
+          if (ns !== 'llm-pi-ai') return
+          diag(`settings/document-updated ns=${ns} rev=${String(args[1])}`)
+          // 落一个「有变化待消费」标记：tick 在跑则它会在本轮结束后补跑，
+          // 没在跑则这次调用直接跑。两种情况下事件都不会被丢掉。
+          eventPending = true
+          // 必须经 deferrer 送出事务上下文，否则 tick 内的 settings.mutate 会被 hmr 拒绝（X1）。
+          deferrer.defer(() => { if (!stoppedRef.value) void tick(true) })
+        })
+      } catch (error) {
+        diag(`settings/document-updated 订阅失败（${(error as Error)?.message ?? String(error)}）→ 退化为轮询兜底`)
+        return undefined
+      }
     }
 
     c.effect?.(() => {
       let stopped = false
+      stoppedRef.value = false
       diag('auto-apply effect armed')
-      const startup = setTimeout(() => { if (!stopped) void tick() }, delayMs)
-      const interval = setInterval(() => { if (!stopped) void tick() }, pollMs)
+      // deferrer 必须在**事务外**预建：它的 async 资源不能带上 hmr 的事务上下文，
+      // 否则事件回调里触发的写回仍会被 hmr 判为嵌套（见 createDeferrer）。
+      const deferrer = createDeferrer()
+      // 先订阅再决定轮询间隔：事件可用时轮询只是「怕漏事件」的安全网，可以很稀；
+      // 事件不可用时轮询就是**唯一**触发器，稀到 120s 会把「添加供应商 → 档位出现」
+      // 的延迟从秒级退化到 2 分钟（功能退化）。因此间隔按事件面是否可用分两档取：
+      //   事件可用   -> 默认 120s（安全网；常态下永不触发）
+      //   事件不可用 -> 默认 30s （唯一触发器；把延迟与 CPU 折中）
+      // 两档都用 Math.max(30, ...) 钳下界：用户显式配 5s 会被钳到 30，
+      // 这是**有意**的，防止把 poll 配回过 5s 又打回 24-26% 常驻 CPU（见上方成本注释）。
+      const unsubscribe = subscribeSettingsEvents(deferrer)
+      const eventDriven = unsubscribe !== undefined
+      const fallbackSeconds = eventDriven ? 120 : 30
+      const pollMs = Math.max(30, config.pollIntervalSeconds ?? fallbackSeconds) * 1000
+      diag(`poll interval=${String(pollMs / 1000)}s eventDriven=${String(eventDriven)}`)
+      // 启动轮与轮询轮也可能落在别的 hmr 事务里（例如启动期 profile 重载），
+      // 同样经 deferrer 送出，保证任何一路触发都能写回成功。
+      const startTimer = setTimeout(() => { if (!stopped) deferrer.defer(() => { if (!stopped) void tick() }) }, delayMs)
+      const interval = setInterval(() => { if (!stopped) deferrer.defer(() => { if (!stopped) void tick() }) }, pollMs)
       return () => {
         stopped = true
-        clearTimeout(startup)
+        stoppedRef.value = true
+        clearTimeout(startTimer)
         clearInterval(interval)
+        unsubscribe?.()
+        deferrer.dispose()
       }
     })
   } else {
