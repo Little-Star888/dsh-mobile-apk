@@ -713,3 +713,71 @@
     **为什么记进坑位**：「补丁的收益声明会随上游版本过期，但补丁自身不会自动消失」——退役判据必须落在
     **同基线 A/B 实测**上，而不是补丁注释里那句当年成立的数字；连带发现的门禁缺陷还说明「门禁的正向对照
     依赖一个会退役的补丁符号」本身就是漂移源。
+
+177. **热推脚本（hot-push.mjs）长期「自称可用、实际每个落点必失败」：adb push 建的 stage 目录对 run-as 身份不可列目录（2026-09-26）**
+    **现象**：`node scripts/hot-push.mjs --serial 127.0.0.1:16416 --plugin plugins/dsh-android-vdisplay` 恒失败，
+    两个 profile 落点都报 `cp: /data/local/tmp/dsh-hot-push/lib/.: Permission denied`，退出码 1。
+    脚本头注释与实际用法都宣称它可用，而它**从来没有成功过**——因为没人真跑过它（此前开发循环一律走全链打包）。
+    **真因**：`adb push` 在 `/data/local/tmp` 下新建的目录权限是 **`0771`**（`drwxrwx--x shell shell`）——
+    others 位只有「可穿越」（`--x`）**没有「可读」**。而脚本用 `cp -r <stage>/lib/. <target>/` 复制，`cp` 递归时
+    **必须列目录内容**才对，于是以 `run-as`（`u0_aXX`，属 others）身份读 stage 恒得 EACCES。
+    **注意这不是「stage 里文件权限不对」**：文件本身是 `-rw-rw-rw-`（可读），失败的是**目录列举**这一步。
+    **修法**：`adb push` 之后加一步 `adb shell chmod -R 755 <stage>`（只读拷贝源，放开 others 读+穿越即可，
+    不需要写权限给 run-as）。`scripts/hot-push.mjs` 已实修。
+    **判据（可证伪）**：① A/B 实测——不 chmod 时 `cp: …/lib/.: Permission denied`；chmod 755 后同一命令
+    输出 `OK` 并列出 5 个条目；② 修复后脚本自身输出 `HOT-PUSH OK（6 文件 × 2 profile）`、exit 0。
+    **绕法（不推荐，仅作诊断）**：手工逐个 `cp -f <file> <target>/` 能成功（不列目录 ⇒ 不受权限影响），
+    这正是「为什么当初偶发手动热推看起来能行、而脚本从来不行」的原因。**遇到 Permission denied 先查本条，不要手工绕。**
+    **为什么记进坑位**：这条同时暴露了**第三条**「文档承诺 ≠ 可执行面」——`dsh-mobile-apk/AGENTS.md` §2 一直教这条命令，
+    而 `scripts/hot-push.mjs` **只存在于协调仓**，apk 自包含树里那条文档指向一个不存在的文件。
+    故同批把它登记进 `check-patch-mirror.mjs` 的 `MIRROR_TOP`（单边演进即判红），并同步镜像脚本本体。
+
+178. **「App 重启无效」= 根因在 Shizuku 侧的 UserService 实例，只清进程内标志位永远不会好；必须 `remove = true` 强制移除（2026-09-26，P1）**
+    **现象**：Shizuku 已授权、通道一度「可创建」，随后跳成「需要准备」；**重新授权与重启 App 均无效**，设置页刷新多少次都停在坏态。
+    **真因**：**「App 重启无效」本身就是决定性证据**——进程内任何脏标志位都会被重启清掉，既然重启没用，坏态就不在我们这一侧。
+    它指向 **Shizuku 侧那个 UserService 实例已经僵尸化**：绑定请求发出后既不回调也不抛。此时就算我们把 `service = null`、把绑定标志位清零，
+    下一次 `bind` 仍会打回**同一个坏实例**，于是表现成「按钮点了毫无反应」。
+    **修法（`ShizukuTransport.resetConnection`）**：三件事缺一不可 ——
+    ① **承重墙**：调 `Shizuku.unbindUserService(args(app), connection, remove = true)`。该 API 在 AAR 里的实现是
+    `IShizukuService.removeUserService(conn, forRemove = true)`（本仓对 AAR 实测 disassemble 确认），即让 Shizuku 管理器**移除**这个 UserService，
+    下次绑定才会重建一个干净的。**这一步失败也不许中断重置**（`runCatching` 吞掉 + `Log.w`）——否则 Shizuku 侧已死时连「清空我们这一侧」都做不到。
+    ② 清我们这一侧的记账：`service = null` / `connectedAt = 0` / **`bindLatch?.countDown()` 并置 null**（留着僵尸闩会让下一次 `ensureBound` 复用一个永不 countDown 的 latch，
+    重置后仍只是「等满预算再报正在建立」= 按钮看起来没反应）；`ShizukuBindState.onReset()` 令 `bindingFlag = false` 使下一次 `beginAttempt` 必然放行。
+    ③ **`ControlCarrier.invalidateShizukuCache()`**：caps 的 5s TTL 缓存必须立即失效，否则重置后最多 5 秒内界面仍报旧值，用户会认定按钮没用。
+    **纪律**：本方法在设置页每次点击上**同步**执行（UI 高频路径），**绝不 await 新绑定**（与 `kickBind` 同纪律）；重置后的收敛交给既有 2s 轮询 + `kickBind`。
+    返回的是**写后回读的 `status()`**，据此如实展示，**不承诺「已修好」**——能否恢复取决于 Shizuku 服务本身是否还在运行。
+    **判据（可证伪）**：① 重置后 `bindAttempts` **递增**（证明确实又发起了绑定，而不是只把界面刷了一遍）；
+    ② 反证：重置前人为造出「binding 在飞」的态，重置后断言 `binding = false` 且下一步能再次发起；
+    ③ `caps.shizuku` 在重置后 5 秒内即反映新态（证明缓存真的失效了，而不是等 TTL 自然过期）。
+    **为什么记进坑位**：按「重启无效」直觉去查代码是**方向相反**的排查——重启无效恰恰说明要往**进程外**找。这条坑把「症状→该查哪一侧」的映射钉住。
+
+179. **出厂默认值 = 凭空造事实；未知必须保持未知（含「`reasoning === true` 推不出档位集」）（2026-09-26，P2）**
+    **现象**：自定义供应商的路由在引擎目录里查不到对应模型时，思考档位/上下文长度/模态一律缺失，界面无可渲染。
+    **错误做法（初版曾想这么干）**：给一个**出厂默认档位集**或默认上下文长度，让界面「先有东西可显示」。
+    这等于**凭空造事实**——用户会看到一个我们其实并不知晓的能力声明，且它会被当成已确证的元数据继续流向模型与设置。
+    **修法（来源梯，逐级只认显式声明，六级都不中就是「未知」）**：
+    `S1 endpoint-descriptor`（问端点自己返回什么）→ `S2 vendor-descriptor`（按响应形状解析厂商 schema）→
+    **`S3 models.dev`（新，跨厂商长尾；见 `src/models-dev.ts`）** → `S4 engine-catalog`（pi-ai 随包目录的精确 id 命中）→
+    **`S5 user-fallback`（新，只在用户显式配了 `fallbacks` 时存在，出厂无默认值）** → `S6 active-probe`（需显式批准，因它发真实补全请求）。
+    不变量（`capability-probe.ts` 文件头明载）：**没有任何一级报出的能力保持缺失（绝不猜测）**；**每个报出的能力都带 `source`**；
+    `S3` 与 `S4` 同时描述同一 id 时**逐字段仲裁**——**分歧字段记为冲突且不写入**（「没有任何来源声明的事实保持缺席，而不是变成掷硬币」）。
+    **特别提醒（本题最易犯）**：**`reasoning === true` 推不出档位集**。models.dev 的 `reasoning_options[]` 实测有**四种条目形态**
+    （仅 `type` / `type`+`values` / `type`+`min`+`max` / `type`+`min`），只有 **`effort` 变体**才点名档位；裸 `type: 'toggle'` 或 `budget_tokens` **一个档位名都不给**。
+    因此拿不到 `effort` 档位时**保持未知**，**不回退出厂档位集**（Lead 裁决）。
+    **规模与纪律**：models.dev 实测 **223 provider / 8181 模型 / 压缩后约 1.3 MiB**；只保留上列字段（其余全丢），落盘前先量尺寸，超 `MODELS_DEV_MAX_BYTES`（8 MiB）拒写。
+    **网络只在 `ensureModelsDev` 一处**：tick 路径传 `allowNetwork = false` 走**纯缓存读**（`$DSH_HOME/models-dev.json`），**0 次网络**；
+    证据 = E-P2-4 单测（自动补给路径 fetch 计数为空 + 反证证明该计数面确实能观测 fetch + tick 的 describe 次数不因 S3/S5 合流增加，上界仍为 2）。
+    **合流不是替换**：[0.14.2-preview-SHIZUKU-RESET-AND-MODEL-FILL.md](../../../docs/0.14.2-preview-SHIZUKU-RESET-AND-MODEL-FILL.md) §1 的对比结论是
+    **两个实现合流**（S3/S5 作为新增两级插进既有四级），不是用一个替换另一个。
+    **为什么记进坑位**：这类缺陷的形态是「界面看起来对、数据是编的」——最坏的一种，因为没有任何断言会红。
+
+180. **快照指纹相同 ≠ 插件内容相同：设备验收必须逐文件核 sha256（2026-09-26，task-56 实证）**
+    **现象（本轮实测）**：16384 横屏在**同一 APK、同一快照指纹**下，跑的仍是**修复前的旧 `client.js`**（`33072 B / e6da3471`），
+    而仓库权威产物是 `33441 B / 1dc4feeb`。后果是横屏九键 keyCode 全为 0——**看起来装了新包，实际验的是旧插件**。
+    **真因**：`.`snapshot-fingerprint` 只标识**快照包的身份**，不标识**设备上插件树当前的内容**。
+    两者之间还隔着：热推/镜像是否真的落到该设备、profile 是否冷启动重装配、以及**该设备是否从来就没被更新过**。
+    指纹一致只能证明「装的是同一个快照包」，**不能证明「树里的文件是同一份」**。
+    **修法（验收纪律，不是代码修复）**：装机/热推后，对**每个受影响的插件文件**取设备侧 sha256 与仓库产物逐一比对——
+    至少覆盖 `@dsh-android/*/lib/client.js`、`lib/index.js`、`dsh-model-capability/lib/*.js`；**两者必须逐文件一致**才谈验收结论。
+    **判据**：本条是 E-B-2 的依据。任一片不等 ⇒ 该设备的验收结论**作废**（不是「差异可以解释」）。
+    **为什么记进坑位**：它直接否掉了「指纹对上了就放心了」这个看似稳妥的惯例；且该缺陷**只会以「功能不生效」的形态出现**，不会报错。

@@ -1,105 +1,113 @@
 {
   "$comment": "补丁测试夹具台账。source=engine-tgz 的目录由 probe-engine-anchors.mjs --fixtures 从构建期同一批 tgz 写出（内容与快照引擎树逐字节同源）；source=synthetic 的是手写最小复现，必须写明为何不用真产物。check-patch-fixtures.mjs 把「engine-tgz 夹具版本 == contract.baseline」与「每个 fixtures/*-<ver> 目录都在本台账内」两条判红。",
   "fixtures": {
-    "node-addon-require-builtin-0.1.7-rc.1": {
+    "dsh-app-boot-0.1.7-rc.2": {
       "source": "engine-tgz",
-      "engine": "0.1.7-rc.1",
+      "engine": "0.1.7-rc.2",
+      "package": "@deepseek-ai/dsh-app-boot@0.1.7-rc.2",
+      "files": [
+        "lib/index.js"
+      ]
+    },
+    "dsh-atomic-write-0.1.7-rc.2": {
+      "source": "engine-tgz",
+      "engine": "0.1.7-rc.2",
+      "package": "@deepseek-ai/dsh-atomic-write@0.1.7-rc.2",
+      "files": [
+        "lib/index.js"
+      ]
+    },
+    "dsh-attachment-local-0.1.7-rc.2": {
+      "source": "engine-tgz",
+      "engine": "0.1.7-rc.2",
+      "package": "@deepseek-ai/dsh-attachment-local@0.1.7-rc.2",
+      "files": [
+        "lib/index.js"
+      ]
+    },
+    "dsh-client-modules-0.1.7-rc.2": {
+      "source": "engine-tgz",
+      "engine": "0.1.7-rc.2",
+      "package": "@deepseek-ai/dsh-client-modules@0.1.7-rc.2",
+      "files": [
+        "lib/index.js"
+      ]
+    },
+    "dsh-client-resources-0.1.7-rc.2": {
+      "source": "engine-tgz",
+      "engine": "0.1.7-rc.2",
+      "package": "@deepseek-ai/dsh-client-resources@0.1.7-rc.2",
+      "files": [
+        "lib/client.js"
+      ]
+    },
+    "dsh-client-ui-conversation-0.1.7-rc.2": {
+      "source": "engine-tgz",
+      "engine": "0.1.7-rc.2",
+      "package": "@deepseek-ai/dsh-client-ui-conversation@0.1.7-rc.2",
+      "files": [
+        "lib/client.js"
+      ]
+    },
+    "dsh-client-ui-reference-0.1.7-rc.2": {
+      "source": "engine-tgz",
+      "engine": "0.1.7-rc.2",
+      "package": "@deepseek-ai/dsh-client-ui-reference@0.1.7-rc.2",
+      "files": [
+        "lib/client.js"
+      ]
+    },
+    "dsh-fs-local-0.1.7-rc.2": {
+      "source": "engine-tgz",
+      "engine": "0.1.7-rc.2",
+      "package": "@deepseek-ai/dsh-fs-local@0.1.7-rc.2",
+      "files": [
+        "lib/index.js"
+      ]
+    },
+    "dsh-root-0.1.7-rc.2": {
+      "source": "engine-tgz",
+      "engine": "0.1.7-rc.2",
+      "package": "@deepseek-ai/dsh@0.1.7-rc.2",
+      "files": [
+        "lib/bin.js"
+      ]
+    },
+    "dsh-session-persistence-jsonl-0.1.7-rc.2": {
+      "source": "engine-tgz",
+      "engine": "0.1.7-rc.2",
+      "package": "@deepseek-ai/dsh-session-persistence-jsonl@0.1.7-rc.2",
+      "files": [
+        "lib/index.js"
+      ]
+    },
+    "dsh-subprocess-local-0.1.7-rc.2": {
+      "source": "engine-tgz",
+      "engine": "0.1.7-rc.2",
+      "package": "@deepseek-ai/dsh-subprocess-local@0.1.7-rc.2",
+      "files": [
+        "lib/runner-launch-B2zsQ1Dz.js"
+      ]
+    },
+    "node-addon-require-builtin-0.1.7-rc.2": {
+      "source": "engine-tgz",
+      "engine": "0.1.7-rc.2",
       "package": "node-addon-require-builtin@0.1.5",
       "files": [
         "lib/index.js"
       ]
     },
-    "node-addon-system-0.1.7-rc.1": {
+    "node-addon-system-0.1.7-rc.2": {
       "source": "engine-tgz",
-      "engine": "0.1.7-rc.1",
+      "engine": "0.1.7-rc.2",
       "package": "@deepseek-ai/node-addon-system@0.1.2",
       "files": [
         "lib/flock.js"
       ]
     },
-    "dsh-atomic-write-0.1.7-rc.1": {
+    "pi-ai-0.1.7-rc.2": {
       "source": "engine-tgz",
-      "engine": "0.1.7-rc.1",
-      "package": "@deepseek-ai/dsh-atomic-write@0.1.7-rc.1",
-      "files": [
-        "lib/index.js"
-      ]
-    },
-    "dsh-attachment-local-0.1.7-rc.1": {
-      "source": "engine-tgz",
-      "engine": "0.1.7-rc.1",
-      "package": "@deepseek-ai/dsh-attachment-local@0.1.7-rc.1",
-      "files": [
-        "lib/index.js"
-      ]
-    },
-    "dsh-session-persistence-jsonl-0.1.7-rc.1": {
-      "source": "engine-tgz",
-      "engine": "0.1.7-rc.1",
-      "package": "@deepseek-ai/dsh-session-persistence-jsonl@0.1.7-rc.1",
-      "files": [
-        "lib/index.js"
-      ]
-    },
-    "dsh-fs-local-0.1.7-rc.1": {
-      "source": "engine-tgz",
-      "engine": "0.1.7-rc.1",
-      "package": "@deepseek-ai/dsh-fs-local@0.1.7-rc.1",
-      "files": [
-        "lib/index.js"
-      ]
-    },
-    "dsh-client-modules-0.1.7-rc.1": {
-      "source": "engine-tgz",
-      "engine": "0.1.7-rc.1",
-      "package": "@deepseek-ai/dsh-client-modules@0.1.7-rc.1",
-      "files": [
-        "lib/index.js"
-      ]
-    },
-    "dsh-root-0.1.7-rc.1": {
-      "source": "engine-tgz",
-      "engine": "0.1.7-rc.1",
-      "package": "@deepseek-ai/dsh@0.1.7-rc.1",
-      "files": [
-        "lib/bin.js"
-      ]
-    },
-    "dsh-app-boot-0.1.7-rc.1": {
-      "source": "engine-tgz",
-      "engine": "0.1.7-rc.1",
-      "package": "@deepseek-ai/dsh-app-boot@0.1.7-rc.1",
-      "files": [
-        "lib/index.js"
-      ]
-    },
-    "dsh-client-ui-conversation-0.1.7-rc.1": {
-      "source": "engine-tgz",
-      "engine": "0.1.7-rc.1",
-      "package": "@deepseek-ai/dsh-client-ui-conversation@0.1.7-rc.1",
-      "files": [
-        "lib/client.js"
-      ]
-    },
-    "dsh-client-resources-0.1.7-rc.1": {
-      "source": "engine-tgz",
-      "engine": "0.1.7-rc.1",
-      "package": "@deepseek-ai/dsh-client-resources@0.1.7-rc.1",
-      "files": [
-        "lib/client.js"
-      ]
-    },
-    "dsh-client-ui-reference-0.1.7-rc.1": {
-      "source": "engine-tgz",
-      "engine": "0.1.7-rc.1",
-      "package": "@deepseek-ai/dsh-client-ui-reference@0.1.7-rc.1",
-      "files": [
-        "lib/client.js"
-      ]
-    },
-    "pi-ai-0.1.7-rc.1": {
-      "source": "engine-tgz",
-      "engine": "0.1.7-rc.1",
+      "engine": "0.1.7-rc.2",
       "package": "@earendil-works/pi-ai@0.85.1",
       "files": [
         "dist/api/openai-completions.js"

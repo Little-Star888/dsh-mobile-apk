@@ -91,14 +91,18 @@ internal object ShellOps {
   private fun exec(context: Context, args: JSONObject): JSONObject {
     val command = args.optString("command", "")
     if (command.isBlank()) return fail("shExec 缺少 command", "shell-empty")
-    scopeDenied(context, command)?.let { return it }
+    scopeDenied(context, command)?.let {
+      // G-7：执行点拒绝**必须落账**（旧实现 `return` 早于 audit，安全事件 screen-out-of-scope 零留痕）
+      audit(context, "shExec", command, ControlAudit.RESULT_DENIED)
+      return it
+    }
     val result = ShizukuTransport.runShell(
       context,
       command,
       timeoutMs = args.optInt("timeoutMs", 20_000),
       capture = args.optBoolean("capture", false),
     )
-    audit(context, "shExec", command, result.optBoolean("ok"))
+    audit(context, "shExec", command, resultOf(result))
     return result.put("op", "shExec").put("transport", "shizuku")
   }
 
@@ -107,7 +111,7 @@ internal object ShellOps {
     val local = args.optString("local", "")
     if (remote.isBlank() || local.isBlank()) return fail("shPull 需要 remote 与 local", "shell-path-missing")
     val result = ShizukuTransport.pullFile(context, remote, local)
-    audit(context, "shPull", "$remote -> $local", result.optBoolean("ok"))
+    audit(context, "shPull", "$remote -> $local", resultOf(result))
     return result.put("op", "shPull").put("transport", "shizuku")
   }
 
@@ -116,7 +120,7 @@ internal object ShellOps {
     val remote = args.optString("remote", "")
     if (local.isBlank() || remote.isBlank()) return fail("shPush 需要 local 与 remote", "shell-path-missing")
     val result = ShizukuTransport.pushFile(context, local, remote)
-    audit(context, "shPush", "$local -> $remote", result.optBoolean("ok"))
+    audit(context, "shPush", "$local -> $remote", resultOf(result))
     return result.put("op", "shPush").put("transport", "shizuku")
   }
 
@@ -124,7 +128,7 @@ internal object ShellOps {
     val remote = args.optString("remote", "")
     if (remote.isBlank()) return fail("shRemove 需要 remote", "shell-path-missing")
     val result = ShizukuTransport.removeRemote(context, remote)
-    audit(context, "shRemove", remote, result.optBoolean("ok"))
+    audit(context, "shRemove", remote, resultOf(result))
     return result.put("op", "shRemove").put("transport", "shizuku")
   }
 
@@ -583,20 +587,37 @@ internal object ShellOps {
   internal fun commandDisplayTokens(command: String): List<String> =
     displayOptionsIn(command).map { it.second }
 
-  private fun audit(context: Context, op: String, detail: String, ok: Boolean) {
+  /**
+   * 落一条审计。
+   *
+   * G-7（2026-09-25）：`result` 由调用方按**真实结果**传入（[ControlAudit.RESULT_OK] /
+   * [ControlAudit.RESULT_FAILED] / [ControlAudit.RESULT_DENIED]），不再恒为 ok。
+   * `detail` 已截断到 512 字符，避免把整条命令行（可能含长路径）写爆审计文件。
+   *
+   * @param context 用于解析 filesDir 与 Shizuku uid。
+   * @param op 动作名（shExec / shPull / shPush / shRemove）。
+   * @param detail 可读摘要（命令或路径对）。
+   * @param result 真实结果三态之一。
+   */
+  private fun audit(context: Context, op: String, detail: String, result: String) {
     val uid = ShizukuTransport.identity(context).optInt("uid", -1)
     ControlAudit.log(
       context,
       op,
+      result,
       mapOf(
         "transport" to "shizuku",
         "uid" to uid,
         "op" to op,
         "detail" to detail.take(512),
-        "ok" to ok,
+        "ok" to (result == ControlAudit.RESULT_OK),
       ),
     )
   }
+
+  /** 由 Shizuku 结果对象取真实结果串（ok=true → ok，否则 failed）。 */
+  internal fun resultOf(result: JSONObject): String =
+    if (result.optBoolean("ok")) ControlAudit.RESULT_OK else ControlAudit.RESULT_FAILED
 
   private fun fail(message: String, reason: String): JSONObject = JSONObject()
     .put("__error", message)

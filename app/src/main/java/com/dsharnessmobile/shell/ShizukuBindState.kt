@@ -1,5 +1,7 @@
 package com.dsharnessmobile.shell
 
+import org.json.JSONObject
+
 /**
  * Shizuku UserService 绑定状态机（**纯逻辑**，JVM 可直接测；不触碰 Android / Shizuku 类）。
  *
@@ -88,6 +90,27 @@ internal class ShizukuBindState(private val watchdogMs: Long) {
     error = errorCode
     Unit
   }
+
+  /**
+   * 用户显式「重置链接」：把绑定态清空，使下一次 [beginAttempt] 必然放行。
+   *
+   * ── 为什么不能只清自己进程的标志位（本按钮的承重墙）────────────────────────────
+   * 现场：Shizuku 已授权的情况下从「可创建」跳成「需要准备」，**重新授权与重启 App 均无效**。
+   * 「App 重启无效」是决定性证据——它排除了「我们进程内标志位脏了」（那会被重启清掉），
+   * 指向 **Shizuku 侧的 UserService 实例处于坏态**（绑定请求发出后既不回调也不抛，成为僵尸）。
+   * 因此真正的修复动作在 [ShizukuTransport.resetConnection]：调 `Shizuku.unbindUserService(…, remove = true)`
+   * 让 Shizuku 管理器**移除**这个 UserService，下次绑定重建一个干净的。本方法只负责把**我们这一侧**的
+   * 记账复位到「可以重新发起」——两者缺一，按钮都不会真的有效。
+   *
+   * 语义边界（不得与四个既有 mutator 混淆）：既有 mutator 描述「一次尝试的结果」，本方法描述
+   * 「用户主动放弃当前通道」；它不假装连上、也不假装失败，而是回到「尚未发起」的可重试起点，
+   * 同时用 [ShizukuBindCodes.RESET] 让 UI 如实说「已重置」而不是「正在建立」。
+   */
+  fun onReset() = synchronized(lock) {
+    bindingFlag = false
+    error = ShizukuBindCodes.RESET
+    Unit
+  }
 }
 
 /** 绑定面的结构化 code（跨层契约：插件 `shellFailureText` 按 `CONNECTING` 分流）。 */
@@ -105,6 +128,12 @@ internal object ShizukuBindCodes {
   const val INVALID_BINDER = "shizuku-user-service-invalid-binder"
 
   const val DISCONNECTED = "shizuku-user-service-disconnected"
+
+  /**
+   * 用户主动「重置链接」后的态：绑定记账已清空，Shizuku 侧旧 UserService 已被请求移除。
+   * 这不是失败，也不是「正在建立」——它是「已重置，可重新发起」的可重试起点。
+   */
+  const val RESET = "shizuku-user-service-reset"
 
   fun bindFailed(t: Throwable): String = "shizuku-user-service-bind-failed:" + t.javaClass.simpleName
 }
@@ -141,7 +170,38 @@ internal fun shizukuBindGuidance(code: String, binding: Boolean, ageMs: Long, wa
       "Shizuku 返回的 binder 无效（UserService 很可能启动失败）。请在 Shizuku 应用内确认其服务仍在运行后重试。"
     code.startsWith("shizuku-user-service-bind-failed") ->
       "Shizuku 拒绝建立通道（$code）。请确认 Shizuku 服务仍在运行、本应用仍被授权后重试。"
+    // ── 重置后的态（三态诚实：说清「已做什么 / 现在什么态 / 还不行怎么办」）──────────
+    // 措辞纪律：不得承诺「一定能修好」——Shizuku 服务本身已死时，本按钮救不活它
+    // （那条路走 status() 既有的 shizuku-not-running 分支）。这里只说我们这一侧做了什么、
+    // 以及用户下一步能做什么。
+    code == ShizukuBindCodes.RESET ->
+      "Shizuku 通道已重置（旧 UserService 已请求移除，绑定态已清空）。本页每 2 秒自动重扫，" +
+        "通道会自行重建；也可直接重试同一命令。若长时间仍未就绪，请确认 Shizuku 服务仍在运行" +
+        "（非 root 设备重启后需用有线/无线调试再次启动）。"
     else ->
       "Shizuku shell 通道未就绪（$code）。请在设置页「手机控制」查看状态与引导。"
   }
 }
+/**
+ * 「重置链接」**动作**的响应组装（纯函数，JVM 可直接测——与 [shizukuBindGuidance] 同族的顶层函数）。
+ *
+ * ── 为什么要单独一个函数（0.14.2 设备实测缺陷的修法）────────────────────────────
+ * 缺陷形态：`resetConnection` 此前直接返回 [ShizukuTransport.status] 快照，而重置**生效后**
+ * 通道尚未绑定，快照的 `ok` 是 `false`；UI 的 `settleLinkCall` 判 `ok === true` 才算成功 ⇒
+ * 界面把「重置成功、通道待重建」渲染成「重置 Shizuku 连接失败」。
+ * 真因是**一个字段被两件事共用**：只读快照的 `ok`（=通道能不能用）被拿去回答动作的成败。
+ *
+ * 本函数把两件事拆到两个字段上，缺一即错：
+ *   - `ok`    = **动作**已执行（恒 true，本函数只被「重置已走完」的路径调用）；
+ *   - `reset` = 本次是重置动作（true，供调用方区分于状态查询）；
+ *   - 其余**就绪面事实**（`code` / `lastError` / `bound` / `binding` / `guidance` / …）
+ *     **原样保留**——它们仍如实说「通道此刻未就绪」。
+ *
+ * 反证（若有人只把 `ok` 置 true 而丢掉就绪字段，或只改文案不动 `ok`，本函数的对应断言判红）：
+ * 见 `ShizukuBindStateTest` 的 `resetResponseReportsTheActionWhileKeepingReadinessFacts`。
+ *
+ * @param status - [ShizukuTransport.status] 的就绪快照（本函数会就地补两个动作面字段）。
+ * @returns 动作面响应；就绪面字段一个不丢、一个不改。
+ */
+internal fun shizukuResetResponse(status: JSONObject): JSONObject =
+  status.put("ok", true).put("reset", true)

@@ -189,8 +189,11 @@ const U = join(STAGE, 'root', 'usr')
 //   keepUnpublished = 未重发布包（树内保留旧版原样）
 // tgz 经 npm 镜像链拉取 + sha512 校验，缓存 .deploy-tmp/engine-overlay/（幂等）。
 // ⚠️ 双份构建脚本（协调仓 + apk 仓云端副本）必须同改，禁止单边演进（AGENTS.md 雷点 10）。
-log('引擎 overlay：0.1.2-rc.1 逐包覆盖…')
+/* 0.14.2 rc.2 追版实修：此处原为硬编码 '0.1.2-rc.1'——追版三次都没人改，构建日志里永远打印
+ * 一个与本次构建无关的版本号（rc.2 构建时日志仍写 0.1.2-rc.1），排查时会把归因带错。
+ * 版本号一律取登记表，不写死。 */
 const OVERLAY = JSON.parse(readCfg('engine-overlay.json'))
+log('引擎 overlay：' + OVERLAY.engineVersion + ' 逐包覆盖…')
 const ENGINE_ROOT_STAGE = join(STAGE, 'root', 'usr/lib/node_modules/@deepseek-ai/dsh')
 const ENGINE_NM_STAGE = join(ENGINE_ROOT_STAGE, 'node_modules')
 const OVERLAY_CACHE = join(ROOT, '.deploy-tmp', 'engine-overlay')

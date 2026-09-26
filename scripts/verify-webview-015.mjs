@@ -35,6 +35,23 @@ const formExpr = (body) => '(() => { const mobile = window.innerWidth <= ' + MOB
  */
 const CORNER_PROBE = "(() => { const c = document.querySelector('[data-conversation-header-corner]'); const p = document.querySelector('[data-sidebar-right-panel]'); return { corner: !!c, panel: !!p, open: !!(p && p.hasAttribute('data-sidebar-right-open')), button: !!(c && c.querySelector('button')) } })()"
 
+/**
+ * 「重置链接」按钮的页内探针（0.14.2 P1）。
+ *
+ * 跨层判据分两步，缺一步只证明一半：
+ *   ① 桥面在场（另一条断言）—— 页面**能**调用；
+ *   ② 本探针 —— 按钮真实渲染且可点，即用户**真的**点得到。只有桥面而 UI 缺席 = 死路，
+ *      正是 0.14.1 审查 P0 记过的形态（指引指向一条不存在的路）。
+ *
+ * 两处实测前置（2026-09-26，都是「判据真值依赖跑前 UI 状态」）：
+ *   a) 本条之前的检查会主动开浮层 → 到达时 dialogs=1，设置按钮的点击被浮层吃掉 ⇒ 先真实关掉浮层；
+ *   b) 设置打开后「手机控制」是**页签**，不点它该区块不挂载（实测 dialog 文本含「通用设置/模型/
+ *      内置插件/…/手机控制/开发者选项」而 #dsh-phone-control-title 为 null）⇒ 补点页签。
+ *
+ * 失败态带上 steps，下次一眼看出卡在哪一步；打不开就如实判红，不用缺失冒充绿。
+ */
+const RESET_BUTTON_PROBE = `(async () => { const sleep = (ms) => new Promise(r => setTimeout(r, ms)); const tap = (el) => { const b = el.getBoundingClientRect(); const x = b.x + b.width / 2; const y = b.y + b.height / 2; el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: x, clientY: y })); el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: x, clientY: y })); el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: x, clientY: y })); el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientX: x, clientY: y })); el.click(); }; const mobile = window.innerWidth <= ${MOBILE_FORM_MAX_WIDTH}; const section = () => !!document.querySelector('#dsh-phone-control-title'); const steps = []; const dlg = () => document.querySelectorAll('[role=dialog]').length; if (!section() && dlg() > 0) { for (let i = 0; i < 5 && dlg() > 0; i++) { const c = [...document.querySelectorAll('[role=dialog] button')].find(b => (b.getAttribute('aria-label') || '').trim() === '关闭'); if (c) tap(c); else document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); await sleep(500); } steps.push('cleared:' + dlg()); } if (!section()) { if (mobile) { const t = document.querySelector('[data-dsh-mobile-topbar] button'); if (t) { tap(t); await sleep(900); steps.push('drawer'); } } const findSettings = () => [...document.querySelectorAll('button')].find(x => (x.getAttribute('aria-label') || '').trim() === '设置'); let s = findSettings(); if (!s) { const t = document.querySelector('[data-dsh-mobile-topbar] button'); if (t) { tap(t); await sleep(600); s = findSettings(); } } if (!s) return 'no-settings-entry'; tap(s); await sleep(2000); steps.push('settings'); if (!section()) { const tab = [...document.querySelectorAll('button,[role=tab]')].find(b => /^手机控制$/.test((b.textContent || '').trim())); if (tab) { tap(tab); await sleep(1200); steps.push('tab'); } } } if (!section()) return 'settings-not-opened:' + steps.join(','); const btn = [...document.querySelectorAll('button')].find(b => /^重置链接$/.test((b.textContent || '').trim())); if (!btn) return 'button-absent'; const rc = btn.getBoundingClientRect(); return { steps, section: true, present: true, disabled: btn.disabled === true, visible: getComputedStyle(btn).display !== 'none', w: Math.round(rc.width), h: Math.round(rc.height) }; })()`
+
 const checks = [
   ['移动形态标记与实测 viewport 一致（判据取自页内 innerWidth，与 --wide 无关）',
     formExpr("const marked = document.documentElement.hasAttribute('data-dsh-mobile-form'); return { w: window.innerWidth, mobile, marked }"),
@@ -151,6 +168,14 @@ const checks = [
   // ── 0.14.0-preview 追加：壳侧状态 getter 在场（计划 §4.3 ST-10/ST-11）──
   ['桥 getImmersiveMode 在场（ST-10 壳侧唯一真源）', "typeof window.androidBridge?.getImmersiveMode === 'function'", true],
   ['getImmersiveMode 返回布尔（回读壳侧偏好真值）', "typeof window.androidBridge?.getImmersiveMode?.() === 'boolean'", true],
+  // ── 0.14.2 追加：Shizuku「重置链接」（P1）──
+  // ① 桥面在场：页面能调用（TS 类型面与 @JavascriptInterface 两侧都接上的证据）。
+  ['桥 resetShizukuConnection 在场（P1 重置链接的跨层面）', "typeof window.androidBridge?.resetShizukuConnection === 'function'", true],
+  // ② 按钮真实渲染且可点：用户真的点得到（探针与实测前置见 RESET_BUTTON_PROBE 的注释）。
+  ['「重置链接」按钮真实渲染且可点（清浮层→开设置→点手机控制页签）',
+    RESET_BUTTON_PROBE,
+    (v) => !!v && typeof v === 'object' && v.section === true && v.present === true
+      && v.disabled === false && v.visible === true && v.w > 0 && v.h > 0],
 ]
 
 const ws = new WebSocket(wsUrl)

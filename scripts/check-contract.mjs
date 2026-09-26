@@ -31,6 +31,10 @@ const DOC_PATH = resolve(flagValue('--doc') ?? join(root, 'docs', 'UPSTREAM-CONT
 const issues = []
 const REQUIRE = argv.includes('--require')
 let skipped = 0
+/** 仓库相对路径（仅用于报错文案）。0.14.2 rc.2 追版实修：§9 的两处报错此前调用了**从未定义**的
+ *  `rel()` —— rc.1 时文档含基线字样，该分支从未走到；换基线后第一次判红即 `ReferenceError` 崩溃，
+ *  把「该判红」变成「门禁自己炸」，判据在追版路径上不可读。 */
+const rel = (p) => { const r = resolve(p).slice(root.length + 1); return r.split('\\').join('/') }
 const ok = (msg) => console.log('  OK  ' + msg)
 const fail = (msg) => { issues.push(msg); console.log('  FAIL ' + msg) }
 const skip = (msg) => {

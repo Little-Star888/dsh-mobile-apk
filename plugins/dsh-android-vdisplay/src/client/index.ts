@@ -23,6 +23,7 @@ import {
   type FetchLike,
   type VdPanelState,
 } from '../status.ts'
+import { watchTerminalKeybars } from '../keybar/mount.ts'
 
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 
@@ -443,4 +444,29 @@ export function apply(ctx: ClientContext): void {
     { name: 'sidebar.right.pane.tab.title', key: VD_TAB_ID, inject: () => ({}) },
     VdTitle,
   )), 'dsh-android-vdisplay: tab title')
+
+  // 侧边栏终端的屏上九键条（0.14.2 T4）。
+  //
+  // 落点：不是 slot —— 上游 pane.tab 是 keyed「一个 key 一个组件」，没有 pane 底部槽，
+  // 同 key 再注册会顶掉终端 body。因此对 [data-sidebar-terminal] 做**受管 DOM 注入**，
+  // 把键条作为该根最后一个 flex:none 子项（终端 .screen 是 flex:1; min-height:0），
+  // 从而让「终端底边 <= 键条顶边」成为布局不变量而非调数值的结果。
+  //
+  // 通路：优先合成 keydown 到 .xterm-helper-textarea，让 xterm 自己按当前 DECCKM 决定 CSI/SS3
+  // （阶段 0 [A] 实测：合成 keydown 与真键产出字节一致）。兜底才直写，且按 acck 动态选序列。
+  // 语义（键->序列、Ctrl 闩锁）全部来自 ../keybar/keymap.ts 的纯函数，UI 层不做任何键位判断。
+  ctx.effect(() => {
+    let watch: { dispose(): void } | undefined
+    try {
+      watch = watchTerminalKeybars({
+        bridge: (window as Window & { androidBridge?: { showSoftInput?: () => boolean } }).androidBridge,
+      })
+    } catch (error) {
+      // 注入失败必须可见（不得让用户以为键条只是「没做」）。
+      ctx.logger?.('dsh-android-vdisplay')?.warn?.(
+        '终端九键条注入失败：' + ((error as Error)?.message ?? String(error)),
+      )
+    }
+    return () => { watch?.dispose() }
+  }, 'dsh-android-vdisplay: terminal keybar')
 }

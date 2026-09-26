@@ -22,6 +22,7 @@ import {
   probePassive,
   probeReasoningEfforts,
   type FetchLike,
+  type Modality,
   type ModelCapabilities,
   type ProbeReport,
   type ReasoningEfforts,
@@ -30,6 +31,19 @@ import { hasCapabilities, lookupCatalog, type CatalogSnapshot } from './catalog-
 import { providerFromSettings, type SettingsLike } from './settings-config.js'
 import { applyModelPatch, createStampStore, type ModelPatch, type SettingsWriteLike } from './settings-writer.js'
 import { capabilitySignature } from './signature.js'
+import {
+  MODELS_DEV_URL,
+  buildModelsDevSnapshot,
+  effortsFromLevels,
+  isStale,
+  lookupModelsDev,
+  mergeModelsDev as mergeModelsDevEntries,
+  modelsDevCachePath,
+  parseModelsDev,
+  readModelsDevSnapshot,
+  writeModelsDevSnapshot,
+  type ModelsDevSnapshot,
+} from './models-dev.js'
 
 export const name = 'dsh-model-capability'
 
@@ -58,6 +72,22 @@ export { lookupCatalog, effortsOf, hasCapabilities } from './catalog-lookup.js'
 export type { CatalogEntry, CatalogMatch, CatalogSnapshot } from './catalog-lookup.js'
 export { planModelPatch, applyModelPatch } from './settings-writer.js'
 export type { ModelPatch, PlanResult, WriteResult } from './settings-writer.js'
+export {
+  MODELS_DEV_URL,
+  MODELS_DEV_TTL_MS,
+  MODELS_DEV_MAX_BYTES,
+  parseModelsDev,
+  buildModelsDevSnapshot,
+  isStale,
+  lookupModelsDev,
+  mergeModelsDev,
+  effortsFromLevels,
+  modelsDevCachePath,
+  readModelsDevSnapshot,
+  writeModelsDevSnapshot,
+  thinkingLevelsFrom,
+} from './models-dev.js'
+export type { ModelsDevEntry, ModelsDevSnapshot, ModelsDevAgreement } from './models-dev.js'
 
 export interface PluginConfig {
   /** Fill missing model capabilities automatically on startup (default true). */
@@ -74,6 +104,23 @@ export interface PluginConfig {
   pollIntervalSeconds?: number
   /** Restrict the automatic pass to these routes (default: every declared route). */
   routes?: string[]
+  /**
+   * S3: consult the models.dev encyclopedia (default true). A failed fetch degrades
+   * to the previous snapshot, and with none the source is simply absent — it never
+   * blocks S1/S2/S4.
+   */
+  modelsDev?: boolean
+  /**
+   * S5: fallback values the USER explicitly declared. Absent means there is no S5 —
+   * an unstated capability stays absent rather than becoming a factory constant.
+   * Values from here are tagged `user-fallback` on write-back.
+   */
+  fallbacks?: {
+    contextWindow?: number
+    maxTokens?: number
+    input?: Modality[]
+    reasoningEfforts?: ReasoningEfforts
+  }
 }
 
 interface CredentialsLike {
@@ -147,6 +194,155 @@ export function pickDialect(compat: Record<string, unknown> | undefined): Record
   return out
 }
 
+/**
+ * Injects models.dev (S3) capabilities into a probe report and recomputes unknowns.
+ *
+ * Runs before {@link mergeCatalog} (S4): models.dev is the upstream encyclopedia and
+ * the engine catalog is the offline floor, so the encyclopedia wins the fields it
+ * states. A lookup returns every provider that describes the id, and the fields they
+ * disagree on are recorded as conflicts and left unwritten (same rule as S4).
+ * @param report - report to enrich in place.
+ * @param snapshot - retained models.dev snapshot, or undefined when absent.
+ * @returns the same report.
+ */
+export function mergeModelsDevInto(
+  report: ProbeReport,
+  declared: string[],
+  snapshot: ModelsDevSnapshot | undefined,
+  /** Filled with levels that must wait for a wire dialect (see applyDeferredModelsDevLevels). */
+  deferred?: Map<string, ReasoningEfforts>,
+): ProbeReport {
+  if (!snapshot) return report
+  const byId = new Map(report.models.map((model) => [model.id, model]))
+  for (const id of declared) {
+    if (!byId.has(id)) {
+      const fresh: ModelCapabilities = { id, sources: {} }
+      byId.set(id, fresh)
+      report.models.push(fresh)
+    }
+  }
+  for (const model of byId.values()) {
+    const hits = lookupModelsDev(snapshot, model.id)
+    if (hits.length === 0) continue
+    const agreed = mergeModelsDevEntries(hits)
+    report.notes.push(`${model.id}: models.dev 命中 ${agreed.providers.join('/')}`)
+    for (const conflict of agreed.conflicts) report.notes.push(`${model.id}: ${conflict}`)
+    if (agreed.input && !model.input) {
+      model.input = agreed.input
+      model.sources.input = 'models-dev'
+    }
+    if (agreed.contextWindow && !model.contextWindow) {
+      model.contextWindow = agreed.contextWindow
+      model.sources.contextWindow = 'models-dev'
+    }
+    if (agreed.maxTokens && !model.maxTokens) {
+      model.maxTokens = agreed.maxTokens
+      model.sources.maxTokens = 'models-dev'
+    }
+    // 与引擎目录同纪律：只有方言明确时才写 reasoningEfforts。models.dev 不声明 wire 方言，
+    // 所以档位写入仍然要等 S4（或用户显式 compat）给出 thinkingFormat——否则跳过并记 note。
+    const levels = effortsFromLevels(agreed.thinkingLevels)
+    if (levels && !model.reasoningEfforts) {
+      const dialect = pickDialect(model.compat)
+      if (dialect) {
+        model.reasoningEfforts = levels
+        model.sources.reasoningEfforts = 'models-dev'
+      } else {
+        // 方言还没到（models.dev 不声明 wire 方言，S4 目录可能稍后给出）。先挂起，
+        // 由 applyDeferredModelsDevLevels 在 S4 之后决定写或跳过——方言门本身不动。
+        deferred?.set(model.id, levels)
+      }
+    }
+  }
+  report.models = [...byId.values()].sort((a, b) => a.id.localeCompare(b.id))
+  report.unknown = declared.filter((id) => {
+    const found = byId.get(id)
+    return !found || Object.keys(found.sources).length === 0
+  })
+  return report
+}
+
+/**
+ * Injects user-declared fallback values (S5) into a probe report.
+ *
+ * S5 exists ONLY when the user explicitly configured `fallbacks`; there is no factory
+ * default. Applying a constant to every model regardless of what it is would be
+ * inventing a fact — a 262144 context window written onto an 8k model reads to the user
+ * as capacity the gateway then refuses. So an unconfigured fallback leaves the
+ * capability absent, and a configured one is tagged `user-fallback` to keep it
+ * distinguishable from a declaration by endpoints, encyclopedias, or catalogs.
+ * @param report - report to enrich in place.
+ * @param fallbacks - user-declared values, or undefined when none were configured.
+ * @param configured - true when the user actually supplied a `fallbacks` block.
+ * @returns the same report.
+ */
+export function mergeFallbacks(
+  report: ProbeReport,
+  declared: string[],
+  fallbacks: { contextWindow?: number; maxTokens?: number; input?: Modality[]; reasoningEfforts?: ReasoningEfforts } | undefined,
+  configured: boolean,
+): ProbeReport {
+  if (!configured || !fallbacks) return report
+  // 先确保每个 declared 模型都有条目：models.dev 关闭/无缓存时它不会建条目（提前返回），
+  // 而「用户配了兜底值」恰恰最需要在这种情况下生效——否则 S5 会在最该用的场景哑掉。
+  const byId = new Map(report.models.map((model) => [model.id, model]))
+  for (const id of declared) {
+    if (!byId.has(id)) {
+      const fresh: ModelCapabilities = { id, sources: {} }
+      byId.set(id, fresh)
+      report.models.push(fresh)
+    }
+  }
+  report.models = [...byId.values()].sort((a, b) => a.id.localeCompare(b.id))
+  for (const model of report.models) {
+    for (const key of ['input', 'contextWindow', 'maxTokens', 'reasoningEfforts'] as const) {
+      const value = fallbacks[key]
+      if (value === undefined) continue
+      if (model[key] !== undefined) continue
+      if (Object.prototype.hasOwnProperty.call(model.sources, key)) continue
+      ;(model as unknown as Record<string, unknown>)[key] = value
+      model.sources[key] = 'user-fallback'
+    }
+  }
+  report.unknown = declared.filter((id) => {
+    const found = report.models.find((m) => m.id === id)
+    return !found || Object.keys(found.sources).length === 0
+  })
+  return report
+}
+
+/**
+ * Writes levels that models.dev reported but could not yet write, now that the
+ * engine catalog (S4) may have supplied the wire dialect.
+ *
+ * The dialect gate is unchanged: a level set is written only when a dialect is
+ * explicit, exactly as for a catalog-sourced effort map. When no dialect exists the
+ * levels are dropped with a note — the encyclopedia saying "this model offers
+ * high/max" does not say how the gateway spells them, and guessing has already cost
+ * a real 400 (issue #134).
+ * @param report - report to update in place.
+ * @param deferred - levels parked by {@link mergeModelsDev}.
+ * @returns the same report.
+ */
+export function applyDeferredModelsDevLevels(report: ProbeReport, deferred: Map<string, ReasoningEfforts>): ProbeReport {
+  if (deferred.size === 0) return report
+  for (const model of report.models) {
+    const levels = deferred.get(model.id)
+    if (!levels || model.reasoningEfforts) continue
+    const dialect = pickDialect(model.compat)
+    if (dialect) {
+      model.reasoningEfforts = levels
+      model.sources.reasoningEfforts = 'models-dev'
+      continue
+    }
+    report.notes.push(
+      `${model.id}: models.dev 列出推理档位（${Object.keys(levels).join('/')}）但未给出 wire 方言`
+      + '——跳过 reasoningEfforts 写入，避免按错误方言发送导致请求被拒',
+    )
+  }
+  return report
+}
+
 /** Injects catalog-derived capabilities into a probe report and recomputes unknowns. */export function mergeCatalog(
   report: ProbeReport,
   declared: string[],
@@ -216,7 +412,9 @@ function summarize(report: ProbeReport): string {
     const sources = Object.entries(model.sources).map(([key, source]) => `${key}<-${source}`).join(' ')
     lines.push(`- ${model.id}: ${parts.length > 0 ? parts.join('，') : '未声明任何能力'}${sources ? ' [' + sources + ']' : ''}`)
   }
-  if (report.unknown.length > 0) lines.push(`未获得能力元数据：${report.unknown.join(', ')}`)
+  if (report.unknown.length > 0) {
+    lines.push(`未获得能力元数据：${report.unknown.map((id) => `${id}（S1-S5 均无声明）`).join(', ')}`)
+  }
   for (const note of report.notes) lines.push('注：' + note)
   return lines.join('\n')
 }
@@ -248,9 +446,103 @@ export function apply(ctx: Context, config: PluginConfig = {}) {
   // diag() 落在 $DSH_HOME/model-capability.log：引擎 stdout 轮转太快，写回被拒的真因只有这里留得住。
   const logWithTrace = log === undefined ? undefined : { ...log, trace: diag }
   const snapshot = loadCatalogSnapshot()
-  diag(`apply(): settings=${settings ? 'yes' : 'no'} catalog=${snapshot ? `${snapshot.source} models=${String(snapshot.modelCount ?? 0)}` : 'absent'} autoApply=${String(config.autoApply)} startupDelay=${String(config.startupDelaySeconds ?? 8)}`)
   if (snapshot) log?.info?.(`catalog snapshot: ${snapshot.source} / ${String(snapshot.modelCount ?? 0)} models`)
   else log?.info?.('catalog snapshot absent — engine-catalog stage disabled')
+
+  /**
+   * models.dev cache state, held per apply() call.
+   *
+   * The snapshot is loaded ONCE here, synchronously, from the local cache file. Network
+   * work happens in exactly two places, neither of which is the tick's synchronous path:
+   *   1. {@link refreshModelsDevOnStartup} — one background refresh per process start, fired
+   *      from the auto-apply effect before the first pass, so a clean install has S3 data
+   *      without anyone calling a tool;
+   *   2. an explicit tool call, which may also force a refetch.
+   * A network fetch on the tick path is exactly the regression T1 removed (24-26% resident
+   * CPU), so tick only ever reads this in-memory snapshot.
+   */
+  const modelsDevPath = modelsDevCachePath()
+  let modelsDevSnapshot: ModelsDevSnapshot | undefined = readModelsDevSnapshot(modelsDevPath)
+  let modelsDevFetched = false
+  /** Startup-refresh latch: at most one attempt per process, success or failure. */
+  let startupRefreshStarted = false
+
+  /**
+   * One-line cache state for diagnostics; the 2026-09-26 field report could only infer
+   * "S3 never ran" from a missing file, so this makes the state directly readable.
+   * @returns disabled | no-cache | stale | fresh.
+   */
+  const modelsDevStatus = (): string => {
+    if (config.modelsDev === false) return 'disabled'
+    if (!modelsDevSnapshot) return 'no-cache'
+    return isStale(modelsDevSnapshot.generatedAt) ? 'stale' : 'fresh'
+  }
+  /**
+   * Fetches models.dev and persists it when it fits the budget.
+   *
+   * Failure is never fatal: a fetch error keeps the previous snapshot, and with no
+   * snapshot at all the source is simply absent (S1/S2/S4 carry on unchanged). This
+   * runs only from an explicit call path (tool, or the one-time startup warm-up),
+   * never from tick.
+   * @param force - refetch even when the cached snapshot is fresh.
+   * @returns the snapshot in use, or undefined when the source is absent.
+   */
+  const ensureModelsDev = async (
+    force = false,
+    /**
+     * When false the call is a pure cache read: it never performs I/O. The tick path
+     * passes false so the automatic pass can use S3 without any network work on its
+     * synchronous path (the T1 regression was exactly that).
+     */
+    allowNetwork = true,
+  ): Promise<ModelsDevSnapshot | undefined> => {
+    if (config.modelsDev === false) return undefined
+    if (!allowNetwork) return modelsDevSnapshot
+    if (!force && modelsDevSnapshot && !isStale(modelsDevSnapshot.generatedAt)) return modelsDevSnapshot
+    if (modelsDevFetched && !force) return modelsDevSnapshot
+    const fetchImpl = globalThis.fetch as unknown as FetchLike | undefined
+    if (typeof fetchImpl !== 'function') return modelsDevSnapshot
+    try {
+      const response = await fetchImpl(MODELS_DEV_URL, { headers: { accept: 'application/json' }, method: 'GET' })
+      if (!response.ok) {
+        diag(`models.dev fetch -> HTTP ${String(response.status)}；沿用旧缓存（${modelsDevSnapshot ? '有' : '无'}）`)
+        return modelsDevSnapshot
+      }
+      const entries = parseModelsDev(JSON.parse(await response.text()))
+      const next = buildModelsDevSnapshot(entries)
+      const bytes = writeModelsDevSnapshot(modelsDevPath, next)
+      if (bytes === undefined) {
+        diag(`models.dev 快照超过尺寸上限（${String(next.modelCount)} 条），不落盘；本进程仍用内存副本`)
+      }
+      modelsDevSnapshot = next
+      modelsDevFetched = true
+      diag(`models.dev 拉取成功 modelCount=${String(next.modelCount)} bytes=${String(bytes ?? -1)}`)
+      return next
+    } catch (error) {
+      diag(`models.dev 拉取失败（${(error as Error)?.message ?? String(error)}）；沿用旧缓存（${modelsDevSnapshot ? '有' : '无'}）`)
+      return modelsDevSnapshot
+    }
+  }
+
+  /** Result of a startup refresh attempt, for the caller's diagnostics. */
+  const refreshModelsDevOnStartup = async (): Promise<'disabled' | 'fresh' | 'fetched' | 'failed' | 'no-fetch'> => {
+    if (config.modelsDev === false) return 'disabled'
+    if (startupRefreshStarted) return modelsDevSnapshot ? 'fresh' : 'no-fetch'
+    startupRefreshStarted = true
+    // 只在「陈旧或无缓存」时拉：新鲜缓存不该在每次启动都产生流量。
+    if (modelsDevSnapshot && !isStale(modelsDevSnapshot.generatedAt)) {
+      diag('models.dev 启动刷新：缓存新鲜，跳过')
+      return 'fresh'
+    }
+    diag(`models.dev 启动刷新：${modelsDevSnapshot ? '缓存陈旧' : '无缓存'}，开始拉取`)
+    const result = await ensureModelsDev(true, true)
+    if (result === undefined) return 'failed'
+    return modelsDevFetched ? 'fetched' : 'failed'
+  }
+
+  // modelsDev 状态只有在 modelsDevPath/modelsDevStatus 声明之后才可读；放在这里而不是
+  // 函数开头，是因为启动那一行 diag 要报告缓存状态（这次现场就是靠「缓存文件不存在」反推的）。
+  diag(`apply(): settings=${settings ? 'yes' : 'no'} catalog=${snapshot ? `${snapshot.source} models=${String(snapshot.modelCount ?? 0)}` : 'absent'} autoApply=${String(config.autoApply)} startupDelay=${String(config.startupDelaySeconds ?? 8)} modelsDev=${modelsDevStatus()} cache=${modelsDevPath}`)
 
   /** Resolves the route's API key: explicit settings value first, then the credential ref. */
   async function resolveConfig(route: string, sectionOverride?: unknown) {
@@ -270,7 +562,25 @@ export function apply(ctx: Context, config: PluginConfig = {}) {
 
   async function discover(
     route: string,
-    options: { active?: boolean; confirm?: boolean; levels?: string[]; offline?: boolean } = {},
+    options: {
+      active?: boolean
+      confirm?: boolean
+      levels?: string[]
+      offline?: boolean
+      /** Force a models.dev refetch before resolving. */
+      refresh?: boolean
+      /** Stage selector; 'auto' (default) walks the whole ladder. */
+      source?: 'auto' | 'endpoint' | 'catalog' | 'modelsdev' | 'offline'
+      /**
+       * Consult S3 from the cached snapshot while still skipping every network call.
+       * The automatic pass sets this so it can use models.dev without doing I/O on
+       * the tick path; the public `offline` flag keeps its "engine catalog only"
+       * meaning, so tool behavior is unchanged.
+       */
+      useCachedModelsDev?: boolean
+      /** When false, S3 is read from cache only and never fetched. */
+      allowModelsDevNetwork?: boolean
+    } = {},
     sectionOverride?: unknown,
   ) {
     const providerConfig = await resolveConfig(route, sectionOverride)
@@ -280,10 +590,26 @@ export function apply(ctx: Context, config: PluginConfig = {}) {
     }
     diag(`discover(${route}): baseURL=${providerConfig.baseURL} api=${providerConfig.api ?? '-'} models=${JSON.stringify(providerConfig.models ?? [])} apiKey=${providerConfig.apiKey ? 'yes' : 'no'}`)
     const fetchImpl = globalThis.fetch as unknown as FetchLike
-    const report = options.offline
+    // 来源梯选择：'offline' 与 'catalog' 都只走离线地板；'modelsdev' 只走 S3；
+    // 'endpoint' 只走 S1/S2；'auto'（默认）按 S1->S2 -> S3 -> S4 -> S5 全走。
+    const source = options.source ?? 'auto'
+    const skipNetwork = options.offline === true || source === 'offline' || source === 'catalog' || source === 'modelsdev'
+    const report = skipNetwork
       ? { route, fetched: [], models: [], unknown: [...(providerConfig.models ?? [])], notes: [] } as ProbeReport
       : await probePassive(providerConfig, { fetchImpl })
-    mergeCatalog(report, providerConfig.models ?? [], snapshot, providerConfig.api)
+    const deferred = new Map<string, ReasoningEfforts>()
+    // 自动补给路径（useCachedModelsDev）只读缓存，绝不发网络请求；显式工具调用才允许拉取。
+    const wantModelsDev = source === 'modelsdev' || (source === 'auto' && (options.useCachedModelsDev === true || options.offline !== true))
+    if (wantModelsDev) {
+      const allowNetwork = options.allowModelsDevNetwork !== false
+      const dev = await ensureModelsDev(options.refresh === true, allowNetwork)
+      mergeModelsDevInto(report, providerConfig.models ?? [], dev, deferred)
+    }
+    if (source !== 'endpoint' && source !== 'modelsdev') {
+      mergeCatalog(report, providerConfig.models ?? [], snapshot, providerConfig.api)
+      applyDeferredModelsDevLevels(report, deferred)
+    }
+    mergeFallbacks(report, providerConfig.models ?? [], config.fallbacks, config.fallbacks !== undefined)
     if (options.active) {
       if (!options.confirm) {
         report.notes.push('active=true 但缺少 confirm=true（主动探测会消耗额度，需用户明确批准）——本次仅做被动发现')
@@ -326,10 +652,10 @@ export function apply(ctx: Context, config: PluginConfig = {}) {
   const probeTool = defineTool({
     name: 'model_capability_probe',
     description:
-      'Discover capability metadata for a user-declared provider route: passive endpoint descriptors first, vendor schemas second, then an exact model-id lookup in the vendor catalogs the engine ships. ' +
-      'Never infers capabilities from URLs or model names; unknown stays unknown. ' +
-      'Active probes (which spend quota) run only when active=true and confirm=true, and are discarded when a negative control shows the endpoint does not validate the field. ' +
-      'Set apply=true to write the discovered model-level capabilities back into settings (missing fields only).',
+      'Discover capability metadata for a user-declared provider route, in source order: endpoint descriptor, vendor schema, models.dev encyclopedia, engine catalog. ' +
+      'Never inferred from URLs or names; unknown stays unknown. ' +
+      'Active probes spend quota, so they need active=true and confirm=true, and are discarded unless a negative control proves the endpoint validates the field. ' +
+      'apply=true writes the discovered fields back (missing fields only).',
     parameters: {
       provider: { type: 'string', required: true, description: 'llm-pi-ai provider route id, e.g. "my-gateway"' },
       active: { type: 'boolean', description: 'Also run active reasoning-effort probes (default false)' },
@@ -337,6 +663,8 @@ export function apply(ctx: Context, config: PluginConfig = {}) {
       levels: { type: 'array', items: { type: 'string' }, description: 'Candidate effort words for active probes (default low/medium/high)' },
       apply: { type: 'boolean', description: 'Write discovered capabilities back to settings (missing fields only)' },
       offline: { type: 'boolean', description: 'Skip network entirely and use only the engine catalog (default false)' },
+      source: { type: 'string', description: 'Source stage (default auto)' },
+      refresh: { type: 'boolean', description: 'Force models.dev refetch' },
     },
     output: {
       schema: {
@@ -351,7 +679,7 @@ export function apply(ctx: Context, config: PluginConfig = {}) {
       },
       render: (_args, value: Record<string, unknown>) => [{ type: 'text', text: String(value.text ?? '') }],
     },
-    execute: async (args: { provider: string; active?: boolean; confirm?: boolean; levels?: string[]; apply?: boolean; offline?: boolean }) => {
+    execute: async (args: { provider: string; active?: boolean; confirm?: boolean; levels?: string[]; apply?: boolean; offline?: boolean; source?: 'auto' | 'endpoint' | 'catalog' | 'modelsdev' | 'offline'; refresh?: boolean }) => {
       const found = await discover(args.provider, args)
       if (!found) {
         return { ok: false, text: `未在 llm-pi-ai 设置中找到提供商路由「${args.provider}」或其 baseURL——请先在设置页填写自定义提供商。`, report: {} } as never
@@ -372,14 +700,15 @@ export function apply(ctx: Context, config: PluginConfig = {}) {
   const applyTool = defineTool({
     name: 'model_capability_apply',
     description:
-      'Discover (engine catalog + passive endpoint metadata) and write back missing model-level capabilities for one user-declared provider route. ' +
-      'Only fills fields the route does not declare; never overwrites a user value and never writes a provider-wide setting. ' +
-      'Does not spend quota unless active=true and confirm=true.',
+      'Discover and write back missing model-level capabilities for one user-declared provider route. ' +
+      'Only fills fields the route does not declare; never overwrites a user value. ' +
+      'Spends quota only with active=true and confirm=true.',
     parameters: {
       provider: { type: 'string', required: true, description: 'llm-pi-ai provider route id' },
       active: { type: 'boolean', description: 'Also run active reasoning-effort probes (default false)' },
       confirm: { type: 'boolean', description: 'Explicit approval for active probes' },
       offline: { type: 'boolean', description: 'Use only the engine catalog (default true for apply)' },
+      source: { type: 'string', description: 'Source stage (default auto)' },
     },
     output: {
       schema: {
@@ -393,8 +722,8 @@ export function apply(ctx: Context, config: PluginConfig = {}) {
       },
       render: (_args, value: Record<string, unknown>) => [{ type: 'text', text: String(value.text ?? '') }],
     },
-    execute: async (args: { provider: string; active?: boolean; confirm?: boolean; offline?: boolean }) => {
-      const found = await discover(args.provider, { ...args, offline: args.offline ?? true })
+    execute: async (args: { provider: string; active?: boolean; confirm?: boolean; offline?: boolean; source?: 'auto' | 'endpoint' | 'catalog' | 'modelsdev' | 'offline' }) => {
+      const found = await discover(args.provider, { ...args, offline: args.offline ?? true, source: args.source ?? 'offline' })
       if (!found) {
         return { ok: false, text: `未找到提供商路由「${args.provider}」。` } as never
       }
@@ -495,10 +824,15 @@ export function apply(ctx: Context, config: PluginConfig = {}) {
       const descriptor = readDescriptor()
       for (const route of routes) {
         try {
-          const found = await discover(route, { offline: true }, descriptor?.value)
+          // offline 保持既有「不联网」语义，useCachedModelsDev 让 S3 用缓存参与补给；
+          // allowModelsDevNetwork=false 保证 tick 绝不触发网络（T1 回归判据，见 t1-poll-cost.test.mjs）。
+          const found = await discover(route, { offline: true, useCachedModelsDev: true, allowModelsDevNetwork: false }, descriptor?.value)
           if (!found) continue
           diag(`runAutoPass(${route}): models=${found.report.models.length} efforts=${JSON.stringify(found.report.models.map((m) => [m.id, m.reasoningEfforts ?? null]))}`)
-          const patches = patchesFrom(found.report).filter((patch) => patch.reasoningEfforts !== undefined)
+          // 自动补给写回全部缺失字段（不只是 reasoningEfforts）：S3/S5 的价值就是补长尾的
+          // contextWindow/maxTokens/input，只放 reasoningEfforts 会让这两个源在自动路径上形同虚设。
+          // 用户已有的值不会被动：planModelPatch 只填空，来源戳进一步保护我方旧写入。
+          const patches = patchesFrom(found.report)
           diag(`runAutoPass(${route}): patches=${patches.length}`)
           if (patches.length === 0) continue
           const result = await applyModelPatch(settings, route, patches, logWithTrace, stamps, descriptor)
@@ -577,25 +911,26 @@ export function apply(ctx: Context, config: PluginConfig = {}) {
     const createDeferrer = () => {
       if (typeof MessageChannel === 'function') {
         const channel = new MessageChannel()
-        let queued: (() => void) | undefined
+        // 队列而不是单槽：同一轮里可能同步 defer 多次（例如启动刷新 + 一个 document-updated
+        // 事件），单槽会让后一次覆盖前一次，静默丢掉一个回调。
+        const queue: Array<() => void> = []
         channel.port1.onmessage = () => {
-          const run = queued
-          queued = undefined
+          const run = queue.shift()
           run?.()
         }
         // 不让诊断通道拖住进程退出（Android 上尤其重要）
         ;(channel.port1 as unknown as { unref?: () => void }).unref?.()
         ;(channel.port2 as unknown as { unref?: () => void }).unref?.()
         return {
-          defer: (fn: () => void) => { queued = fn; channel.port2.postMessage(0) },
-          dispose: () => { queued = undefined; channel.port1.close(); channel.port2.close() },
+          defer: (fn: () => void) => { queue.push(fn); channel.port2.postMessage(0) },
+          dispose: () => { queue.length = 0; channel.port1.close(); channel.port2.close() },
         }
       }
       // 兜底：预建 promise 链（continuation 在事务外注册，同样不继承上下文）
       // 判据同 als3.mjs 的 premade-gate：第二跳仍为 ESCAPED。
       let wake: (() => void) | undefined
-      let pending: (() => void) | undefined
       let closed = false
+      const queue: Array<() => void> = []
       const arm = (): Promise<void> => new Promise<void>((resolve) => { wake = resolve })
       let gate = arm()
       void (async () => {
@@ -603,14 +938,13 @@ export function apply(ctx: Context, config: PluginConfig = {}) {
           await gate
           if (closed) return
           gate = arm()
-          const run = pending
-          pending = undefined
-          run?.()
+          // 一次唤醒清空当前队列（与 MessageChannel 版同语义：不丢回调）。
+          while (queue.length > 0) queue.shift()?.()
         }
       })()
       return {
-        defer: (fn: () => void) => { pending = fn; wake?.() },
-        dispose: () => { closed = true; pending = undefined; wake?.() },
+        defer: (fn: () => void) => { queue.push(fn); wake?.() },
+        dispose: () => { closed = true; queue.length = 0; wake?.() },
       }
     }
 
@@ -673,7 +1007,21 @@ export function apply(ctx: Context, config: PluginConfig = {}) {
       const eventDriven = unsubscribe !== undefined
       const fallbackSeconds = eventDriven ? 120 : 30
       const pollMs = Math.max(30, config.pollIntervalSeconds ?? fallbackSeconds) * 1000
-      diag(`poll interval=${String(pollMs / 1000)}s eventDriven=${String(eventDriven)}`)
+      diag(`poll interval=${String(pollMs / 1000)}s eventDriven=${String(eventDriven)} modelsDev=${modelsDevStatus()}`)
+      // 【P2-S3 启动后台刷新（2026-09-26）】方案 §2.2 的降级链是「无缓存 -> 拉；有缓存且未陈旧 ->
+      // 不拉；陈旧 -> 后台拉」。此前只实现了「显式调工具才拉」，于是干净安装上没人调工具 =>
+      // 缓存永远不存在 => S3 永不自动生效（设备实测：models-dev.json 不存在、日志 0 命中）。
+      // 这里补上缺失的一环：每个进程启动最多一次后台刷新。
+      // 纪律：经 deferrer 送出（与 tick 同一条逃逸通道，避开 hmr 事务上下文）；
+      //      仅陈旧/无缓存才真的拉；失败只记 diag、不阻断、不重试；
+      //      拉完写缓存，由既有的 tick 路径自然消费（tick 仍 0 网络）。
+      // 先于启动轮触发：这样首个 auto-pass 就大概率能读到刚拉下来的 S3 数据。
+      deferrer.defer(() => {
+        if (stopped) return
+        void refreshModelsDevOnStartup().then((outcome) => {
+          diag(`models.dev 启动刷新结果=${outcome} 状态=${modelsDevStatus()}`)
+        })
+      })
       // 启动轮与轮询轮也可能落在别的 hmr 事务里（例如启动期 profile 重载），
       // 同样经 deferrer 送出，保证任何一路触发都能写回成功。
       const startTimer = setTimeout(() => { if (!stopped) deferrer.defer(() => { if (!stopped) void tick() }) }, delayMs)

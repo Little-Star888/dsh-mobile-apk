@@ -101,6 +101,12 @@ class AndroidBridge(
    */
   private val onShizukuStatus: () -> String = { """{"ok":false,"code":"shizuku-not-wired"}""" },
   /**
+   * 0.14.2 P1：设置页「重置链接」——强制移除 Shizuku 侧 UserService + 清空绑定态（[ShizukuTransport.resetConnection]）。
+   * 回写后读回的 status JSON；页面沿用既有 settleLinkCall 结算，不新造口径。
+   */
+  private val onResetShizukuConnection: () -> String =
+    { """{"ok":false,"code":"shizuku-not-wired"}""" },
+  /**
    * 0.14.1 块J FIX-4：通知设置**读**面（key 为空 = 全量快照）。
    *
    * 默认实现与 [onGetImmersiveMode] 同款：**直接读壳侧单一真源**（`ShellAppContext` 由
@@ -431,6 +437,16 @@ class AndroidBridge(
    */
   @JavascriptInterface
   fun shizukuStatus(): String = onShizukuStatus()
+
+  /**
+   * 0.14.2 P1 设置页「手机控制」：「重置链接」按钮。
+   *
+   * 做三件事（缺一即未完成）：强制移除 Shizuku 侧 UserService（承重墙）、清空绑定态、让 caps 缓存失效。
+   * 随后页面每 2 秒的既有轮询会把通道重建结果读回来（不新开扫描机制）。
+   * 返回写后回读的 status JSON；**不承诺已修好**——能否恢复取决于 Shizuku 服务本身是否还在运行。
+   */
+  @JavascriptInterface
+  fun resetShizukuConnection(): String = onResetShizukuConnection()
 
   /**
    * 0.14.1 块J FIX-4：通知设置读回（设置页「开发者选项」的初始态与写后读回）。
