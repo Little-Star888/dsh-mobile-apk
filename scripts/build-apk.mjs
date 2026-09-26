@@ -62,6 +62,8 @@ const GATE_SCRIPTS = [
   'check-patch-mirror.mjs',
   // 0.14.2 T6：补丁测试夹具必须与 contract.baseline 同代（夹具停在上一代 = 补丁回归结构性假绿）。
   'check-patch-fixtures.mjs',
+  // 0.14.2 D3 / B6：死 token 防漂移（我们 CSS 引用的 --dsw-* 对账上游现存令牌集合；上游树缺席即 SKIP 计数）。
+  'check-dead-tokens.mjs',
   // review C6：适配层契约（bundle 行/构建产物/版本钉）。上游 dsh/ 与基线 node_modules 是本机只读
   // 产物（gitignore）——本链（云端自包含）对应小节 SKIP 计数；发布链以 --require 强制齐全。
   'check-contract.mjs',
@@ -162,6 +164,10 @@ try {
   run('node', [gate('check-patch-mirror.mjs')])
   log('门禁：补丁测试夹具随版（夹具代 == contract.baseline）…')
   run('node', [gate('check-patch-fixtures.mjs')])
+  // 0.14.2 D3 / B6：死 token 防漂移（我们 CSS 引用的 --dsw-* 对账上游现存令牌集合；上游树缺席即 SKIP 计数）。
+  // 本轮实修：此前只登记进 GATE_SCRIPTS 声明数组、从未在此处调用——云端自包含链上这道门禁根本不跑。
+  log('门禁：死 token 引用对账（--dsw-* vs 上游现存令牌）…')
+  run('node', [gate('check-dead-tokens.mjs')])
   // review C6：适配层契约（上游 bundle 行引用 / 注入包 lib 产物 / 客户端槽位 / 版本钉台账）。
   log('门禁：适配层契约（bundle/构建产物/版本钉）…')
   run('node', [gate('check-contract.mjs')])
