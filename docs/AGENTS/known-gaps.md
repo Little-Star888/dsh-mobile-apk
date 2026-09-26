@@ -40,6 +40,8 @@
 - **按需 skill 注入（U-5）未实施**：控制流程仍会进入常驻上下文/schema 的部分未清点，token 预算门禁未做。
 - **Shizuku 许可登记缺口**：gradle aar 依赖不在 `check-third-party.mjs` 的 dpkg 矩阵覆盖内，`assets/licenses/THIRD_PARTY_NOTICES.md` 无 Shizuku 条目（Apache-2.0）——发版合规需补。
 - **性能 A1 结论未定**：`check-perf-instrumentation` 的 P-AC-01 要求出厂值 `patchReload: startup`，但 0.14.0 设备 A/B 观测 `live` 组中位约 12.5-13.0s 快于 `startup` 组 14.6-15.0s（n 小、compose 探针缺失、单机型）——方向与方案主张相反，需 owner 拍板是锁正确性语义还是改基线（见 `docs/0.14.0-preview-VERIFICATION-LOG.md` §50）。
+- **`combo-lazy-A4` 退役后的设备侧复验未做（2026-09-25）**：补丁已从 registry/IMPLS 移除、P1 的 `requires` 已清空，静态门禁与 17 个补丁回归全绿；但「撤 A4 后裸树启动期 2 次 compose」这一结论目前只有**离线同基线 A/B** 证据（`.deploy-tmp/retire-sweep/REPORT.md` §3.1.2）。设备侧需补：撤 A4 的快照冷启动读 `[perf] compose #N dur=` 与 `TOTAL calls=`，确认 calls ≤ 2 且首屏未变差（预期略好——A4 原先把那次 compose 压在首个请求路径上）。三层验收留到统一构建窗口。
+- **C5 正向对照的设备侧取证依赖一棵打过 P1 的引擎树**：`check-boot-budget.mjs` 的对照在构建链打补丁**之前**跑时必然缺席（记 SKIP，符合设计）；发布前 `--require-real` 档需要 `.deploy-tmp/snapshot-013/<abi>/stage/root/...` 那棵树**已打 P1**，否则 C5 只有 SKIP、拿不到「等价成立」。CI/发布链接线时需确认该前置。
 - **单 ABI 静默交付**：0.13.8-b 实测「某 ABI 被拒后链路仍 exit 0」已由 `check-build-chain-abort.mjs` 拦下（坑 94），门禁已入 17 项集合。
 
 ## 0.13.8 收尾新增登记（2026-09-12 晚）

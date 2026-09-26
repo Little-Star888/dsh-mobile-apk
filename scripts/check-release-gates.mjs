@@ -39,6 +39,10 @@ const rel = (p) => relative(ROOT, p).replace(/\\/g, '/')
  */
 const GATES = [
   { script: 'check-patch-mirror.mjs', ciApk: true, ciCoord: true, needsSnapshot: false },
+  // 0.14.2 D3/B6：死 token 防漂移——我们自己 CSS 引用的 --dsw-* 必须在上游现存令牌集合里
+  // （引用不存在的令牌 ⇒ var(--dsw-x, 亮色回退) 整条声明失效 ⇒ 深色主题白底白字，D3 实锤）。
+  // 输入在协调仓（我们的 CSS + 上游样式目录）⇒ 由协调仓 CI 与两条构建链跑；上游树不在场时 SKIP 计数。
+  { script: 'check-dead-tokens.mjs', ciApk: false, ciCoord: true, needsSnapshot: false },
   // 0.14.2 T6：补丁测试的夹具必须与 contract.baseline 同代——夹具停在上一代时「补丁回归」是结构性假绿
   // （rc.1 实测：真树断 9 条而 16 个补丁测试全绿）。
   { script: 'check-patch-fixtures.mjs', ciApk: true, ciCoord: true, needsSnapshot: false },
@@ -327,7 +331,7 @@ for (const gate of ALL_GATES) {
   // check-tool-output-schema 自 0.14.1 W1 起支持 --require：宿主缺 peer 依赖（净检出无 node_modules 的
   // 必然后果）在严格档下判红——此前该情形是**未捕获异常直接终止进程**，聚合链在第 6 条就死，
   // 后面 20 多条一条没跑，而没有任何一层把它报成失败。
-  if (STRICT && ['check-snapshot-fingerprint.mjs', 'check-perf-instrumentation.mjs', 'check-snapshot-secrets.mjs', 'check-contract.mjs', 'check-tool-output-schema.mjs'].includes(gate)) argvFor.push('--require')
+  if (STRICT && ['check-snapshot-fingerprint.mjs', 'check-perf-instrumentation.mjs', 'check-snapshot-secrets.mjs', 'check-contract.mjs', 'check-tool-output-schema.mjs', 'check-dead-tokens.mjs'].includes(gate)) argvFor.push('--require')
   // 冷启动预算（0.14.1 块F P0-2）：真检需要**设备原始产物**（boot-segments.log + 引擎探针输出），
   // 冷启动预算（0.14.1 块F P0-2）：**不再强制 --self-test**。默认档会先找设备真产物
   // （`--segments/--probe` > `DSH_BOOT_SEGMENTS`/`DSH_BOOT_PROBE` > `.deploy-tmp/boot-budget/`）：

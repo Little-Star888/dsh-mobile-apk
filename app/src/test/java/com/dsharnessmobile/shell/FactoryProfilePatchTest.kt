@@ -263,4 +263,269 @@ class FactoryProfilePatchTest {
     assertTrue("startEngine 必须调用 repairProfilePatch()", repairAt > 0)
     assertTrue("自愈必须排在真正 spawn 之前", spawnAt < 0 || repairAt < spawnAt)
   }
+
+  // ── 0.14.2 D10：合并粒度 = 条目（反证用例） ─────────────────────────────
+
+  /**
+   * P-1 反证（永不追加）：live 里某个 insert 组**只含工厂组的前半子条目**时，
+   * 工厂组的后半子条目必须被追加到 live 的同一个组里。
+   *
+   * 旧实现把 `- insert:` 组当一个块、块内任意深度的 `id:` 都算该块 id ⇒ 只要 live 里
+   * 「任何块」含了工厂块的 id，整个工厂块即被判「已存在」⇒ `host-web-compat` 静默不补齐，
+   * `changes=0` 且**零日志**（这正是用户担心的「更新后掉插件」的形态）。
+   */
+  @Test
+  fun p1_partialInsertGroupStillReceivesTheMissingSibling() {
+    val factory = """
+      - insert:
+          - id: shell-termux
+            name: '@dsh-android/dsh-shell-termux'
+          - id: host-web-compat
+            name: '@dsh-android/dsh-host-web-compat'
+    """.trimIndent() + "\n"
+    val live = """
+      - insert:
+          - id: shell-termux
+            name: '@dsh-android/dsh-shell-termux'
+            config:
+              writeMode: workspace-write
+    """.trimIndent() + "\n"
+
+    val result = FactoryProfilePatch.merge(live, factory)
+
+    assertTrue(
+      "P-1：live 只含组内一半时，缺失的兄弟条目必须被补进**同一个** insert 组",
+      result.text.contains("id: host-web-compat"),
+    )
+    assertTrue(result.text.contains("name: '@dsh-android/dsh-host-web-compat'"))
+    assertTrue("原有子条目与它的配置一字不动", result.text.contains("writeMode: workspace-write"))
+    assertEquals("该组仍只有一个顶层块", 1, FactoryProfilePatch.topLevelBlocks(result.text).size)
+    assertTrue("必须有可追溯的改动说明（旧实现在这里是零日志）", result.changes.any { it.contains("host-web-compat") })
+  }
+
+  /** P-1 反证（反向）：live 只含工厂组的**后半**子条目时，前半照样补。 */
+  @Test
+  fun p1_missingSiblingIsAppendedWhenOnlyTheSecondChildIsPresent() {
+    val factory = """
+      - insert:
+          - id: shell-termux
+            name: '@dsh-android/dsh-shell-termux'
+          - id: host-web-compat
+            name: '@dsh-android/dsh-host-web-compat'
+    """.trimIndent() + "\n"
+    val live = """
+      - insert:
+          - id: host-web-compat
+            name: '@dsh-android/dsh-host-web-compat'
+    """.trimIndent() + "\n"
+
+    val result = FactoryProfilePatch.merge(live, factory)
+
+    assertTrue("P-1：组首子条目缺席时也必须补", result.text.contains("id: shell-termux"))
+    val block = FactoryProfilePatch.topLevelBlocks(result.text).first { it.startsWith("- insert:") }
+    assertEquals(
+      "补进来的条目必须落在同一个组里（顺序 = 组首缺席项先补）",
+      listOf("shell-termux", "host-web-compat"),
+      FactoryProfilePatch.blockIds(block),
+    )
+  }
+
+  /**
+   * P-2 反证（误归属）：工厂对 insert 组内**非首个子条目**声明的 `disabled` 必须落在
+   * **该子条目自己**那一行上。
+   *
+   * 旧实现按「块」纠正 ⇒ 把 disabled 插到**组首子条目**之后，目标子条目一字未动
+   * （设备实读复现：声明纠正 `host-web-compat`，实际改的是 `shell-termux`）。
+   */
+  @Test
+  fun p2_disabledCorrectionLandsOnTheTargetChildNotTheGroupHead() {
+    val factory = """
+      - id: host-web-compat
+        disabled: true
+    """.trimIndent() + "\n"
+    val live = """
+      - insert:
+          - id: shell-termux
+            name: '@dsh-android/dsh-shell-termux'
+          - id: host-web-compat
+            name: '@dsh-android/dsh-host-web-compat'
+    """.trimIndent() + "\n"
+
+    val result = FactoryProfilePatch.merge(live, factory)
+
+    val lines = result.text.lines()
+    val shellAt = lines.indexOfFirst { it.trim() == "- id: shell-termux" }
+    val siblingAt = lines.indexOfFirst { it.trim() == "- id: host-web-compat" }
+    val disabledAt = lines.indexOfFirst { it.trim() == "disabled: true" }
+    assertTrue("两个子条目都必须在场", shellAt >= 0 && siblingAt >= 0)
+    assertTrue("P-2：disabled 必须写出来", disabledAt >= 0)
+    assertTrue(
+      "P-2：disabled 必须落在目标子条目之后（旧实现落在组首之后）",
+      disabledAt > siblingAt,
+    )
+    assertTrue("组首子条目不得被误加 disabled", disabledAt > shellAt)
+    assertEquals("只能有一条 disabled 行", 1, lines.count { it.trim() == "disabled: true" })
+  }
+
+  /**
+   * P-1/P-2 的**串扰**反证：工厂同时含一个顶层 disabled 行与一个 insert 组，
+   * 且组内出现了与顶层行同名的 id —— 两者必须各自处理，互不吞并。
+   */
+  @Test
+  fun p1p2_topLevelRowAndInsertGroupWithTheSameIdAreBothHonoured() {
+    val factory = """
+      - id: agent-default-model
+        disabled: true
+      - insert:
+          - id: mobile-default-model
+            name: '@deepseek-ai/dsh-agent-default-model'
+    """.trimIndent() + "\n"
+    val live = """
+      - insert:
+          - id: mobile-default-model
+            name: '@deepseek-ai/dsh-agent-default-model'
+    """.trimIndent() + "\n"
+
+    val result = FactoryProfilePatch.merge(live, factory)
+
+    assertTrue(
+      "顶层工厂行（id 与组内子条目同名）必须照旧追加",
+      result.text.contains("- id: agent-default-model"),
+    )
+    assertTrue("组内子条目原样保留", result.text.contains("mobile-default-model"))
+    val group = FactoryProfilePatch.topLevelBlocks(result.text).first { it.startsWith("- insert:") }
+    assertFalse("组首子条目不得被顶层行的 disabled 串扰", group.contains("disabled: true"))
+  }
+
+  /** live 为显式空序列 `[]`（3 字节、非空）时必须按「空」处理并落工厂件（旧实现阻断全部追加）。 */
+  @Test
+  fun emptySequenceLiveStillReceivesTheFactoryFile() {
+    val factory = "- id: bash-sandbox\n  disabled: true\n- insert:\n    - id: shell-termux\n      name: '@dsh-android/dsh-shell-termux'\n"
+
+    val result = FactoryProfilePatch.merge("[]\n", factory)
+
+    assertEquals("显式空序列 = 空，工厂件原样落盘", factory, result.text)
+    assertTrue(result.changes.isNotEmpty())
+  }
+
+  /** 裸 `-`（行尾无空格）是合法列表项，不得把两个块并成一个；tab 缩进的子条目不得被当顶层项。 */
+  @Test
+  fun bareDashAndTabIndentedChildrenDoNotBreakBlockSplitting() {
+    val live = "- id: first-row\n-\n  id: second-row\n  disabled: false\n"
+    val blocks = FactoryProfilePatch.topLevelBlocks(live)
+    assertEquals("裸 - 必须切开两块", 2, blocks.size)
+    assertEquals(listOf("first-row"), FactoryProfilePatch.blockIds(blocks[0]))
+    assertEquals(listOf("second-row"), FactoryProfilePatch.blockIds(blocks[1]))
+
+    val tabbed = "- insert:\n\t- id: tabbed-child\n\t  name: '@dsh-android/dsh-shell-termux'\n"
+    assertEquals(
+      "tab 缩进的子条目仍是条目（不是顶层项）",
+      listOf("tabbed-child"),
+      FactoryProfilePatch.blockIds(FactoryProfilePatch.topLevelBlocks(tabbed).single()),
+    )
+  }
+
+  /**
+   * 条目级 `blockIds`：配置块内的 `- id:`（模型表）不是条目。
+   * 旧实现把它们算作块 id ⇒ 既让 disabled 归属判断失效，也让追加判据把「配置里提过」当成「条目已在场」。
+   */
+  @Test
+  fun configNestedIdsAreNotEntries() {
+    val live = """
+      - id: llm-deepseek
+        config:
+          models:
+            - id: deepseek-chat
+              name: DeepSeek Chat
+            - id: deepseek-reasoner
+              name: DeepSeek Reasoner
+    """.trimIndent() + "\n"
+
+    val block = FactoryProfilePatch.topLevelBlocks(live).single()
+    assertEquals("只认顶层条目自身的 id", listOf("llm-deepseek"), FactoryProfilePatch.blockIds(block))
+  }
+
+  /** 工厂件里的配置块不得污染 disabled 归属：id 行与 disabled 行各自只看自己那一层。 */
+  @Test
+  fun nestedConfigDisabledDoesNotBecomeTheEntryDisabled() {
+    val factory = """
+      - id: ui-theme
+        config:
+          preference: dark
+          nested:
+            disabled: true
+    """.trimIndent() + "\n"
+    val live = """
+      - id: ui-theme
+        config:
+          preference: light
+    """.trimIndent() + "\n"
+
+    val result = FactoryProfilePatch.merge(live, factory)
+
+    assertEquals("嵌套配置里的 disabled 不是条目级 disabled，不得触发纠正", live, result.text)
+    assertTrue(result.changes.isEmpty())
+  }
+
+  /**
+   * 真实工厂件（本仓镜像 `scripts/profile-web.cordis.patch.yml`）的**逐字节自一致**：
+   * 零改动必须零重写。这是 D10 重写「块级 → 条目级」后最容易回归的性质——全文重建一旦漏字节，
+   * 每次快照刷新都会无谓重写 patch（并可能把 CRLF/LF 与尾行吃掉）。
+   * 同时锁定工厂件的结构事实（21 个顶层条目；唯一多子条目组 = shell-termux + host-web-compat），
+   * 该事实是 P-1/P-2 触发的唯一靶子；工厂变了这里必须先红。
+   */
+  @Test
+  fun realFactoryFileSelfMergeIsByteIdentical() {
+    val mirror = listOf(
+      File("../scripts/profile-web.cordis.patch.yml"),
+      File("scripts/profile-web.cordis.patch.yml"),
+    ).firstOrNull { it.isFile } ?: return
+    val text = mirror.readText()
+
+    val result = FactoryProfilePatch.merge(text, text)
+    assertEquals("真实工厂件自合并必须逐字节相同（否则每次刷新都重写）", text, result.text)
+    assertTrue("零改动时不得有改动说明", result.changes.isEmpty())
+
+    val blocks = FactoryProfilePatch.topLevelBlocks(text)
+    assertEquals("顶层条目数（工厂件结构改变时同步本断言）", 21, blocks.size)
+    val groups = blocks.map { FactoryProfilePatch.blockIds(it) }.filter { it.size > 1 }
+    assertEquals("唯一多子条目组 = shell-termux + host-web-compat", 1, groups.size)
+    assertEquals(listOf("shell-termux", "host-web-compat"), groups.single())
+  }
+
+  /**
+   * D10 的**真实形态**反证：拿仓库里的权威工厂件，人为抹掉 @BQ@host-web-compat@BQ@ 这一条
+   * （设备上真实发生过的「同一组里少一个插件」形态），merge 必须把它补回**同一个** insert 组，
+   * 且其余 20 个顶层条目一字不动。
+   *
+   * 旧实现在这里 @BQ@changes=0@BQ@ 且零日志：工厂件里 @BQ@shell-termux@BQ@ 已让该块被判定「存在」。
+   */
+  @Test
+  fun realFactoryMissingSiblingIsRestoredIntoItsOwnGroup() {
+    val mirror = listOf(
+      File("../scripts/profile-web.cordis.patch.yml"),
+      File("scripts/profile-web.cordis.patch.yml"),
+    ).firstOrNull { it.isFile } ?: return
+    val factory = mirror.readText()
+    val live = factory
+      .lines()
+      .filterNot { it.contains("host-web-compat") }
+      .joinToString("\n") + if (factory.endsWith("\n")) "\n" else ""
+
+    assertFalse("构造前提：live 里确实没有 host-web-compat 了", live.contains("host-web-compat"))
+
+    val result = FactoryProfilePatch.merge(live, factory)
+
+    assertTrue("D10：缺失的组内兄弟必须被补回", result.text.contains("id: host-web-compat"))
+    assertTrue("补回的是同一个组（shell-termux 仍是组首）", result.text.contains("id: shell-termux"))
+    assertEquals("顶层条目数不变（补进组内，不是追加成新块）", 21, FactoryProfilePatch.topLevelBlocks(result.text).size)
+    val group = FactoryProfilePatch.topLevelBlocks(result.text)
+      .first { FactoryProfilePatch.blockIds(it).contains("shell-termux") }
+    assertEquals(listOf("shell-termux", "host-web-compat"), FactoryProfilePatch.blockIds(group))
+    assertTrue("改动必须有可追溯说明（旧实现零日志）", result.changes.any { it.contains("host-web-compat") })
+
+    // 再次合并必须稳定（幂等），否则每次快照刷新都会重写 patch。
+    val second = FactoryProfilePatch.merge(result.text, factory)
+    assertEquals("补齐后必须稳定", result.text, second.text)
+  }
 }

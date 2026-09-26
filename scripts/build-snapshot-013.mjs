@@ -975,6 +975,64 @@ const STAGE_ROOT = join(STAGE, 'root')
   if (stats.dropped > 0) console.log('    [drop] ' + stats.droppedSamples.join(' | '))
 }
 
+// ── 8a5. 清单驱动的通用裁剪（0.14.2 T2 第一层）────────────────────────────
+// 此前体积裁剪只有 sourcemapDelete 一条**硬编码**特例（`find -name '*.map' -delete`），
+// 按扩展名/按整树裁剪没有通用机制——每加一类都要再写一段硬编码 find。本步把两类裁剪外置到
+// snapshot-config/slim.json 的 treeDelete / extensionDelete，构建器只做「读清单 -> 生成 find/rm」。
+//
+// 为什么必须是清单驱动而不是再加一段硬编码：check-snapshot-builder-output.mjs 用
+// 「slim.json 的每个键都必须在构建器里被消费」判死键——硬编码找不到对应的键就只能把清单当摆设。
+//
+// 裁剪对象（两类的共同点 = 运行期零消费者，证据见 docs/0.14.2-NEXT-TASKS.md T2 与 SIZE-AND-BOOT §5.4）：
+//   · treeDelete:      usr/share/man —— man 手册页，设备上无 man 浏览路径。
+//   · extensionDelete: @deepseek-ai/dsh 子树的 .d.ts —— Node 执行 lib/*.js，类型声明不参与执行
+//                      （全树扫「.js 用 require/import 拉 .ts 说明符」= 0 命中）。
+//
+// 安全约束（刻意如此）：
+//   ① 每条 root/path 都必须是**相对 stage/root 的相对路径**，且不得含 '..'——防止清单写错把树外删掉；
+//   ② treeDelete 的 rm -rf 目标必须真实存在才删（不存在只告警，不静默）；
+//   ③ extensionDelete 用 find -print 先计数再 -delete，日志给出实测删除数（防「清单写了但没命中」）；
+//   ④ 本步在**软链自净化与归档之前**：删完才归档，故产物里不会留下已删树的空目录或悬空链接。
+//      （usr/share/man 内含 913 符号链接，整树删掉即一并消失，不会留悬空。）
+log('清单驱动裁剪：treeDelete + extensionDelete…')
+{
+  const rootDir = join(STAGE, 'root')
+  /** 断言相对路径安全：非绝对、不含 '..' 段。 */
+  const assertRelSafe = (rel, where) => {
+    if (typeof rel !== 'string' || rel === '') {
+      console.error(`[裁剪清单中止] ${where} 的 path/root 不是非空字符串：${JSON.stringify(rel)}`)
+      process.exit(1)
+    }
+    if (rel.startsWith('/') || rel.split(/[\\/]/).includes('..')) {
+      console.error(`[裁剪清单中止] ${where} 的 path/root 必须是 stage/root 下的相对路径且不得含 '..'：${rel}`)
+      process.exit(1)
+    }
+  }
+  for (const entry of SLIM.treeDelete ?? []) {
+    assertRelSafe(entry.path, 'treeDelete')
+    const abs = join(rootDir, entry.path)
+    if (!existsSync(abs)) { log(`  跳过 treeDelete ${entry.path}：不在场`); continue }
+    wsl(`rm -rf "${wslPath(abs)}"`)
+    log(`  treeDelete 已删 ${entry.path}`)
+  }
+  for (const entry of SLIM.extensionDelete ?? []) {
+    assertRelSafe(entry.root, 'extensionDelete')
+    if (typeof entry.ext !== 'string' || !entry.ext.startsWith('.')) {
+      console.error(`[裁剪清单中止] extensionDelete 的 ext 必须是点号开头的扩展名：${JSON.stringify(entry.ext)}`)
+      process.exit(1)
+    }
+    const abs = join(rootDir, entry.root)
+    if (!existsSync(abs)) { log(`  跳过 extensionDelete ${entry.root}：不在场`); continue }
+    // find -print 先计数（日志可核），再 -delete；用 wc -l 反馈真实命中数（防清单空转）。
+    const counted = wsl(`find "${wslPath(abs)}" -type f -name '*${entry.ext}' -print | wc -l`)
+    // 与既有瘦身步同风格：find 的告警不让整条链中断（删除是幂等的，重复跑结果相同）。
+    wsl(`find "${wslPath(abs)}" -type f -name '*${entry.ext}' -delete 2>/dev/null || true`)
+    const n = String(counted).trim().split(/\s+/).pop()
+    log(`  extensionDelete 已删 ${entry.root} 下的 *${entry.ext}：${n} 个`)
+  }
+}
+log('清单驱动裁剪完成（treeDelete + extensionDelete）')
+
 // ── 8. 归档 ────────────────────────────────────────────────────────────
 log('归档 snapshot.tar.xz…')
 const archive = join(OUT_DIR, 'snapshot.tar.xz')

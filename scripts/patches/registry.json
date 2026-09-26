@@ -167,20 +167,9 @@
       "marker": "dsh-mobile link->rename fallback (F8)"
     },
     {
-      "id": "combo-lazy-A4",
-      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-modules/lib/index.js",
-      "scope": "engine",
-      "summary": "客户端 combo 装配延迟到首个图读者（graph()/index-inject/bundle 路由）+ 表脏标记：boot 期每次 flush 只标脏，9-14 次全表重算收敛为一次；图已就绪后的运行期变更与 HMR rebuilt() 仍即时重算",
-      "provenance": "0.14.0 启动性能 P1-1（docs/ANDROID-RUNTIME-PERF-2026-09-12.md §4.A4、docs/IMPLEMENTATION-ACCEPTANCE-PLAN-2026-09-12.md §5.2）；验收 P-AC-06 compose<=2 / P-AC-10",
-      "marker": "dsh-mobile combo lazy (A4)"
-    },
-    {
       "id": "combo-probe-P1",
       "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-modules/lib/index.js",
       "scope": "engine",
-      "requires": [
-        "combo-lazy-A4"
-      ],
       "summary": "把 compose 探针送进产品内（收口 t_compose_total 恒 -1）：在 compose() 返回处打印 `[perf] compose #N at=.. dur=..` 与 `[perf] TOTAL calls=.. totalMs=.. instances=.. firstAt=..ms singles=.. loopP99Ms=.. loopSamples=.. comboCache=..`（字段齐备，无值报 -1）；只主线程安装（worker 的 calls=0 TOTAL 不得冒充真读数）；不新增快照成员、壳侧解析器零改动",
       "provenance": "0.14.1 块F（T6 设备实测真因 + 详档 §5.1 C6/P-AC-04）：42/42 恒为 -1；preload/注入方案结构性无效——① count-compose 的 TOTAL 只在 process.on('exit') 打印，落在 killExistingEngine() 内、早于 rotateEngineLog()，被搬进 engine.log.1 而新生代从偏移 0 读不到；② --import/NODE_OPTIONS 在 file-based worker 线程也执行（Node v24.17 实测，引擎树至少 5 处 worker），worker 临终打 calls=0 而解析取最后一条，得到「非 -1 但为 0」的假绿，且 NODE_OPTIONS 会继承到 agent 全部子进程、缺 COMBO_LIB 直接 exit(2)。落点在 compose() 返回处 = LISTEN 之后、首个页面请求路径上，正是 C2 要测的同步块",
       "marker": "dsh-mobile combo probe (P1)"
@@ -226,6 +215,15 @@
       "provenance": "2026-09-11 apk #163（用户拍板交互）；上游把「下钻」只绑在行尾 chevron/Tab 上，手机上点不到",
       "marker": "dsh-mobile mobile-folder-drill (F6)"
     },
+    {
+      "id": "terminal-inspector-android-D1",
+      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-subprocess-local/lib/runner-launch-B2zsQ1Dz.js",
+      "scope": "engine",
+      "summary": "Android 平台进程检查器：Node 在 Android 上把 process.platform 报成 android，createProcessInspector 只映射 linux/darwin/win32 而直接 throw（新建终端报 terminal inspection is unsupported on platform android）——把 android 归入既有 Linux 分支；不放松其它平台的 throw",
+      "provenance": "2026-09-26 设备实测（16416）：侧边栏新建终端 → subprocess-local: terminal inspection is unsupported on platform android；Android 即 Linux 内核，/proc 与 syscall 表（x64/arm64）一致",
+      "marker": "dsh-mobile android is linux (D1)"
+    },
+
     {
       "id": "pi-toolcall-G2",
       "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/openai-completions.js",

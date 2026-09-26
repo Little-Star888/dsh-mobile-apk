@@ -57,7 +57,7 @@
 **协调仓 `scripts/patches/`（apply-patches.mjs + registry.json + data/compat-map.json）是快照注入链的构建期补丁框架**，按 `scope` 分两路：
 - `scope: vendor` 打 vendor 固化插件（dshmarketplace-plugin A-D + **U2 exact-route browser-session 鉴权**、dsh-undo-savepoint E1-E8 + **U1 `/api/undo` connection/token 鉴权与 no-store**），在 `build-apk-013.ps1` 阶段施加；对应行为回归在 `scripts/patches/tests/{undo-route-auth,market-route-auth}.test.mjs`。
 - `scripts/check-api-route-auth.mjs` 与 `api-route-auth-policy.json` 不属于运行时 asset：它们扫描所有 mobile-owned WebServer registration source，要求 protected guard 或窄公开白名单，并在本地/云端/CI/发布链接线。file-incoming 的 queue、claim、content、complete、clean 五个 exact route 均属于 protected 面；content 只接受进程内 ticket，不能返回源绝对路径。
-- `scope: engine` 打引擎树内上游包（当前全量 15 条以 §7.1 表为准，2026-09-25 现数 `scripts/patches/registry.json`：narb-android-N1 / attach-durable-F2 / **fs-local-link-F8** / flock-android-F3 / atomic-stale-lock-F4 / spj-migration-link-F5 / publish-exclusive-F7 / reference-drill-F6 / pi-toolcall-G2 / perf-compile-cache-flush-N2 / combo-lazy-A4 / combo-probe-P1 / boot-third-party-isolation-G3 / arkweb-resource-protocol-H1 / external-draft-conversation-seam-J1），在 `build-snapshot-013.mjs` 0f 步施加并逐个复查 marker（N1 与 A4/G3 的 0.14.2 重锚见 §7.4；同批撤销 5 条已不在册）。
+- `scope: engine` 打引擎树内上游包（当前全量 14 条以 §7.1 表为准，2026-09-25 现数 `scripts/patches/registry.json`：narb-android-N1 / attach-durable-F2 / **fs-local-link-F8** / flock-android-F3 / atomic-stale-lock-F4 / spj-migration-link-F5 / publish-exclusive-F7 / reference-drill-F6 / pi-toolcall-G2 / perf-compile-cache-flush-N2 / combo-probe-P1 / boot-third-party-isolation-G3 / arkweb-resource-protocol-H1 / external-draft-conversation-seam-J1），在 `build-snapshot-013.mjs` 0f 步施加并逐个复查 marker（N1/G3 的 0.14.2 重锚见 §7.4；同批撤销 6 条已不在册：N1/G1/A3/A4/A5/C3，A4 退役理由见 §7.4）。
 
 **与本节 assets/patched/ 的分界**：同一份引擎文件的修复若能在构建期落地（随发行快照固化），优先走 `scope: engine`；运行时 asset 只承担「必须每次启动前覆盖」或「与引擎版本无关的壳侧定制」（见 §3-2）。已退役：pi-drift-F1（上游 0.1.5 原生 strict/deferred 校验）。**assets/patched/ 是设备端运行时补丁**——壳在每次引擎启动前对快照内上游引擎包做覆盖。两者层不同、目标不同、幂等机制不同（构建期 = registry 幂等标记；运行时 = 内容指纹），勿混用；构建期补丁登记见协调仓 scripts/patches/README.md 与 registry.json。
 
@@ -102,9 +102,8 @@
 | `arkweb-resource-protocol-H1` | `dsh-client-resources/lib/client.js` | ArkWeb（HarmonyOS）令 `dsh-resource://<type>/...` 丢 hostname → 上游 `protocolOf()` 取不到 file provider、文件预览报资源服务不可用（apk #221）；补丁按地址文法局部恢复 type，标准 URL 与其他 scheme 行为不变。回归 `node scripts/patches/tests/arkweb-resource-protocol.test.mjs`；**仍需真实 ArkWeb + Chromium 设备验收** |
 | `external-draft-conversation-seam-J1` | `dsh-client-ui-conversation/lib/client.js` | 外部文件草稿：向 ConversationController 补受控 `addFiles(sessionId, files)` seam，复用既有 `createDrafts` / InputHub `shell.addAttachments` / refusal release——不创建第二条上传路径、不自动发送、路径不进页面/模型。回归 `node scripts/patches/tests/external-draft-conversation-seam.test.mjs` |
 | `perf-compile-cache-flush-N2` | `dsh/lib/bin.js` | 启动性能：Node 只在正常退出写 `NODE_COMPILE_CACHE`，而壳侧停引擎是有界宽限的 SIGTERM→SIGKILL、系统可整进程回收 → 换树后的新条目永远写不进去（设备实测 09-12 23:07 后零新增）。入口周期 flush（40s 首刷 + 5min）+ `exit` 兜底；不注册信号处理，不改任何命令退出语义。回归 `node scripts/patches/tests/compile-cache-flush-n2.test.mjs` |
-| `combo-lazy-A4` | `dsh-client-modules/lib/index.js` | 启动性能：装配期每次 `internal/plugin` 都触发 flush → `compose()` 全表重建（0.13.8 实测 9-14 次、单次 1.8-3.1s、占 LISTEN 墙钟 88%）。首个图读者（`graph()`/index-inject/bundle 路由）之前 flush 只置脏，全量 compose 收敛为一次；图就绪后的运行期变更与 HMR `rebuilt()` 仍即时重算。回归 `node scripts/patches/tests/combo-lazy-a4.test.mjs`。**0.14.2 重锚**（0.1.7-rc.1）：`bundleResource` 变 `async` 方法、薄壳 `serveBundle` 不再是读图点 ⇒ 改在 `this.ensureComposed()` 处插桩 |
 | `narb-android-N1` | `node-addon-require-builtin/lib/index.js` | Android 无预编译 `node-addon-require-builtin` 绑定（npm 无 `-android-x64` 产物，上游 support-matrix 明写 has no published platform package）：0.1.7-rc.1 的 `dsh-app-boot` 新增该依赖（0.1.5 夹具零命中），real 设备 `boot-fail.log` 连记 4 轮 `host preparation failed / No usable native binding found for node-addon-require-builtin-android-x64` ⇒ 引擎 boot 期硬崩。修法：`createEntryApi` 顶层调用包 try/catch（失败即 `api = undefined` + 一次性告警），三个导出函数在 `api` 缺席时回落 `require(moduleId)`——壳侧本就以 `--expose-internals` 起 node（EngineManager.kt:1036 argv 第二项），该 flag 恰好暴露 rc.1 `internalModules()` 需要的五个 `internal/modules/*`，与内置模块同一实现，不是「假装成功」。行为回归 `node scripts/patches/tests/narb-native-fallback-n1.test.mjs`（11 项，含 `--expose-internals` 子进程真跑回落） |
-| `combo-probe-P1` | `dsh-client-modules/lib/index.js` | `requires: combo-lazy-A4`：把 compose 探针送进产品内，收口 `t_compose_total` 恒 -1（42/42 恒 -1）。在 `compose()` 返回处打印 `[perf] compose #N at=… dur=…` 与 `[perf] TOTAL calls=… totalMs=…`（字段恒在场，无值写 -1）；只主线程安装（worker 的 calls=0 TOTAL 不得冒充真读数）；不新增快照成员、壳侧解析器零改动。`provenance` 见 `scripts/patches/registry.json` 的 `combo-probe-P1` |
+| `combo-probe-P1` | `dsh-client-modules/lib/index.js` | 把 compose 探针送进产品内，收口 `t_compose_total` 恒 -1（42/42 恒 -1）。在 `compose()` 返回处打印 `[perf] compose #N at=… dur=…` 与 `[perf] TOTAL calls=… totalMs=…`（字段恒在场，无值写 -1）；只主线程安装（worker 的 calls=0 TOTAL 不得冒充真读数）；不新增快照成员、壳侧解析器零改动。`provenance` 见 `scripts/patches/registry.json` 的 `combo-probe-P1` |
 | `boot-third-party-isolation-G3` | `dsh-app-boot/lib/index.js` | 第三方插件 boot 期失败隔离：`boot()` 经隔离式挂载器挂 root include，失败条目若属**用户自装**（非 `@deepseek-ai/*` / `@dsh-android/*` / 出货具名插件）则加 `disabled:true` 后重试并点名列出被跳过的插件；官方/出厂插件失败、不可识别失败、或超过上限 8 个仍响亮失败。真因：用户自装插件 import 期抛错在 `mountRootInclude` 就抛出，`boot-pending-G1` 的锚点 `assertEntriesActivated` 结构上不可达。真源见 `scripts/patches/registry.json` 的 `boot-third-party-isolation-G3`；回归 `node scripts/patches/tests/boot-third-party-isolation-g3.test.mjs` |
 
 
@@ -201,18 +200,33 @@ unlink ENOENT 容忍），与 attachment 资产逐字节同源——此前这三
   `internal/modules/*`。设备实测证据是 `boot-fail.log` 连记 4 轮
   `No usable native binding found for node-addon-require-builtin-android-x64`（引擎 boot 期硬崩，
   不是「静默禁用插件」）。fixture 与回归见 §7.1 行。
-- **重锚 3 条**：`combo-lazy-A4`（`bundleResource` 变 `async` 方法 ⇒ 改插 `this.ensureComposed()`）、
-  `boot-third-party-isolation-G3`（`mountRootInclude(..., binName)` 第 5 参漂移，`binName` 一路透传）、
+- **重锚 2 条**：`boot-third-party-isolation-G3`（`mountRootInclude(..., binName)` 第 5 参漂移，`binName` 一路透传）、
   `perf-compile-cache-flush-N2`（根包不再 `import { readFileSync } from "node:fs"`，锚改末条顶层 import）。
   唯一可信锚点判据 = `node scripts/probe-engine-anchors.mjs`（按 overlay 的 (包名, 版本) 回读构建期同一批
   未打补丁 tgz）；**不要用 stage 目录**（本轮实测它停在 0.1.2-rc.1），**也不要用测试夹具**（0.1.5 时代写死在
   目录名里，真树断 9 条而 16 个补丁测试全绿）。
-- **撤销 5 条**（各带「收益是否还在」的证据，不是「锚点找不到就删」）：`perf-patch-reload-N1`（rc.1 全仓
+- **撤销 6 条**（各带「收益是否还在」的证据，不是「锚点找不到就删」）：`perf-patch-reload-N1`（rc.1 全仓
   `patchReload` 零命中，机制整条消失）、`boot-pending-G1`（场景不存在 + 锚点会误匹配同名声明，严禁重锚）、
   `combo-single-lazy-A5`（上游已原生满足且取舍更温和）、`combo-cache-A3`（同机同批 rc.1 字节实测：上游
-  boot 路径 44 ms vs A3 查表 129 ms，**净亏**）、`combo-parallel-C3`（分片对象随 A3 一起消失）。
+  boot 路径 44 ms vs A3 查表 129 ms，**净亏**）、`combo-parallel-C3`（分片对象随 A3 一起消失）、
+  `combo-lazy-A4`（2026-09-25 退役，理由见下条）。
   连带清掉写半边：`scripts/lib/combo-precompute.mjs`、`inject-all.py --combo-cache-delta`、
   两条构建链的 precompute 调用；`scripts/check-combo-cache.mjs` 反向改造成「死缓存回流门禁」。
+- **`combo-lazy-A4` 退役（2026-09-25，用户指令「该退役的退役」）**：上游 0.1.7 已原生惰性化 combo
+  载荷（`dsh/packages/client/modules/README.md`「creates combo descriptors without building response
+  bodies」；`src/index.ts:384 lazyBody`）。同一 0.1.7-rc.1 基线离线 A/B 实测：**裸树启动期只有 2 次**
+  compose（空表 2.27ms + 真记录 3.97ms），A4 臂 1 次 5.79ms——总量同量级（A4 宣称的「9-14 次 × 1.8-3.1s
+  收敛为 1 次」在当前上游架构下结构性无对象），而 A4 把那次 compose 从构造期挪到**首个图读者**
+  （= 首个页面请求路径，TTFB 侧，实测 HTTP−LISTEN 竖屏 557ms / 横屏 1472ms）⇒ 位置为负。成本是
+  1 个 engine 补丁 + 7 个脆弱锚点 + P1 的 `requires` 依赖。证据：`.deploy-tmp/retire-sweep/REPORT.md`
+  §3.1.2/§3.1.3。落地：registry 31 → **30 条**，`apply-patches.mjs` IMPLS 移除其实现（`ensureComposed` /
+  `composeDirty` 全符号），`combo-probe-P1` 的 `requires` 随之清空（P1 自身保留——它仍被 check-boot-budget
+  的 C2/C4/C6 消费）。回归 `scripts/patches/tests/combo-lazy-a4.test.mjs` 就地改写成「撤销不变量守卫」。
+  **连带修 `scripts/check-boot-budget.mjs` 的两条 C5 门禁缺陷**：① `[perf] boot singles=` 解析正则缺 `-1`
+  分支（P1 在计数缺席时故意写 `singles=-1`）⇒ 对设备真值恒不可判定；② 正向对照原先只认已撤销的 A5
+  计数器 `globalThis.__dshMobileComboLazyStats`，A5 退役后它无任何生产者 ⇒「恒 0」永不构成证据。现改为
+  直驱产品内单条服务路径（断言 200 + 载荷含 id + 两次 `body()` 同一 promise），C5 判据改三态
+  （0 / >0 / 缺席），既不恒绿也不恒红。C3「compose ≤ 2」阈值**不放宽**（裸树正是 2 次，仍可满足）。
 
 **引擎 overlay 追版**（`scripts/snapshot-config/engine-overlay.json`，2026-09-25 现数）：
 `vendorTop` 17 → **36** 条（+19：`execa` 及其依赖闭包、`@sec-ant/readable-stream`、

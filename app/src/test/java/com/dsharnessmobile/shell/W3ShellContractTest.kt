@@ -196,6 +196,30 @@ class W3ShellContractTest {
 
   // ── 0.14.1 块K ③（反馈三）：pnpm store 路径别名 ──────────────────────────────
 
+  // ── 0.14.2 D13：侧边栏终端的默认 shell ─────────────────────────────────────
+
+  @Test
+  fun shellEnvPinsTheSnapshotBashAsTheDefaultShell() {
+    val code = codeOnly(source("EngineManager.kt"))
+    // 判据（注入这一半）：SHELL 必须指向快照内 bash，且与 PATH 同源（usrDir），
+    // 不得是 Termux 编译期前缀。
+    assertTrue(
+      "D13：shellEnv() 必须注入 SHELL=快照内 bash，否则上游 subprocess-local 回退到 " +
+        "os.userInfo().shell（快照 NSS 解析出 /data/data/com.termux/... 编译期前缀）→ 新建终端必失败",
+      code.contains("\"SHELL\" to File(usrDir, \"bin/bash\").absolutePath"),
+    )
+    // 反证：不得写成 Termux 编译期路径（本应用域不可达）。
+    assertFalse(
+      "SHELL 不得指向 Termux 编译期前缀 com.termux",
+      code.contains("\"SHELL\" to \"/data/data/com.termux"),
+    )
+    // 反证：不得指向 /system/bin/sh（引擎要求交互 shell，且上游 bash 方言默认 argv 是 --noprofile --norc -i）。
+    assertFalse(
+      "SHELL 不得退化为系统 sh",
+      code.contains("\"SHELL\" to \"/system/bin/sh"),
+    )
+  }
+
   @Test
   fun shellEnvPinsThePnpmStoreDir() {
     // 判据（值这一半）：store 目录必须与 HOME 同源派生，且落在 pnpm 默认口径

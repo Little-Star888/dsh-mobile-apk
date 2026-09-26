@@ -57,6 +57,27 @@ object PluginMounts {
   /** `name: 'x'` / `name: x`（挂载条目的包名行）。 */
   private val NAME_LINE = Regex("""(?m)^\s*name:\s*['"]?([^'"\s][^'"]*?)['"]?\s*$""")
 
+  /**
+   * 0.14.2（D12）：**插件条目**的 id 行与 name 行。
+   *
+   * 真因：清单里的 `name:` 不只有包名——我们的 patch 里 `- id: llm-pi-ai` 这一条带 36 个模型定义，
+   * 每个模型都有 `name: MiMo 2.5` 之类的**显示名**；设备实读 59 个 `name:` 里 42 个是显示名、
+   * 只有 17 个是包名。旧实现按任意深度的 `name:` 收集，于是「我们的插件集合」被 42 个显示名污染
+   * （硬清单里躺着 `DeepSeek V4 Flash` 这种条目，任何「必需插件是否在场」的判定都会被带偏）。
+   *
+   * 条目判据（与 [FactoryProfilePatch] 的条目模型同源）：
+   * - 插件只以 `- id:` / `- name:` （**列表项**）的形式成为装配条目；
+   * - 顶层条目为列 0 的 `- `，insert 组的一层子条目为组内**最浅缩进**的 `- `；
+   * - 配置块内的 `name:`（任意深度、无 `- ` 前缀）**不是条目**，不计入。
+   */
+
+  /** 条目首行（`- id:` / `- name:` 列表项）与条目内 `name` 键行。 */
+  private val ITEM_LINE = Regex("""^(\s*)-\s+(id|name):\s*(.*)$""")
+  private val ENTRY_NAME_KEY = Regex("""^(\s*)name:\s*(.*)$""")
+
+  /** 顶层条目起始行正则（列 0 的 `- `，后跟空白或行尾）。 */
+  private val TOP_ITEM = Regex("""^-(?:\s|$)""")
+
   /** 顶层条目起始行（`- insert:` / `- id: x` / `-`）。 */
   private val TOP_LEVEL = Regex("""^-\s.*|^-$""")
 
@@ -73,11 +94,114 @@ object PluginMounts {
   // ── 纯逻辑 ──────────────────────────────────────────────────────────────
 
   /**
-   * 纯逻辑：挂载清单里出现的全部插件名（`name:` 值，剥掉引号）。
+   * 纯逻辑：挂载清单里的**插件条目名**（`- name:` 列表项，剥掉引号）。
    *
-   * 用 `name:` 行而不是解析 YAML：清单格式由我们与上游共同书写，设备实读的形状是固定的三层
-   * （`- insert:` → `    - id:` → `      name:`），而引 YAML 解析器会引入一份与引擎不同版本的实现。
-   * 判据取「名字集合」，因此即使将来多出字段也不影响本用途。
+   * 0.14.2（D12）：与 [mountedNames] 的区别是**只认条目**。判据见 [parseEntryNames] 的注释：
+   * 配置块内的 `name:`（`llm-pi-ai` 的模型显示名）不是插件条目，不得进入插件集合。
+   *
+   * 用途：硬/软清单（[`hardNames`][hardNames] / [`softNames`][softNames]）与「必需插件在场」判定。
+   */
+  fun entryNames(patchText: String): List<String> =
+    parseEntryNames(patchText).mapNotNull { it.second }.filter { it.isNotEmpty() }
+
+  /**
+   * 条目扫描（与 `FactoryProfilePatch` 的条目模型同源）：
+   * - 顶层块 = 列 0 的 `- ` 起头；insert 组的一层子条目 = 组内**最浅缩进**的 `- id:` / `- name:`；
+   * - 条目名取「条目首行是 `- name:`」或「条目内缩进 = 条目缩进 + 2 的 `name:` 键」；
+   * - 配置块内更深的 `id:` / `name:` 不是条目。
+   *
+   * @param patchText 清单全文。
+   * @returns 条目 (id, name) 列表（id 或 name 可为 null）。
+   */
+  private fun parseEntryNames(patchText: String): List<Pair<String?, String?>> {
+    val lines = patchText.split("\n")
+    val blocks = ArrayList<Pair<String, List<String>>>()
+    var head: String? = null
+    var body = ArrayList<String>()
+    for (raw in lines) {
+      val line = raw.trimEnd('\r')
+      if (TOP_ITEM.containsMatchIn(line)) {
+        if (head != null) blocks += head!! to body
+        head = line
+        body = ArrayList()
+      } else if (head != null) {
+        body += line
+      }
+    }
+    if (head != null) blocks += head!! to body
+    val out = ArrayList<Pair<String?, String?>>()
+    for ((headLine, bodyLines) in blocks) {
+      val isInsert = Regex("""^- insert:\s*$""").containsMatchIn(headLine)
+      val all = ArrayList<String>()
+      all += headLine
+      all += bodyLines
+      var entryIndent = 0
+      if (isInsert) {
+        val widths = all.mapNotNull { ITEM_LINE.find(it)?.groupValues?.get(1)?.length?.takeIf { w -> w > 0 } }
+        if (widths.isEmpty()) continue
+        entryIndent = widths.min()
+      } else if (ITEM_LINE.find(headLine) == null) {
+        continue
+      }
+      var id: String? = null
+      var name: String? = null
+      var open = false
+      for (line in all) {
+        val item = ITEM_LINE.find(line)
+        if (item != null && item.groupValues[1].length == entryIndent) {
+          if (open) out += id to name
+          open = true
+          id = if (item.groupValues[2] == "id") item.groupValues[3].trim().trim('\'', '"') else null
+          name = if (item.groupValues[2] == "name") item.groupValues[3].trim().trim('\'', '"') else null
+          continue
+        }
+        if (!open) continue
+        val key = ENTRY_NAME_KEY.find(line) ?: continue
+        if (key.groupValues[1].length == entryIndent + 2 && name == null) {
+          name = key.groupValues[2].trim().trim('\'', '"')
+        }
+      }
+      if (open) out += id to name
+    }
+    return out
+  }
+
+  /**
+   * 0.14.2（D12）：**必需插件条目是否全部在场**（清单级别，无设备探活）。
+   *
+   * 在 [entryNames] 上做集合包含判定——配置显示名不会命中（它们不是 `- name:` 列表项），
+   * 因此「模型显示名躺在硬清单里」不再能伪造「插件在场」。
+   *
+   * @param patchText 挂载清单全文。
+   * @param required 必需包名集合（注入集 @dsh-android 下的全部包 + vendor 两个固化包）。
+   * @returns 缺失的必需包名（空集 = 全部在场）。
+   */
+  fun missingRequired(patchText: String, required: Collection<String>): List<String> {
+    val present = entryNames(patchText).toHashSet()
+    return required.filter { it.isNotEmpty() && it !in present }
+  }
+
+  /**
+   * 0.14.2（D12）：D12 条目里点名的 `requiredPresent` 口径 —— 必需的 **插件条目** 里，哪些已经**在场**。
+   *
+   * 与 [missingRequired] 互为补集（`present ∪ missing = required`），供调用方按「已满足」正向叙述。
+   * 判据同源：只看 [entryNames]（`- name:` 条目），模型显示名不参与。
+   *
+   * @param patchText 挂载清单全文。
+   * @param required 必需包名集合。
+   * @returns 已到场的必需包名（集合，便于直接做差）。
+   */
+  fun requiredPresent(patchText: String, required: Collection<String>): Set<String> {
+    val names = entryNames(patchText).toHashSet()
+    return required.filter { it.isNotEmpty() && it in names }.toSet()
+  }
+
+  /**
+   * 纯逻辑：挂载清单里出现的全部 `name:` 值（含配置块内的显示名），剥掉引号。
+   *
+   * 兼容保留：本函数是**宽松**口径（任意深度的 `name:`），只用于展示/诊断与既有回归断言；
+   * 「插件在不在场」一律用 [entryNames] / [missingRequired]。设备实读：59 个 `name:` 里
+   * 42 个是 `llm-pi-ai` 的模型显示名。
    */
   fun mountedNames(patchText: String): List<String> =
     NAME_LINE.findAll(patchText)
@@ -135,18 +259,73 @@ object PluginMounts {
     }
     if (hits.isEmpty()) return null
     var removed = 0
-    // 从后往前删，索引不失效；同一块命中多次也只删一次（用已删区间去重）。
+    // 从后往前删，索引不失效；同一条目命中多次也只删一次（用已删区间去重）。
     for (hit in hits.sortedDescending()) {
       var start = hit
       while (start >= 0 && !TOP_LEVEL.matches(lines[start])) start--
       if (start < 0) return null // 找不到顶层起点：宁可不删，也不猜
+      // 0.14.2（D11 同源）：命中行若不是**顶层条目首行**，它就在某个 `- insert:` 组里 —— 此时
+      // 删的必须是**那一条子条目**（上溯到同组最近的同层 `- id:` / `- name:` 行），不是整个组。
+      // 旧实现无条件删整组 ⇒ 同组里我们自己的硬清单插件被连坐摘掉（实测反证：2 子组里摘
+      // host-web-compat 会连带删掉 shell-web-compat 的兄弟 shell-termux）。
+      if (start != hit) {
+        // 条目边界 = 组内承载命中行的那一条：从 start 之后找到**最后一个** `- id:` / `- name:`
+        // 列表项行（就是本条目的首行），条目末行 = 其后第一个缩进不深于它的非空行。
+        // 旧实现用命中行自身的缩进当边界：命中 `name:` 行时只删 name 行、留下悬空的 `- id:`
+        // （引擎照旧 import）；命中组首 `- id:` 行时又按整组删（连坐）。
+        var itemStart = hit
+        for (probe in hit downTo start + 1) {
+          if (ITEM_LINE.containsMatchIn(lines[probe])) { itemStart = probe; break }
+        }
+        val itemIndent = lines[itemStart].indexOfFirst { !it.isWhitespace() }
+        var itemEnd = itemStart + 1
+        while (itemEnd < lines.size) {
+          val candidate = lines[itemEnd]
+          if (candidate.isBlank()) { itemEnd += 1; continue }
+          if (candidate.indexOfFirst { !it.isWhitespace() } <= itemIndent) break
+          itemEnd += 1
+        }
+        while (itemEnd > itemStart + 1 && lines[itemEnd - 1].isBlank()) itemEnd -= 1
+        lines.subList(itemStart, itemEnd).clear()
+        removed++
+        continue
+      }
       var end = start + 1
       while (end < lines.size && !TOP_LEVEL.matches(lines[end])) end++
       lines.subList(start, end).clear()
       removed++
     }
     if (removed == 0) return null
-    return lines.joinToString("\n")
+    return dropEmptyInsertWrappers(lines).joinToString("\n")
+  }
+
+  /**
+   * 清理因人肉摘除条目而变空的 `- insert:` 包装行（YAML 会把它解析成 null 条目，引擎 boot 期会抛）。
+   * 判据：`- insert:` 行之后、下一个同级或更浅的非空行之前，是否已无任何更深缩进行。
+   */
+  private fun dropEmptyInsertWrappers(lines: MutableList<String>): MutableList<String> {
+    val indent = { line: String -> line.indexOfFirst { !it.isWhitespace() } }
+    var index = 0
+    while (index < lines.size) {
+      if (lines[index].trim() != "- insert:") { index += 1; continue }
+      val wrapperIndent = indent(lines[index])
+      var hasChild = false
+      var probe = index + 1
+      while (probe < lines.size) {
+        val candidate = lines[probe]
+        if (candidate.isBlank()) { probe += 1; continue }
+        if (indent(candidate) <= wrapperIndent) break
+        hasChild = true
+        break
+      }
+      if (hasChild) { index += 1; continue }
+      var end = index + 1
+      while (end < lines.size && lines[end].isBlank()) end += 1
+      lines.subList(index, end).clear()
+      while (index > 0 && lines[index - 1].isBlank()) lines.removeAt(index - 1)
+      if (index > 0) index -= 1
+    }
+    return lines
   }
 
   // ── 清单读写 ────────────────────────────────────────────────────────────
@@ -188,12 +367,15 @@ object PluginMounts {
    *
    * 取「并入」而不是「替换」：升级时 patch 里可能已经混着用户自装条目，而把用户条目误判成
    * 「可以拔」是危险方向——宁可少拔（保留原样、交给用户判断），不可错拔。返回值 = 是否发生了更新。
+   *
+   * 0.14.2（D12）：名单来源从 [mountedNames]（任意深度 `name:`，会把 36 个模型显示名写成
+   * 「插件」）改为 [entryNames]（只认 `- name:` 条目）。
    */
   fun ensureHard(context: Context, patch: File, fingerprint: String?): Boolean {
     val fp = fingerprint ?: return false
     val stored = try { JSONObject(hardFile(context).readText()).optString("fingerprint", "") } catch (_: Throwable) { "" }
     if (stored == fp) return false
-    val current = try { mountedNames(patch.readText()) } catch (_: Throwable) { emptyList() }
+    val current = try { entryNames(patch.readText()) } catch (_: Throwable) { emptyList() }
     val merged = (hardNames(context) + current).sorted()
     writeNames(hardFile(context), merged, fp, null, System.currentTimeMillis())
     return true
@@ -209,7 +391,7 @@ object PluginMounts {
     val text = try { patch.readText() } catch (_: Throwable) { return false }
     val d = digest(text)
     if (d == softDigest(context)) return false
-    writeNames(softFile(context), mountedNames(text), null, d, System.currentTimeMillis())
+    writeNames(softFile(context), entryNames(text), null, d, System.currentTimeMillis())
     return true
   }
 

@@ -1351,88 +1351,6 @@ const IMPLS = {
       return s
     },
   },
-  // ── combo-lazy-A4：compose() 延迟 + 去重（0.14.0 启动性能 P1-1，scope=engine）──
-  // 背景（docs/ANDROID-RUNTIME-PERF-2026-09-12.md §R1/§4.A4）：装配期每次 internal/plugin 事件
-  // 都触发 flush → compose() 全表重建 90 条 combo（单次 1.8-3.1 s，启动期 9-14 次，占 LISTEN
-  // 墙钟 88%）。上游构造函数还先 compose 一次、再 flush 一次（同数据纯重复）。修法：
-  //   ① 构造函数不再抢先 compose；
-  //   ② flush 只置脏（composeDirty），首个读者（graph()/index-inject/bundle 路由/rebuilt）触发
-  //      唯一一次全量 compose——boot 期间的多次表变更因此收敛为一次；
-  //   ③ 图已存在后的 flush（运行期插件挂载/HMR）保持即时重算 + notify，行为不变（HMR rebuilt()
-  //      路径原样，只补清脏标记）。
-  // 与 A3 叠加：唯一那次 compose 里逐条查构建期缓存。
-  'combo-lazy-A4': {
-    file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-modules/lib/index.js',
-    scope: 'engine',
-    check: (s) => (s.match(/dsh-mobile combo lazy \(A4\)/g) || []).length === 2
-      && s.includes('\tensureComposed() {')
-      && !s.includes('\t\tthis.composed = this.compose();\n\t\tconst failures = [];'),
-    apply: (s) => {
-      if ((s.match(/dsh-mobile combo lazy \(A4\)/g) || []).length === 2 && s.includes('\tensureComposed() {')) return s
-      const FIELD_OLD = '\tflushQueued = false;\n\tcomposed;'
-      const FIELD_NEW = '\tflushQueued = false;\n\tcomposed;\n\tcomposeDirty = false; /* dsh-mobile combo lazy (A4): a flush deferred the composed graph */'
-      if (!s.includes(FIELD_OLD)) throw new Error('combo-lazy 锚点未命中：类字段 flushQueued/composed')
-      s = s.replace(FIELD_OLD, FIELD_NEW)
-      const CTOR_OLD = '\t\tthis.composed = this.compose();\n\t\tconst failures = [];'
-      const CTOR_NEW = [
-        '\t\t/* dsh-mobile combo lazy (A4): the initial composition is deferred to the first graph',
-        '\t\t * reader (or the first post-serve table change), so every boot-time flush coalesces. */',
-        '\t\tconst failures = [];',
-      ].join('\n')
-      if (!s.includes(CTOR_OLD)) throw new Error('combo-lazy 锚点未命中：构造函数抢先 compose（引擎升级后请人工核对 ClientModuleRegistry）')
-      s = s.replace(CTOR_OLD, CTOR_NEW)
-      const FLUSH_OLD = '\t\tif (!changed) return;\n\t\tlet composed;'
-      const FLUSH_NEW = [
-        '\t\tif (!changed) return;',
-        '\t\tthis.composeDirty = true;',
-        '\t\tif (this.composed === void 0) return; /* defer the first composition to the graph reader (A4) */',
-        '\t\tlet composed;',
-      ].join('\n')
-      if (!s.includes(FLUSH_OLD)) throw new Error('combo-lazy 锚点未命中：flush 提前返回')
-      s = s.replace(FLUSH_OLD, FLUSH_NEW)
-      const FLUSH_SET_OLD = '\t\tthis.composed = composed;\n\t\tthis.notifyGraphChanged();'
-      const FLUSH_SET_NEW = '\t\tthis.composed = composed;\n\t\tthis.composeDirty = false;\n\t\tthis.notifyGraphChanged();'
-      if (!s.includes(FLUSH_SET_OLD)) throw new Error('combo-lazy 锚点未命中：flush 写回 + notify')
-      s = s.replace(FLUSH_SET_OLD, FLUSH_SET_NEW)
-      const GRAPH_OLD = '\tgraph() {\n\t\treturn this.composed;\n\t}'
-      const GRAPH_NEW = [
-        '\tgraph() {',
-        '\t\treturn this.ensureComposed();',
-        '\t}',
-        '\t/**',
-        '\t* Compose on demand: the first reader after any table change pays the single full pass;',
-        '\t* later readers reuse the stable graph object. Boot-time flushes only mark dirty, so the',
-        '\t* 9-14 startup compositions collapse into the first read (perf A4).',
-        '\t* @returns the current composed entry graph.',
-        '\t*/',
-        '\tensureComposed() {',
-        '\t\tif (this.composed !== void 0 && !this.composeDirty) return this.composed;',
-        '\t\tconst composed = this.compose();',
-        '\t\tthis.composed = composed;',
-        '\t\tthis.composeDirty = false;',
-        '\t\treturn composed;',
-        '\t}',
-      ].join('\n')
-      if (!s.includes(GRAPH_OLD)) throw new Error('combo-lazy 锚点未命中：graph()')
-      s = s.replace(GRAPH_OLD, GRAPH_NEW)
-      const INJECT_OLD = '\t\t\ttable.push(...bootInjections(this.composed));'
-      const INJECT_NEW = '\t\t\ttable.push(...bootInjections(this.ensureComposed()));'
-      if (!s.includes(INJECT_OLD)) throw new Error('combo-lazy 锚点未命中：index-inject 行')
-      s = s.replace(INJECT_OLD, INJECT_NEW)
-      const RESOURCE_OLD = '\tasync bundleResource(method, url) {\n\t\tif (method !== "GET" && method !== "HEAD") return { status: 405 };'
-      const RESOURCE_NEW = '\tasync bundleResource(method, url) {\n\t\tthis.ensureComposed();\n\t\tif (method !== "GET" && method !== "HEAD") return { status: 405 };'
-      if (!s.includes(RESOURCE_OLD)) throw new Error('combo-lazy 锚点未命中：bundleResource')
-      s = s.replace(RESOURCE_OLD, RESOURCE_NEW)
-      const REBUILT_OLD = '\t\tthis.composed = this.compose();\n\t\tfor (const notify of this.rebuildListeners) try {'
-      const REBUILT_NEW = '\t\tthis.composed = this.compose();\n\t\tthis.composeDirty = false;\n\t\tfor (const notify of this.rebuildListeners) try {'
-      if (!s.includes(REBUILT_OLD)) throw new Error('combo-lazy 锚点未命中：rebuilt() 即时重算')
-      s = s.replace(REBUILT_OLD, REBUILT_NEW)
-      if ((s.match(/dsh-mobile combo lazy \(A4\)/g) || []).length !== 2 || !s.includes('\tensureComposed() {')) {
-        throw new Error('combo-lazy 复核失败——不写回')
-      }
-      return s
-    },
-  },
 
   // ── combo-probe-P1：把 compose 探针送进产品内，收口 C6 的 t_compose_total=-1（0.14.1 块F，scope=engine）──
   // 背景（T6 设备实测的真因 + 详档 §5.1 C6/P-AC-04）：t_compose_total 在设备上 42/42 恒为 -1——探针
@@ -1455,7 +1373,6 @@ const IMPLS = {
   'combo-probe-P1': {
     file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-modules/lib/index.js',
     scope: 'engine',
-    requires: ['combo-lazy-A4'],
     check: (s) => s.includes('dsh-mobile combo probe (P1)')
       && s.includes('dshMobileComboProbeEmit')
       && s.includes('import { isMainThread } from "node:worker_threads";')
@@ -1620,6 +1537,44 @@ const IMPLS = {
       if (!s.includes('dsh-mobile compile cache flush (N2)') || !s.includes('dshMobileFlushCompileCacheQuietly')) {
         throw new Error('compile-cache-flush 复核失败——不写回')
       }
+      return s
+    },
+  },
+
+  // ── terminal-inspector-android-D1（D14）：Android 平台进程检查器（2026-09-26 设备实测，scope=engine）──
+  // 背景：侧边栏「新建终端」在设备上失败：
+  //   subprocess-local: terminal inspection is unsupported on platform android
+  // 真因：Android 的 Node 把 process.platform 报成 'android'（不是 'linux'），而上游
+  // createProcessInspector 只映射 linux / darwin / win32 → 直接 throw。
+  // 同因下 selectContainmentMode 的 platform === 'linux' 分支与 LocalTerminalHandle 的若干
+  // this.platform === 'linux' 判定在 android 上也拿不到该分支。
+  //
+  // 口径（为什么不改壳侧、也不改上游源）：
+  // - 上游树零改动（铁律）；壳侧无法改变 Node 的 process.platform。
+  // - Android 就是 Linux 内核，syscall 表（x64/arm64）与 /proc 形态一致，
+  //   故把 'android' 归入既有 Linux 分支是语义等价，不新增实现。
+  // - 只归类，不放松任何判据：真·不支持的平台仍然照旧 throw。
+  'terminal-inspector-android-D1': {
+    file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-subprocess-local/lib/runner-launch-B2zsQ1Dz.js',
+    scope: 'engine',
+    check: (s) => s.includes('dsh-mobile android is linux (D1)'),
+    apply: (s) => {
+      if (s.includes('dsh-mobile android is linux (D1)')) return s
+      const OLD = 'function createProcessInspector(platform = process.platform, arch = process.arch, internals = DEFAULT_INTERNALS) {'
+      const NEW = [
+        '/* dsh-mobile android is linux (D1): Node reports process.platform === "android" on Android,',
+        ' * while this dispatcher only maps linux/darwin/win32 — the terminal controller then fails with',
+        ' * "terminal inspection is unsupported on platform android". Android is the Linux kernel, and',
+        ' * the inspectors below are pure /proc + syscall-table readers, so android belongs to the Linux',
+        ' * branch. This only widens the dispatch key; every other platform still throws. */',
+        'function createProcessInspector(platform = process.platform, arch = process.arch, internals = DEFAULT_INTERNALS) {',
+        '\tif (platform === "android") platform = "linux";',
+      ].join(String.fromCharCode(10))
+      if (!s.includes(OLD)) {
+        throw new Error('terminal-inspector-android 锚点未命中：createProcessInspector——引擎升级后请人工核对 subprocess-local 构建产物')
+      }
+      s = s.replace(OLD, NEW)
+      if (!s.includes('dsh-mobile android is linux (D1)')) throw new Error('terminal-inspector-android 复核失败——不写回')
       return s
     },
   },

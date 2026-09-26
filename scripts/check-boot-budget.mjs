@@ -55,7 +55,17 @@ const SYNC_BLOCK_BUDGET_MS = 2000
 // 结构下限之下。新值 = ①1000 + ②2000 + ③1000(残余取整) = 4000 ms；设备 max 2940 留有约 1060 ms 余量。
 // **这不是放宽以掩盖**：C2（同步块 ≤2000 ms）仍是对**可控部分**的紧判据，C1 退化为端到端回归哨兵。
 const LISTEN_TO_HTTP_BUDGET_MS = 4000
-/** C3：compose 调用数上限（与 P-AC-06 一致；已被设备实测满足，降级为回归哨兵）。 */
+/**
+ * C3：compose 调用数上限（与 P-AC-06 一致；已被设备实测满足，降级为回归哨兵）。
+ *
+ * 依据重写（2026-09-25，随 A4 退役）：这个 2 当初是照 **combo-lazy-A4** 的「9-14 次收敛为 1 次」
+ * 定的。A4 已退役——上游 0.1.7 自己就把 combo 载荷惰性化了（dsh/packages/client/modules/README.md
+ * 「creates combo descriptors without building response bodies」；index.ts:384 lazyBody）。
+ * 撤掉 A4 后**裸树**在启动期是 **2 次** compose（.deploy-tmp/retire-sweep/REPORT.md §3.1.2 同基线实测：
+ * 构造期先空表 1 次 records=0 / 2.27ms，随即 flush 带真记录 1 次 records=67 / 3.97ms；设备真值单次 5-9ms），
+ * 所以阈值 2 **仍然可满足**、判据本身不需要放宽——它现在守的是「别再退回每次 flush 全表重算」。
+ * 放宽会把这层哨兵一起撤掉，故**不放宽**。
+ */
 const COMPOSE_CALLS_BUDGET = 2
 
 /**
@@ -89,19 +99,20 @@ function num(value) {
 }
 
 /**
- * C5 正向对照的**真跑**：证明惰性单条路径确实会产出 `singles` 读数，而不是「探针没接上」。
+ * C5 正向对照的**真跑**：证明产品内单条 combo 的**服务路径**确实活着、且载荷是惰性的。
  *
- * 为什么不能在设备产物里等这条行：一次正常冷启动**从不请求单条 URL**（单条只在 HMR invalidate()
- * 之后取用，这是 A5 的立论），所以设备产物里天生没有 `[perf] single`。故对照必须主动触发一次。
- * 两条可用路径（按可用性择一，都失败则如实返回 reason）：
- *   a. `curl` 引擎本机 `/plugins/??<id>/client.js&rev=…`——需要页面/图提供的单条 URL 与鉴权，
- *      在门禁里难以稳定构造；
- *   b. **离线直驱产品内探针**：把打过 `combo-single-lazy-A5` + `combo-probe-P1` 的引擎树
- *      `dsh-client-modules/lib/index.js` 载入本机 Node，构造最小 registry，调 `compose()` 后
- *      请求一个已登记的单条 URL，断言 `singles` 由 0 变 1 且 `[perf] single` 行出现。
- * 现实现走 (b)：它不依赖设备/网络，且证明的正是「产品内那段代码会打这条行」。
+ * 为什么不能在设备产物里等 `[perf] single` 行：一次正常冷启动**从不请求单条 URL**
+ * （单条只在 HMR invalidate() 之后取用），所以那条行在真产物里结构性缺席。
+ * 为什么不再读 `globalThis.__dshMobileComboLazyStats`：那个计数器由已撤销的 A5 安装，
+ * 在 0.14.2 的树上**没有任何生产者**——继续用它，对照就永远「没跑起来」，C5 的恒 0 永不构成证据
+ * （2026-09-25 实测：设备 singles=-1，parseProbe 也读不出）。
+ * 现判据落回**上游自己的惰性契约**（0.1.7 `lazyBody`，index.ts:384）与真实服务路径：
+ *   ① 离线直驱打过 P1 的引擎树：构造最小 registry → compose() → 按登记的单条 URL 请求；
+ *   ② 断言三件事：单条 URL 命中 200、脚本头确实带该 id、`body()` 两次调用返回**同一 promise**
+ *      （这是 `lazyBody` 的 memoize 契约，也是「载荷没被提前构造」的可判据证据）。
+ * ① 跑不起来（无补丁树/载入失败）→ 如实返回 ran=false（环境前置），调用方记 SKIP，绝不当绿。
  * @param libPath - 引擎树 dsh-client-modules/lib/index.js 的路径（可省略，会自动探测）。
- * @returns `{ ok, via, reason }`。
+ * @returns `{ ok, ran, via, reason }`。
  */
 export function runLivenessProbe(libPath) {
   const candidates = [
@@ -114,35 +125,41 @@ export function runLivenessProbe(libPath) {
   const lib = candidates.find((p) => existsSync(p))
   if (!lib) {
     // ran=false：这是**环境前置缺席**（构建链在打补丁之前就要跑本门禁），不是「对照跑了但失败」。
-    // 调用方据此把严重度记为 SKIP 而非 FAIL——见 runChecks 的 C5+ 分档说明。
+    // 调用方据此把严重度记为 SKIP 而非 FAIL——见 runChecks 的 C5/C5+ 分档说明。
     return { ok: false, ran: false, via: 'offline-drive', reason: '找不到打过补丁的 dsh-client-modules（用 DSH_COMBO_LIB 指定；构建链打补丁前必然缺席）' }
   }
-  // 候选文件存在**不等于**它打过 A5/P1 补丁：未打补丁的引擎树里没有 `__dshMobileComboLazyStats`，
-  // 直驱会失败并产出误导性的「对照失败」。故先做补丁在场性检查，缺席同样记 ran=false（环境前置）。
-  if (!readFileSync(lib, 'utf8').includes('__dshMobileComboLazyStats')) {
-    return { ok: false, ran: false, via: 'offline-drive', reason: '引擎树存在但未打过 A5/P1 补丁（无 __dshMobileComboLazyStats 探针面）: ' + lib }
+  // 候选文件存在**不等于**它打过 P1 补丁：未打补丁的引擎树里没有探针面，直驱会失败并产出误导性的
+  // 「对照失败」。故先做补丁在场性检查，缺席同样记 ran=false（环境前置）。
+  if (!readFileSync(lib, 'utf8').includes('dsh-mobile combo probe (P1)')) {
+    return { ok: false, ran: false, via: 'offline-drive', reason: '引擎树存在但未打过 P1 补丁（无 compose 探针面）: ' + lib }
   }
   const script = [
-    'import { pathToFileURL } from "node:url";',
+    'import { pathToFileURL } from \"node:url\";',
     'const mod = await import(pathToFileURL(process.argv[1]).href);',
     'const Registry = mod.ClientModuleRegistry;',
+    '// cordis v4 的 Service 构造器要读 ctx.reflect.provide；缺它会 TypeError（实测）。',
     'const ctx = { on: () => {}, loader: { entries: () => [] }, effect: (cb) => cb(),',
-    '  webServer: { register: () => () => {} }, get: () => undefined, inject: () => {},',
-    '  logger: { warn: () => {}, error: () => {} } };',
+    '  webServer: { register: () => () => {} }, reflect: { provide: () => {}, get: () => undefined, set: () => {} },',
+    '  get: () => undefined, inject: () => {}, logger: { warn: () => {}, error: () => {} } };',
     'const registry = new Registry(ctx);',
-    'const bundle = Buffer.from("window.__ModuleLoader__.load({ id: \\"probe-live\\", factory: function () { return 1; } });\\n");',
-    'registry.table.set("probe-live", { entry: { id: "probe-live", rev: "revliveness", external: [], immediately: false }, bundle, meta: { clientPath: "/nonexistent/probe-live/lib/client.js", external: [], immediately: false } });',
+    'const bundle = Buffer.from(\"window.__ModuleLoader__.load({ id: \\\"probe-live\\\", factory: function () { return 1; } });\\n\");',
+    'registry.table.set(\"probe-live\", { entry: { id: \"probe-live\", rev: \"revliveness\", external: [], immediately: false }, bundle, meta: { clientPath: \"/nonexistent/probe-live/lib/client.js\", external: [], immediately: false } });',
     'registry.compose();',
-    'const stats = globalThis.__dshMobileComboLazyStats;',
-    'const url = "/plugins/??probe-live/client.js&rev=revliveness";',
-    'const before = stats ? stats.singleBuilds : -1;',
-    'const res = registry.bundleResource("GET", url);',
-    'const after = stats ? stats.singleBuilds : -1;',
-    'console.log("LIVENESS before=" + before + " after=" + after + " status=" + (res && res.status));',
+    'const url = \"/plugins/??probe-live/client.js&rev=revliveness\";',
+    'const response = registry.responses.get(url);',
+    'if (response === undefined) { console.log(\"LIVENESS no-single-response url=\" + url); process.exit(0) }',
+    '// lazyBody 契约：两次取 body 必须拿到同一 promise（载荷只在首个请求者那里构造一次）。',
+    'const first = response.body();',
+    'const second = response.body();',
+    'const shared = first === second;',
+    'const served = await registry.bundleResource(\"GET\", url);',
+    'const body = served && served.body ? served.body.toString(\"utf8\") : \"\";',
+    'console.log(\"LIVENESS status=\" + (served && served.status) + \" shared=\" + shared',
+    '  + \" hasId=\" + body.includes(\"probe-live\") + \" bytes=\" + (served && served.body ? served.body.length : -1));',
   ].join('\n')
   const r = spawnSync(process.execPath, ['--input-type=module', '-e', script, lib], { encoding: 'utf8' })
   const out = ((r.stdout || '') + (r.stderr || ''))
-  const m = /LIVENESS before=(-?\d+) after=(-?\d+) status=(\d+)/.exec(out)
+  const m = /LIVENESS status=(\d+) shared=(true|false) hasId=(true|false) bytes=(\d+)/.exec(out)
   if (!m) {
     // 区分「对照跑了但结论不成立」（ran=true → FAIL）与「对照根本没跑起来」（ran=false → SKIP）：
     // 模块**载入失败**（依赖缺席 ERR_MODULE_NOT_FOUND、语法错）属后者——那是本机缺一棵可用的引擎树，
@@ -159,11 +176,11 @@ export function runLivenessProbe(libPath) {
     }
   }
   // 以下分支都是「对照**真跑了**但结论不成立」→ ran=true（调用方据此判 FAIL，不得当 SKIP）。
-  const before = Number(m[1]); const after = Number(m[2]); const status = Number(m[3])
-  if (before !== 0) return { ok: false, ran: true, via: 'offline-drive', reason: 'boot 期 singles 非 0（=' + before + '），延迟不成立' }
-  if (after !== 1) return { ok: false, ran: true, via: 'offline-drive', reason: '请求单条 URL 后 singles 未变 1（=' + after + '）' }
+  const status = Number(m[1]); const shared = m[2] === 'true'; const hasId = m[3] === 'true'; const bytes = Number(m[4])
   if (status !== 200) return { ok: false, ran: true, via: 'offline-drive', reason: '单条 URL 未命中（status=' + status + '）' }
-  return { ok: true, ran: true, via: 'offline-drive：产品内 compose()→单条请求 singles 0→1（status=200）', reason: '' }
+  if (!hasId) return { ok: false, ran: true, via: 'offline-drive', reason: '单条载荷不含该 id（bytes=' + bytes + '）——服务路径指向了别的资源' }
+  if (!shared) return { ok: false, ran: true, via: 'offline-drive', reason: '两次取 body 不是同一 promise——载荷惰性/memoize 契约不成立' }
+  return { ok: true, ran: true, via: 'offline-drive：compose()→单条 URL 200（bytes=' + bytes + '，同一 lazyBody promise）', reason: '' }
 }
 
 /**
@@ -226,8 +243,10 @@ export function parseProbe(text) {
   const composeDur = [...body.matchAll(/\[perf\] compose #(\d+) at=(\d+)ms dur=(\d+)ms/g)]
     .map((m) => ({ n: Number(m[1]), at: Number(m[2]), dur: Number(m[3]) }))
   const total = /\[perf\] TOTAL calls=(\d+) totalMs=(\d+)/.exec(body)
-  const bootLines = [...body.matchAll(/\[perf\] boot singles=(\d+|n\/a)/g)].map((m) => m[1])
-  const singleLines = [...body.matchAll(/\[perf\] single #(\d+) at=\d+ms singles=(\d+|n\/a)/g)]
+  // P1 在 A5 计数缺席时**故意**打 singles=-1（绝不省字段），所以正则必须收 -1：
+  // 缺了这条分支，解析返回 undefined，C5 对设备真值永远不可判定（2026-09-25 实测复现）。
+  const bootLines = [...body.matchAll(/\[perf\] boot singles=(-?\d+|n\/a)/g)].map((m) => m[1])
+  const singleLines = [...body.matchAll(/\[perf\] single #(\d+) at=\d+ms singles=(-?\d+|n\/a)/g)]
     .map((m) => ({ n: Number(m[1]), singles: m[2] }))
   const singlesField = /singles=(\d+)/.exec(body)
   const p99 = /loopP99Ms=([\d.]+|n\/a)/.exec(body)
@@ -239,6 +258,11 @@ export function parseProbe(text) {
     maxComposeDur: composeDur.length > 0 ? Math.max(...composeDur.map((c) => c.dur)) : undefined,
     composeDur,
     // C5：boot 行是「首次全量 compose 之后」的读数，正是要断言的量（TOTAL 是退出时刻读，不能用）。
+    // 三态（与 C4 同形，禁止把「不可判定」压成「不健康」或「健康」）：
+    //   0        计数在场且为 0（A5 型计数器活着 —— 可直接判惰性成立）
+    //   > 0      计数在场且非 0（启动期仍在构建单条 —— 判红）
+    //   -1       计数器**整个缺席**（A5 退役后的常态；P1 的哨兵值，不是读数）
+    //   undefined 行缺席或 n/a（探针没接上 —— 不可判定）
     bootSingles: bootLines.length > 0 && bootLines[bootLines.length - 1] !== 'n/a'
       ? Number(bootLines[bootLines.length - 1]) : undefined,
     singleEvents: singleLines,
@@ -300,17 +324,42 @@ export function runChecks(input, budgets = resolveBudgets([])) {
     }
   }
 
-  // ── C5 boot 期单条 buildCombo 调用数 = 0（必须带「请求单条 URL 后计数变 1」的正向对照）──
+  // ── C5 boot 期单条 combo 构建数（三态；A5 退役后该计数器已无生产者）──
+  //
+  // 2026-09-25 退役 A4 时连带修的**第二条** C5 缺陷：本判据的正向对照原先只认
+  // `globalThis.__dshMobileComboLazyStats.singleBuilds`（A5 装的计数器）。A5 在 0.14.2 已撤销、
+  // 上游 0.1.7 又把脚本体改成原生惰性 lazyBody，于是那个计数器**没有任何生产者**，
+  // bootSingles 在设备上恒为 -1 —— C5 的「恒 0」因此在任何环境下都不构成证据。
+  // 判据分三态（与 C4 同形：禁止把「不可判定」压成「不健康」或「健康」）：
+  //   ① boot === 0                计数器在场且为 0 → 惰性成立（产物可直接判）
+  //   ② boot > 0                  计数器在场且非 0 → 判红（启动期仍在构建单条）
+  //   ③ boot === -1 或 undefined  计数器缺席/探针没接上 → 不可判定，交 C5+ 正向对照取证：
+  //                              对照真跑通过即等价成立；跑不起来（无补丁树）→ SKIP，绝不判绿。
+  // 于是 C5 既不恒绿（②永远能红）也不恒红（③在有对照时等价成立，无对照时如实 SKIP）。
   {
     const boot = probe.bootSingles
     const control = probe.maxSingleSingles
+    const livenessOk = liveness !== undefined && liveness.ok === true
+    const livenessRan = liveness !== undefined && liveness.ran === true
     if (!probe.hasProbe || boot === undefined) {
-      add('C5', 'C5 boot 期单条 buildCombo 调用数 = 0', false,
+      add('C5', 'C5 boot 期单条 combo 构建数 = 0', false,
         '缺 `[perf] boot singles=` 原始读数——无法区分「已延迟」与「探针没接上」',
         strict ? 'fail' : 'skip')
+    } else if (boot === 0) {
+      add('C5', 'C5 boot 期单条 combo 构建数 = 0（实测 boot singles=0）', true)
+    } else if (boot > 0) {
+      add('C5', 'C5 boot 期单条 combo 构建数 = 0', false,
+        'boot singles=' + boot + ' > 0：启动期仍在构建单条产物')
     } else {
-      add('C5', 'C5 boot 期单条 buildCombo 调用数 = 0（实测 boot singles=' + boot + '）',
-        boot === 0, 'boot singles=' + boot + ' > 0：启动期仍在构建单条产物')
+      // boot === -1：A5 计数器已无生产者（P1 的哨兵值，不是读数），不能当「已延迟」。
+      const satisfied = (control !== undefined && control >= 1) || livenessOk
+      add('C5', 'C5 boot 期单条 combo 构建数（计数器缺席：boot singles=-1，A5 已退役）',
+        satisfied,
+        'singles=-1 是 P1 的哨兵值（A5 计数器已无生产者），不是读数；'
+        + (satisfied
+          ? '由 C5+ 正向对照裁定：产品内单条服务路径真跑通过'
+          : '且 C5+ 正向对照未取证 -> ' + String(liveness?.reason ?? 'liveness 对照未运行')),
+        satisfied ? 'pass' : (livenessRan ? 'fail' : 'skip'))
     }
     // 正向对照独立成条：缺它则 C5 的「恒 0」不构成证据（这正是 t_compose_total=-1 的教训）。
     //
@@ -321,15 +370,14 @@ export function runChecks(input, budgets = resolveBudgets([])) {
     // 修法（不放宽语义，改为可执行的等价证明）：正向对照的**目的**是证明「惰性单条路径真会打这条
     // 行」，而不是要求冷启动期发生 HMR。故对照由 `--liveness`（或默认自动）**真跑**产品内探针的
     // 单条路径取证：propControl 为 true 即等价成立；产物里若真有 single 行则直接用产物。
+    // control / livenessOk / livenessRan 已在本条上方的 C5 分档里声明（同一块作用域）。
     const controlOk = control !== undefined && control >= 1
-    const livenessOk = liveness !== undefined && liveness.ok === true
     const controlSatisfied = controlOk || livenessOk
     // 严重度分档（【0.14.1 P0-a 修复】区分「对照跑了但失败」与「对照因环境前置缺席而无法跑」）：
     //   - 跑过且失败（liveness.ran === true）→ fail：这是真防线失守；
     //   - 环境前置缺席（找不到**打过补丁**的引擎树——构建链在打补丁之前就要跑本门禁，此时必然缺席）
     //     → skip：如实记为 SKIP，**不**算 C5 的「恒 0」已取证，也**不**据此判绿；
     //   - requireReal（设备验收档，此时构建产物已存在、补丁树可得）→ 缺席即 fail，强制取证。
-    const livenessRan = liveness !== undefined && liveness.ran === true
     // 严重度只由**对照自身的执行结果**决定，不由 `--require` 档决定：
     //   - 对照跑了且失败（ran=true）→ fail：真防线失守，必须拒。
     //   - 对照跑不了（ran=false：找不到/未打补丁的引擎树）→ skip：**如实记 SKIP，绝不算 C5 已取证**。
@@ -383,7 +431,7 @@ export function runChecks(input, budgets = resolveBudgets([])) {
     }
   }
 
-  // ── C3 compose 调用数 ≤ 2（回归哨兵；已被设备实测满足，不再是有效防线）──
+  // ── C3 compose 调用数 ≤ 2（回归哨兵；A4 退役后裸树 2 次，阈值仍可满足，见常量处依据）──
   {
     const calls = probe.hasProbe ? probe.composeCalls : undefined
     if (calls === undefined) {
@@ -490,6 +538,32 @@ function selfTest() {
   {
     const r = run(segLine(), probeText({ bootSingles: 56, singled: true, single: true }))
     check('反向对照：boot singles=56（未延迟）→ C5 判红', okOf(r, 'C5') === false, 'C5 ok=' + okOf(r, 'C5'))
+  }
+
+  // ⑤b 【0.14.2 A4 退役连带】设备真值形态：P1 在 A5 计数缺席时打 singles=-1。
+  //     ① 解析必须读得出 -1（旧正则缺 -1 分支 ⇒ undefined ⇒ C5 永远不可判定，这是被测出的缺陷）；
+  //     ② -1 + 正向对照真跑通过 ⇒ C5 判绿（等价成立）；
+  //     ③ -1 且对照跑不起来 ⇒ C5 记 SKIP（**不是** pass、也不是 fail）；
+  //     ④ 把对照换成「跑过但失败」⇒ C5 判红（判别力不得因三态而丢失）。
+  {
+    const parsed = parseProbe(probeText({ bootSingles: -1 }))
+    check('⑤b-① 解析器读得出 singles=-1（A5 退役后的设备真值形态）',
+      parsed.bootSingles === -1, 'bootSingles=' + String(parsed.bootSingles))
+    const live = { ok: true, ran: true, via: 'stub', reason: '' }
+    const withControl = runChecks({ segments: parseSegments(segLine()), probe: parseProbe(probeText({ bootSingles: -1 })), require: true, liveness: live }, resolveBudgets([]))
+    const c5ok = withControl.results.find((x) => x.id === 'C5')
+    check('⑤b-② singles=-1 且正向对照真跑通过 → C5 判绿（不是恒红）',
+      c5ok?.ok === true && c5ok?.severity === 'pass', 'ok=' + c5ok?.ok + ' severity=' + c5ok?.severity)
+    const absent = runChecks({ segments: parseSegments(segLine()), probe: parseProbe(probeText({ bootSingles: -1 })), require: true, liveness: { ok: false, ran: false, via: 'stub', reason: 'no tree' } }, resolveBudgets([]))
+    const c5skip = absent.results.find((x) => x.id === 'C5')
+    check('⑤b-③ singles=-1 且对照跑不起来 → C5 记 SKIP（既不是 pass 也不是 fail）',
+      c5skip?.ok === false && c5skip?.severity === 'skip', 'ok=' + c5skip?.ok + ' severity=' + c5skip?.severity)
+    const failed = runChecks({ segments: parseSegments(segLine()), probe: parseProbe(probeText({ bootSingles: -1 })), require: true, liveness: { ok: false, ran: true, via: 'stub', reason: 'single path broken' } }, resolveBudgets([]))
+    const c5fail = failed.results.find((x) => x.id === 'C5')
+    check('⑤b-④ singles=-1 且对照跑过但失败 → C5 判红（判别力不因三态丢失）',
+      c5fail?.ok === false && c5fail?.severity === 'fail', 'ok=' + c5fail?.ok + ' severity=' + c5fail?.severity)
+    check('⑤b-⑤ singles=-1 的理由点名「哨兵值/无生产者」，不得冒充读数',
+      String(c5ok?.detail ?? '').includes('哨兵值'), String(c5ok?.detail ?? '').slice(0, 80))
   }
 
   // ⑥ 反向对照：boot singles=0 但缺正向对照 → C5+ 必须判红（区分「已延迟」与「探针没接上」）

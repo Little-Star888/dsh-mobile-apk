@@ -32,8 +32,9 @@ const p1 = registry.patches.find((p) => p.id === 'combo-probe-P1')
 check('P1 的 requires 只点名仍存在的补丁',
   Boolean(p1) && (p1.requires ?? []).every((id) => registry.patches.some((x) => x.id === id)),
   JSON.stringify(p1?.requires ?? null))
-check('P1 只依赖 combo-lazy-A4（combo 家族唯一保留者）',
-  JSON.stringify(p1?.requires ?? []) === JSON.stringify(['combo-lazy-A4']))
+// A4 于 2026-09-25 退役（收益归零，见 combo-lazy-a4.test.mjs 头注），P1 的 requires 随之为空。
+check('P1 不再依赖任何已退役补丁（A4 退役后 requires 为空）',
+  JSON.stringify(p1?.requires ?? []) === JSON.stringify([]))
 
 // ② 探针降级语义：A3/A5 读数缺席时打印哨兵值，绝不省字段。
 const cacheLine = impl.slice(impl.indexOf('function dshMobileComboProbeCacheLine'), impl.indexOf('function dshMobileComboProbeSingles'))

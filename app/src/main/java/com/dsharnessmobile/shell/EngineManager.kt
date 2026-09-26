@@ -1592,6 +1592,14 @@ class EngineManager(private val context: Context, private val pickToken: String?
       "PATH" to (usrDir.absolutePath + "/bin:/system/bin"),
       "LD_LIBRARY_PATH" to (usrDir.absolutePath + "/lib"),
       "HOME" to homeDir.absolutePath,
+      // 0.14.2 D13：侧边栏「新建终端」的默认 shell。上游 subprocess-local 的
+      // terminalEnvironment() 取 process.env.SHELL ?? os.userInfo().shell，而快照的 NSS 把
+      // userInfo().shell 解析成 **Termux 编译期前缀**（实测 /data/data/com.termux/files/usr/bin/bash，
+      // 本应用域不可达）→ 终端创建直接失败：
+      //   subprocess-local: command "/data/data/com.termux/files/usr/bin/bash" is not an executable file
+      // 壳侧是唯一能注入引擎 env 的一方，故在此显式钉住快照内 bash（与 PATH 同源）。
+      // 不改上游（铁律：上游零改动）；SHELL 全仓仅这一个消费点（subprocess-local:258）。
+      "SHELL" to File(usrDir, "bin/bash").absolutePath,
       // DSH_HOME always stays in the private domain (FUSE forbids symlinks, so the public domain
       // can't maintain the profiles/node_modules flat fallback); all runtime user data lives in private
       // files/home/.dsh, and public Documents/dshdata is only the export repo.
