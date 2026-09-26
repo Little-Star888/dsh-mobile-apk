@@ -43,7 +43,11 @@ test('D13：6 种 kind 全部可识别（fixture 逐条）', () => {
     { reason: { kind: 'blocked' }, ok: false, label: '被阻塞', popup: true },
     { reason: { kind: 'aborted', reason: { kind: 'user' } }, ok: false, label: '已中止', popup: false },
     { reason: { kind: 'max-tokens' }, ok: false, label: '输出超限', popup: true },
-    { reason: { kind: 'interrupted' }, ok: false, label: '被中断（进程重启）', popup: true },
+    // 0.14.2 D15-B **产品意图裁定**（不是缺陷修复）：interrupted 由引擎崩溃/自动重启产生，
+    // 不是用户动作的结果。自动重启风暴下每轮 turn/end 都产一条 report ⇒ 每轮 heads-up 一次，
+    // 而弹窗里没有任何可操作内容 —— 用户看到的就是「频繁弹窗」。故改为不弹（与 aborted 同组）。
+    // 注意这是**只改 popup 不改投递**：report 条目照常产出并进通知栏（见下面 popup 字段行为面用例）。
+    { reason: { kind: 'interrupted' }, ok: false, label: '被中断（进程重启）', popup: false },
   ]
   for (const f of fixtures) {
     const kind = turnEndKind(f.reason)
@@ -128,6 +132,31 @@ test('汇报：aborted(kind=user) 不弹，但载荷仍然生成（不得静默�
   const r = s.endTurn({ sessionId: 's1', turn: 1, reason: { kind: 'aborted', reason: { kind: 'user' } }, now: NOW + 500 })
   assert.equal(r.outcome, 'aborted')
   assert.equal(r.popup, false)
+})
+
+test('汇报：interrupted 不弹，但载荷完整生成（D15-B；内容不得静默丢失）', () => {
+  // D15-B 判据 (a)：不再 heads-up。
+  // D15-B 判据 (b) 的**单元级形态**：popup=false 只表示「不打断」，不代表「不投递」——
+  // endTurn 仍返回完整载荷（outcome/label/turn/duration），调用方照常把它写进 .notify.ndjson，
+  // 壳侧只据 popup 做降级（NotifyCenter.formDecision），条目仍在通知栏可见。
+  // 若将来有人把 interrupted 改成「直接 return null / 不产条目」，本用例即判红。
+  const s = new SessionNotifyState()
+  s.startTurn('s1', 7, NOW)
+  s.countToolCall('s1')
+  s.setSummary('s1', '重启前的进度')
+  const r = s.endTurn({
+    sessionId: 's1',
+    turn: 7,
+    reason: { kind: 'interrupted' },
+    now: NOW + 1_500,
+  })
+  assert.notEqual(r, null, 'interrupted 必须仍产出载荷（不得静默丢弃）')
+  assert.equal(r.outcome, 'interrupted')
+  assert.equal(r.outcomeLabel, '被中断（进程重启）')
+  assert.equal(r.summary, '重启前的进度', '摘要必须保留')
+  assert.equal(r.toolCount, 1)
+  assert.equal(r.durationMs, 1_500)
+  assert.equal(r.popup, false, 'D15-B：interrupted 不得 heads-up')
 })
 
 test('汇报：新一轮开始清空上一轮摘要与产出（不串轮）', () => {
