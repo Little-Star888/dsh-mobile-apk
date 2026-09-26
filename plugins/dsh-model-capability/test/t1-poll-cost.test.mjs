@@ -10,12 +10,35 @@
 //   - 把默认间隔改回 5 -> ① 红；
 //   - 去掉事件订阅 -> ② 红；
 //   - 让 readDescriptor 每次重新 describe -> ③ 红。
-import { test } from 'node:test'
+import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { copyFileSync, existsSync, readFileSync, rmSync } from 'node:fs'
 import { apply } from '../lib/index.js'
 
 const SRC = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
+
+// ── 净检出夹具（B-prime）：lib/catalog-snapshot.json 是**构建期产物** ─────────────────
+//
+// 真因（2026-09-26 CI 实锤）：该文件由协调仓 build-snapshot-013.mjs 的 0g 步生成，不在 git 里
+// （.gitignore:19 `plugins/*/lib/`），而 `npm run build` 只跑 `tsc -p .`，不会生成它。
+// 因此**净检出（CI）里它缺席**，而本机工作树里有（构建过）⇒ 同一份测试两处行为不同：
+// CI 上 T1-⑤/⑥/X1-⑧ 取不到目录数据 → 写回不发生 → 断言判红；本机全绿。
+//
+// 处置：**不用 SKIP**（那会让 CI 永久丢掉 X1 的守卫，而 X1 正是咬过我们一次的 HMR 嵌套回归）。
+// 改为「缺席则用夹具补上、仅当是自己写的才删」，使 CI 与本地**同形真跑**；本地真快照在场时不覆盖。
+const SNAPSHOT = new URL('../lib/catalog-snapshot.json', import.meta.url)
+const FIXTURE = new URL('./fixtures/catalog-snapshot.min.json', import.meta.url)
+let wroteFixture = false
+
+before(() => {
+  if (existsSync(SNAPSHOT)) return
+  copyFileSync(FIXTURE, SNAPSHOT)
+  wroteFixture = true
+})
+
+after(() => {
+  if (wroteFixture) rmSync(SNAPSHOT, { force: true })
+})
 
 /** 剥注释：只保留可执行/声明行，避免用文档串当判据（本仓三次踩过的坑）。 */
 function stripComments(text) {
@@ -92,9 +115,12 @@ test('T1-① 兜底间隔分两档且都 >=30s，下界钳制存在，旧的 5s 
 })
 
 // ── ② 事件驱动存在：不靠轮询也能触发 ──────────────────────────────────────────
-test('T1-② settings/document-updated 到达即触发一轮（不依赖轮询）', async () => {
+test('T1-② settings/document-updated 到达即触发一轮（不依赖轮询）', async (t) => {
   const c = makeCtx({})
   apply(c.ctx, { startupDelaySeconds: 3600, pollIntervalSeconds: 3600 })
+  // A（止血，2026-09-26）：断言先抛时下面的 dispose 走不到 -> setInterval(1h) 泄漏 ->
+  // node:test 永不排空事件循环 -> CI 卡死且拿不到 pass/fail 汇总行。故挂 t.after 兜底。
+  t.after(() => c.dispose())
   await flush()
   assert.ok(c.hasListener(EV), '未订阅 ' + EV + '（事件驱动缺失）')
 
@@ -105,28 +131,32 @@ test('T1-② settings/document-updated 到达即触发一轮（不依赖轮询�
     c.state.describes > before,
     '事件到达后 describe 次数未增加（before=' + before + ' after=' + c.state.describes + '）：事件没有驱动 tick',
   )
-  c.dispose()
 })
 
-test('T1-② 非 llm-pi-ai 命名空间的事件必须被忽略（不为其做全量 describe）', async () => {
+test('T1-② 非 llm-pi-ai 命名空间的事件必须被忽略（不为其做全量 describe）', async (t) => {
   const c = makeCtx({})
   apply(c.ctx, { startupDelaySeconds: 3600, pollIntervalSeconds: 3600 })
+  // A（止血，2026-09-26）：断言先抛时下面的 dispose 走不到 -> setInterval(1h) 泄漏 ->
+  // node:test 永不排空事件循环 -> CI 卡死且拿不到 pass/fail 汇总行。故挂 t.after 兜底。
+  t.after(() => c.dispose())
   await flush()
   const before = c.state.describes
   c.emit(EV, 'ui-theme', 1)
   c.emit(EV, 'llm-deepseek', 2)
   await flush()
   assert.equal(c.state.describes, before, '无关命名空间触发了 tick（应只关心 llm-pi-ai）')
-  c.dispose()
 })
 
 // ── ③ 每 tick describe 次数上界 ───────────────────────────────────────────────
-test('T1-③ 单次事件触发内 describe 次数 <= 2（旧实现同 tick 内 3+ 次）', async () => {
+test('T1-③ 单次事件触发内 describe 次数 <= 2（旧实现同 tick 内 3+ 次）', async (t) => {
   const providers = {
     gateway: { baseURL: 'https://a.example/v1', api: 'openai-completions', models: [{ id: 'gw-model' }] },
   }
   const c = makeCtx(providers)
   apply(c.ctx, { startupDelaySeconds: 3600, pollIntervalSeconds: 3600 })
+  // A（止血，2026-09-26）：断言先抛时下面的 dispose 走不到 -> setInterval(1h) 泄漏 ->
+  // node:test 永不排空事件循环 -> CI 卡死且拿不到 pass/fail 汇总行。故挂 t.after 兜底。
+  t.after(() => c.dispose())
   await flush()
 
   const before = c.state.describes
@@ -136,7 +166,6 @@ test('T1-③ 单次事件触发内 describe 次数 <= 2（旧实现同 tick 内 
   // 旧实现：signatureOf(1) + routesToConsider(1) + providerFromSettings(1)/route = >=3
   assert.ok(used >= 1, '事件后没有读描述符（无从得知新值）')
   assert.ok(used <= 2, '单次事件用了 ' + used + ' 次 describe（>2）：tick 内未复用描述符')
-  c.dispose()
 })
 
 test('T1-③ 描述符复用：readDescriptor 必须带缓存（结构断言，剥注释后可执行行）', () => {
@@ -159,6 +188,9 @@ test('T1-④ 回归场景：事件触发后补给链仍可达（用户口径不�
   }
   const c = makeCtx(providers)
   apply(c.ctx, { startupDelaySeconds: 3600, pollIntervalSeconds: 3600 })
+  // A（止血，2026-09-26）：断言先抛时下面的 dispose 走不到 -> setInterval(1h) 泄漏 ->
+  // node:test 永不排空事件循环 -> CI 卡死且拿不到 pass/fail 汇总行。故挂 t.after 兜底。
+  t.after(() => c.dispose())
   await flush()
   c.emit(EV, 'llm-pi-ai', 1)
   await flush()
@@ -172,7 +204,6 @@ test('T1-④ 回归场景：事件触发后补给链仍可达（用户口径不�
       '发生了写回但模型条目仍无 reasoningEfforts',
     )
   }
-  c.dispose()
 })
 
 // ── REVERSE：反证可判红 ───────────────────────────────────────────────────────
@@ -213,6 +244,9 @@ test('T1-⑤ 回归场景端到端：事件到达后真实写回 reasoningEffort
     },
   })
   apply(c.ctx, { startupDelaySeconds: 3600, pollIntervalSeconds: 3600 })
+  // A（止血，2026-09-26）：断言先抛时下面的 dispose 走不到 -> setInterval(1h) 泄漏 ->
+  // node:test 永不排空事件循环 -> CI 卡死且拿不到 pass/fail 汇总行。故挂 t.after 兜底。
+  t.after(() => c.dispose())
   await flush()
   c.emit(EV, 'llm-pi-ai', 1)
   await flush()
@@ -223,10 +257,9 @@ test('T1-⑤ 回归场景端到端：事件到达后真实写回 reasoningEffort
   assert.equal(c.state.mutates, 1, '事件路径没有产生写回（回归场景失效）')
   assert.ok(entry && entry.reasoningEfforts, '写回后条目仍无 reasoningEfforts（档位不会出现）')
   assert.ok(entry.reasoningEfforts.high, 'reasoningEfforts 缺少 high 档')
-  c.dispose()
 })
 
-test('T1-⑤ 反证：关掉事件且间隔拉到极大 -> 回归场景在窗口内不成立', async () => {
+test('T1-⑤ 反证：关掉事件且间隔拉到极大 -> 回归场景在窗口内不成立', async (t) => {
   // 判据 (b) 的判别力证明：这正是「只用轮询兜底」的世界。
   const c = makeCtx({
     gateway: {
@@ -236,13 +269,15 @@ test('T1-⑤ 反证：关掉事件且间隔拉到极大 -> 回归场景在窗口
     },
   })
   apply(c.ctx, { startupDelaySeconds: 3600, pollIntervalSeconds: 3600 })
+  // A（止血，2026-09-26）：断言先抛时下面的 dispose 走不到 -> setInterval(1h) 泄漏 ->
+  // node:test 永不排空事件循环 -> CI 卡死且拿不到 pass/fail 汇总行。故挂 t.after 兜底。
+  t.after(() => c.dispose())
   await flush()
   const before = c.state.mutates
   // 不触发事件，只等一小段（远小于 3600s 的兜底间隔）
   await flush()
   assert.equal(c.state.mutates, before, '未触发事件却发生了写回（判据无判别力）')
   assert.equal(c.state.mutates, 0, '无事件时不应写回——这正是纯轮询下「要等 2 分钟」的证据')
-  c.dispose()
 })
 
 // ── ⑥ 自触发环收敛（lead 复核问题 1）────────────────────────────────────────
@@ -255,6 +290,9 @@ test('T1-⑥ 自触发环收敛：连续自身写回后签名稳定，不无限�
     },
   })
   apply(c.ctx, { startupDelaySeconds: 3600, pollIntervalSeconds: 3600 })
+  // A（止血，2026-09-26）：断言先抛时下面的 dispose 走不到 -> setInterval(1h) 泄漏 ->
+  // node:test 永不排空事件循环 -> CI 卡死且拿不到 pass/fail 汇总行。故挂 t.after 兜底。
+  t.after(() => c.dispose())
   await flush()
 
   // 模拟上游：我方 mutate 后上游会再发一次 document-updated（同一 ns）。
@@ -274,7 +312,6 @@ test('T1-⑥ 自触发环收敛：连续自身写回后签名稳定，不无限�
   // 收敛判据：首次写回之后再无第二次（字段已填 → plan 无变化 → 不再 mutate）
   t.diagnostic('mutates=' + c.state.mutates + ' describes=' + c.state.describes)
   assert.equal(c.state.mutates, 1, '写回发生了 ' + c.state.mutates + ' 次：自触发环未收敛（应为 1）')
-  c.dispose()
 })
 
 // ── ⑦ 兜底间隔钳制（lead 复核问题 2）─────────────────────────────────────────
@@ -291,15 +328,17 @@ test('T1-⑦ 配置 pollIntervalSeconds=5 被有意钳到 30（防配回 5s 打�
   assert.equal(Math.max(30, 120), 120, '显式大于钳制下界时应尊重用户值')
 })
 
-test('T1-⑦ 事件订阅不可用时兜底间隔自动收紧到 30s（避免功能延迟退化到 2 分钟）', async () => {
+test('T1-⑦ 事件订阅不可用时兜底间隔自动收紧到 30s（避免功能延迟退化到 2 分钟）', async (t) => {
   // ctx.on 缺席 = 事件面不可用：此时轮询是唯一触发器，必须用短档。
   const c = makeCtx({})
   delete c.ctx.on
   apply(c.ctx, { startupDelaySeconds: 3600 })
+  // A（止血，2026-09-26）：断言先抛时下面的 dispose 走不到 -> setInterval(1h) 泄漏 ->
+  // node:test 永不排空事件循环 -> CI 卡死且拿不到 pass/fail 汇总行。故挂 t.after 兜底。
+  t.after(() => c.dispose())
   await flush()
   // 结构断言：两档选择由 eventDriven 驱动（上面 ⑦ 已锁表达式），此处锁「订阅缺失不注册监听」
   assert.ok(!c.hasListener(EV), '本夹具不应有事件订阅')
-  c.dispose()
 })
 
 // ── ⑧ X1 回归：事件回调必须把写回送出 hmr 事务上下文 ────────────────────────────
@@ -308,18 +347,31 @@ test('T1-⑦ 事件订阅不可用时兜底间隔自动收紧到 30s（避免功
 //   Error: HMR transactions cannot be nested
 //     at Proxy.runExclusive (dsh-hmr/lib/index.js) at Proxy.edit (dsh-config-editor) ...
 // 判据：事件到达后写回必须**不在**原事务的异步上下文里执行。
-test('X1-⑧ 事件回调把 tick 送出当前异步上下文（否则写回被 hmr 判嵌套）', async () => {
+test('X1-⑧ 事件回调把 tick 送出当前异步上下文（否则写回被 hmr 判嵌套）', async (t) => {
   const { AsyncLocalStorage } = await import('node:async_hooks')
   const als = new AsyncLocalStorage()
   const c = makeCtx({ gateway: { baseURL: 'https://a.example/v1', api: 'openai-completions', models: [{ id: REAL_ID }] } })
   apply(c.ctx, { startupDelaySeconds: 3600, pollIntervalSeconds: 3600 })
+  // A（止血，2026-09-26）：断言先抛时下面的 dispose 走不到 -> setInterval(1h) 泄漏 ->
+  // node:test 永不排空事件循环 -> CI 卡死且拿不到 pass/fail 汇总行。故挂 t.after 兜底。
+  t.after(() => c.dispose())
   await flush()
 
-  // mutate 在「事务内」被调用时应记录当时是否仍持有事务标记
-  let sawContext = null
+  // 观测点（C，2026-09-26）：**主判据落在 settings.describe 上**，而不是 settings.mutate。
+  // 为什么提前：mutate 只在「目录命中且确有字段要补」时才发生，因此依赖 lib/catalog-snapshot.json；
+  // 而 describe 是 tick 的**第一件事**（deferrer 回调一进来就读描述符），与目录数据无关。
+  // 主判据挂在 describe 上，X1 的守卫就不再随目录数据有无而失效 —— 覆盖不丢失，且两个环境同形。
+  // mutate 观测保留为**加强项**（确有写回时再断言一次，证明端到端路径同样在事务外）。
+  const descCtx = []
+  const origDescribe = c.ctx.settings.describe
+  c.ctx.settings.describe = function (...args) {
+    descCtx.push(als.getStore())
+    return origDescribe.apply(this, args)
+  }
+  let sawMutateContext = null
   const origMutate = c.ctx.settings.mutate
   c.ctx.settings.mutate = async (ns, ops, rev) => {
-    if (sawContext === null) sawContext = als.getStore()
+    if (sawMutateContext === null) sawMutateContext = als.getStore()
     return origMutate(ns, ops, rev)
   }
 
@@ -327,10 +379,17 @@ test('X1-⑧ 事件回调把 tick 送出当前异步上下文（否则写回被 
   await new Promise((resolve) => { als.run(true, () => { c.emit(EV, 'llm-pi-ai', 1); resolve() }) })
   await new Promise((r) => setTimeout(r, 400))
 
-  assert.notEqual(sawContext, null, '事件没有触发写回（夹具问题，判据无效）')
-  assert.equal(sawContext, undefined,
-    '写回仍在 hmr 事务上下文内执行（sawContext=' + String(sawContext) + '）=> 会抛 HMR transactions cannot be nested')
-  c.dispose()
+  // 主判据：tick 的 describe 必须已经脱离事务上下文
+  assert.ok(descCtx.length > 0, '事件没有驱动 tick（describe 未被调用，夹具问题，判据无效）')
+  assert.equal(descCtx.every((x) => x === undefined), true,
+    'tick 的 settings.describe 仍在 hmr 事务上下文内执行（descCtx=' + JSON.stringify(descCtx)
+      + '）=> 说明 deferrer 没把 tick 送出事务')
+  // 加强项：若真的发生了写回，写回也必须在事务外
+  if (sawMutateContext !== null) {
+    assert.equal(sawMutateContext, undefined,
+      '写回仍在 hmr 事务上下文内执行（sawMutateContext=' + String(sawMutateContext)
+        + '）=> 会抛 HMR transactions cannot be nested')
+  }
 })
 
 test('X1-⑧ 反证：不经 deferrer 直接调用会在事务内（说明判据有判别力）', async () => {
