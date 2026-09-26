@@ -124,7 +124,7 @@ class OverlayReport(private val svc: OverlayService) {
       addView(body, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
     }
 
-    // 底部拖拽手柄（0.14.1 D6）：**真手势**——上拉变高、下拉变矮，夹在 minH..maxH 之间。
+    // 底部拖拽手柄（0.14.1 D6）：**真手势**——上拉变高、下拉变矮，夹在 minH..expandCeil 之间。
     // 旧实现是一根纯装饰的横线（注释自述「不做手势，避免与栏内可滚动抢事件」），即需求里的
     // 「上拉/下拉栏」从未落地。现在把手势**只挂在手柄行上**：栏内正文区仍归 ScrollView，
     // 两者不重叠，故不再有抢事件的问题。
@@ -255,15 +255,16 @@ class OverlayReport(private val svc: OverlayService) {
       return false
     }
     val w = (sw - 2 * (16 * dp).toInt()).coerceAtMost((440 * dp).toInt()).coerceAtLeast((200 * dp).toInt())
-    // 高度上下限（0.14.1 D6，0.14.2 加横屏地板）：
-    //   上限 = 屏高 40%，但**不得低于 300dp**——横屏（1600x900）时 40% 只有 240dp，
-    //   比下限 140dp 多出的上拉行程仅 100dp，「上拉看长汇报」这个手势几乎失效；
-    //   地板同时受「屏高 - 24dp」封顶，保证抽屉永远不会高出可用屏幕。
-    //   下限 = 140dp（标题 + 摘要行 + 手柄；低于此值手柄都放不下，也就没有「上拉」的起点）。
+    // 高度三个口径（0.14.1 D6，0.14.2 拆开上下限；纯函数见文件末尾）：
+    //   minH       = 140dp（标题 + 摘要行 + 手柄；低于此值手柄都放不下，也就没有「上拉」的起点）
+    //   compactCap = 打开时的高度上限（屏高 40%，不低于 300dp）——短汇报不强占屏幕
+    //   expandCeil = 上拉能到的天花板（近全屏，留 24dp 边距）
+    // **P3 承重墙：这两个上限此前是同一个值** ⇒ 内容一超上限，栏开场即钉在天花板、
+    // 上拉为零行程（设备实测 16416 拖拽前后都停在 640）——用户口径的「展开后仍被截断」。
     // 初始高度**按内容取**（短汇报不强占上限高度）——见 reportBarInitialHeight。
-    val screenCeil = (sh - (24 * dp).toInt()).coerceAtLeast(1)
-    val maxH = ((sh * 0.40f).toInt().coerceAtLeast((300 * dp).toInt())).coerceAtMost(screenCeil).coerceAtLeast(1)
-    val minH = (140 * dp).toInt().coerceAtMost(maxH)
+    val compactCap = reportBarCompactCap(sh, dp)
+    val expandCeil = reportBarExpandCeil(sh, dp)
+    val minH = (140 * dp).toInt().coerceAtMost(compactCap)
     val lp = android.view.WindowManager.LayoutParams(
       w,
       ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -282,8 +283,8 @@ class OverlayReport(private val svc: OverlayService) {
       x = (sw - w) / 2
       y = 0
     }
-    lp.height = reportBarInitialHeight(measureNaturalHeight(bar, w, maxH), minH, maxH)
-    attachDragGesture(bar, lp, minH, maxH)
+    lp.height = reportBarInitialHeight(measureNaturalHeight(bar, w, compactCap), minH, compactCap)
+    attachDragGesture(bar, lp, minH, expandCeil)
     bar.setOnTouchListener { _, e ->
       if (e.action == MotionEvent.ACTION_OUTSIDE) hideReport()
       false
@@ -297,7 +298,7 @@ class OverlayReport(private val svc: OverlayService) {
       // 用户已经拖过（userResized）就不覆盖他的选择。
       bar.post {
         if (window !== bar || userResized) return@post
-        applyHeight(bar, lp, reportBarInitialHeight(measureNaturalHeight(bar, w, maxH), minH, maxH))
+        applyHeight(bar, lp, reportBarInitialHeight(measureNaturalHeight(bar, w, compactCap), minH, compactCap))
       }
       true
     } catch (e: Exception) {
@@ -361,6 +362,45 @@ internal fun reportBodyRedundant(entry: NotifyEntry?, full: String): Boolean {
   val summary = entry.summary.ifBlank { entry.text }.trim()
   if (summary.isEmpty()) return false
   return f == summary || f == (head + " · " + summary).trim()
+}
+
+/**
+ * 报告栏**打开时**的高度上限（纯函数，JVM 可测；P3 0.14.2）。
+ *
+ * 语义：短汇报不强占屏幕，长汇报先给一块可一眼看结论的预览区。取值 = 屏高 40%，
+ * 但**不得低于 300dp**（横屏 1600x900 时 40% 只有 240dp，比下限 140dp 只多 100dp），
+ * 并受「屏高 - 24dp」封顶（打开时也不许顶出可用屏幕）。
+ *
+ * 与 [reportBarExpandCeil] 分开是本次修复的承重墙：此前二者是同一个值，
+ * 于是内容一超上限，栏**开场即钉在天花板**、上拉零行程 —— 用户口径的
+ * 「展开后也仍旧被截断」正是这一条（设备实测 16416：拖拽前后都停在 640）。
+ *
+ * @param screenHeightPx 屏幕可用高度（px）。
+ * @param density 显示密度（px/dp）。
+ * @returns 打开时的上限（px，恒 ≥ 1）。
+ */
+internal fun reportBarCompactCap(screenHeightPx: Int, density: Float): Int {
+  val floor = (300f * density).toInt()
+  val ratio = (screenHeightPx * 0.40f).toInt()
+  val screenCeil = (screenHeightPx - (24f * density).toInt()).coerceAtLeast(1)
+  return ratio.coerceAtLeast(floor).coerceAtMost(screenCeil).coerceAtLeast(1)
+}
+
+/**
+ * 报告栏**上拉能到的**天花板（纯函数，JVM 可测；P3 0.14.2）。
+ *
+ * 取近全屏（屏高 - 24dp 边距），**恒不低于** [reportBarCompactCap]——否则「上拉」会出现
+ * 负行程（天花板比打开高度还低），拖拽只会把栏**缩小**，与用户意图相反。
+ * 长汇报的完整阅读本来就靠「拖到最高 + 栏内滚动」，所以这个上限必须真正接近全屏，
+ * 不能与打开上限共用 40%。
+ *
+ * @param screenHeightPx 屏幕可用高度（px）。
+ * @param density 显示密度（px/dp）。
+ * @returns 拖拽天花板（px，恒 ≥ [reportBarCompactCap]）。
+ */
+internal fun reportBarExpandCeil(screenHeightPx: Int, density: Float): Int {
+  val screenCeil = (screenHeightPx - (24f * density).toInt()).coerceAtLeast(1)
+  return screenCeil.coerceAtLeast(reportBarCompactCap(screenHeightPx, density))
 }
 
 /**

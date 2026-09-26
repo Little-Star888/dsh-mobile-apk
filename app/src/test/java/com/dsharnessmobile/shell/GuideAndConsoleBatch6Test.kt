@@ -96,51 +96,70 @@ class GuideAndConsoleBatch6Test {
     )
   }
 
-  // ── S1-4：进度确定化 + 口径统一 ──────────────────────────────────────────
+  // ── S1-4 → 0.14.2 P2：进度去数字 + 阶段车轱辘话（旧判据按新口径改写，不是删除）──
 
   @Test
-  fun `解压进度百分比有上限且与文案同口径`() {
-    assertEquals("0%", 0, runtimeProgressPercent(0))
-    assertEquals("半程", 50, runtimeProgressPercent(RUNTIME_UNCOMPRESSED_APPROX_BYTES / 2))
-    assertEquals(
-      "**不得宣称 100%**（不知道精确总量，100% 是「已完成」的意思）",
-      99,
-      runtimeProgressPercent(RUNTIME_UNCOMPRESSED_APPROX_BYTES),
-    )
-    assertEquals("超过估算值也只到 99", 99, runtimeProgressPercent(RUNTIME_UNCOMPRESSED_APPROX_BYTES * 2))
-    assertEquals("无法判定时回 -1（调用方据此保持不确定态）", -1, runtimeProgressPercent(1234, 0))
-    assertEquals("负数输入按 0 处理", 0, runtimeProgressPercent(-5))
-    // 副文案里的体量必须由同一常量渲染出来（不得再写死「约 700MB」）。
-    val code = codeOnly(source("GuidePageRenderer.kt"))
-    assertTrue(code.contains("RUNTIME_UNCOMPRESSED_APPROX_BYTES / 1024 / 1024"))
-    assertFalse("解压文案里不得再出现写死的 700MB", code.contains("约 700MB"))
+  fun `阶段文案只有车轱辘话且不含任何数字`() {
+    // 用户口径（2026-09-26 原话）：「改成不显示数字，只画一个进度条，然后底下小字就只显示：
+    // 正在解压，正在处理残留数据，正在准备运行时这种车轱辘话」。
+    assertTrue("至少要给三条阶段句（覆盖解压/残留/收尾）", RUNTIME_STAGE_PHRASES.size >= 3)
+    for (phrase in RUNTIME_STAGE_PHRASES) {
+      assertTrue("阶段句必须自证无数字无百分比：$phrase", stagePhraseHasNoNumbers(phrase))
+    }
+    // 三条必须点名用户说的那三类阶段（不能拿三句同义话凑数）。
+    assertTrue("必须覆盖「正在解压」", RUNTIME_STAGE_PHRASES.any { it.contains("正在解压") })
+    assertTrue("必须覆盖「正在处理残留数据」", RUNTIME_STAGE_PHRASES.any { it.contains("残留数据") })
+    assertTrue("必须覆盖「正在准备运行时」", RUNTIME_STAGE_PHRASES.any { it.contains("准备运行时") })
   }
 
   @Test
-  fun `进度文案在超出估算值时不再印分母（设备实测缺陷）`() {
-    // 设备读数（16416 冷启动截图）：「已写入 1157 MB / 约 700 MB（99%）」——分子大于分母还报 99%。
-    val half = RUNTIME_UNCOMPRESSED_APPROX_BYTES / 2
-    assertTrue("半程仍带估算分母", runtimeProgressLabel(half).contains("/ 约 "))
-    assertTrue("半程百分比在场", runtimeProgressLabel(half).contains("50%"))
-    val over = RUNTIME_UNCOMPRESSED_APPROX_BYTES * 2
-    val label = runtimeProgressLabel(over)
-    assertFalse("超出估算值后不得再出现分母", label.contains("/ 约 "))
-    assertFalse("不得出现自相矛盾的百分比", label.contains("%"))
-    assertTrue("仍然如实报绝对量", label.contains((over / 1024 / 1024).toString() + " MB"))
-    assertEquals("无法判定时只报绝对量", "已写入 1 MB", runtimeProgressLabel(1024 * 1024, 0))
+  fun `阶段文案按 tick 确定轮换且负数不越界`() {
+    // 轮换是「还在动」的唯一表达方式；确定性保证测试与 UI 读到同一条。
+    assertEquals(RUNTIME_STAGE_PHRASES[0], runtimeStagePhrase(0))
+    assertEquals(RUNTIME_STAGE_PHRASES[1], runtimeStagePhrase(1))
+    assertEquals(RUNTIME_STAGE_PHRASES[2], runtimeStagePhrase(2))
+    assertEquals("回到本轮第一句", RUNTIME_STAGE_PHRASES[0], runtimeStagePhrase(RUNTIME_STAGE_PHRASES.size))
+    assertEquals("负数 tick 不得越界", RUNTIME_STAGE_PHRASES[RUNTIME_STAGE_PHRASES.size - 1], runtimeStagePhrase(-1))
+    assertEquals(RUNTIME_STAGE_PHRASES[0], runtimeStagePhrase(-RUNTIME_STAGE_PHRASES.size))
   }
 
   @Test
-  fun `进度条必须能切确定态且文案含总量`() {
+  fun `进度面不再出现任何数字文案与确定档（设备实测缺陷）`() {
+    // 设备读数（真机）：「已写入 1157 MB / 约 700 MB（99%）」——分子大于分母还报 99%。
+    // 真因是分母（700MB）本身编造，而真实解压是增量的 ⇒ 任何固定分母都在造事实。
+    // 本用例锁「三种数字输出全部下线 + 进度条恒不确定态 + 编造常数与其派生函数一并删除」。
     val code = codeOnly(source("GuidePageRenderer.kt"))
-    assertTrue("必须提供确定档入口", code.contains("fun setDeterminateProgress(doneBytes: Long, totalBytes: Long)"))
-    assertTrue("百分比 <0 时回不确定态", code.contains("progressBar.isIndeterminate = pct < 0"))
+    // ① 编造的分母及其两个派生输出：一条都不许留（死码）。
+    assertFalse("编造常数必须删除", code.contains("RUNTIME_UNCOMPRESSED_APPROX_BYTES"))
+    assertFalse("百分比函数必须删除", code.contains("runtimeProgressPercent"))
+    assertFalse("带数字的进度文案函数必须删除", code.contains("runtimeProgressLabel"))
+    assertFalse("确定档入口必须删除（它宣称的正是编造比例）", code.contains("setDeterminateProgress"))
+    assertFalse("进度状态位必须删除", code.contains("progressDeterminate"))
+    // ② 三种数字输出的字面形态一个都不许回来。
+    assertFalse("不得出现「已写入」", code.contains("已写入"))
+    assertFalse("不得出现「约 」+ MB 的分母形态", code.contains("/ 约 "))
+    assertFalse("不得出现百分比拼接", code.contains("%\"") || code.contains("%）") || code.contains("（\" + pct"))
+    // ③ 进度条必须恒为不确定态（不宣称比例），且相位切换与阶段入口两处都要置位。
+    val indeterminate = Regex(Regex.escape("progressBar.isIndeterminate = true")).findAll(code).count()
+    assertTrue("相位切换处必须置不确定态", code.contains("progressBar.isIndeterminate = true"))
+    assertTrue("进度条不得被切回确定态", !code.contains("isIndeterminate = pct") && !code.contains("progressBar.progress ="))
+    assertTrue("确定态置位点至少两处（相位切换 + 阶段入口）: 实测 $indeterminate", indeterminate >= 2)
+    // ④ 旧形态（旧注释里的实现在场即判红——反证锚点）。
+    assertFalse("旧的确定档渲染不得留存桩", code.contains("val pct = runtimeProgressPercent"))
+  }
+
+  @Test
+  fun `解压流程只推阶段轮换而不渲染任何数字`() {
     val flow = codeOnly(source("EngineStartFlow.kt"))
-    assertTrue("解压流程必须真的调它", flow.contains("setDeterminateProgress(done, RUNTIME_UNCOMPRESSED_APPROX_BYTES)"))
-    // 0.14.2：文案不再在 flow 里拼字符串，而是走 runtimeProgressLabel 唯一漏斗
-    // （否则「超出估算值只报绝对量」这条修法在 flow 里会分叉成第二份口径）。
-    assertTrue("进度行必须经唯一漏斗渲染", flow.contains("runtimeProgressLabel(done)"))
-    assertFalse("flow 不得再自己拼进度文案", flow.contains("MB / 约 "))
+    assertTrue("流程必须走阶段入口", flow.contains("showRuntimeStage(progressTick++)"))
+    assertFalse("流程不得再调确定档", flow.contains("setDeterminateProgress"))
+    assertFalse("流程不得再拼带数字的进度文案", flow.contains("runtimeProgressLabel"))
+    assertFalse("流程不得再引用编造常数", flow.contains("RUNTIME_UNCOMPRESSED_APPROX_BYTES"))
+    // onStage 的 stage 句来自 EngineManager，本身就是无数字车轱辘话——直接沿用，不另造口径。
+    assertTrue("onStage 必须沿用 EngineManager 的阶段句", flow.contains("progressText.text = stage"))
+    // 反证：flow 里若出现任何字节数渲染（/ 1024 / 1024 或 MB 拼接）即判红。
+    assertFalse("flow 不得做任何字节→MB 换算", flow.contains("/ 1024 / 1024"))
+    assertFalse("flow 不得拼 MB", flow.contains("MB\"") || flow.contains(" MB"))
   }
 
   // ── S1-5：诊断包路径不得进标题 ───────────────────────────────────────────

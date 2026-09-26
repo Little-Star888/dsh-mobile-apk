@@ -28,6 +28,12 @@ const CONTRACT_PATH = resolve(flagValue('--contract') ?? join(root, 'scripts/con
 const contract = JSON.parse(readFileSync(CONTRACT_PATH, 'utf8'))
 const PROFILE_PATCH_PATH = resolve(flagValue('--profile') ?? join(root, 'scripts', 'profile-web.cordis.patch.yml'))
 const DOC_PATH = resolve(flagValue('--doc') ?? join(root, 'docs', 'UPSTREAM-CONTRACT.md'))
+/**
+ * `--slots-source`：只给 `--self-test` 用的取面改道缝（把「我方消费面」指到一个临时文件），
+ * 从而能造出「消费未登记」这一反例而**不动仓库源码**——半途被杀也不会留下脏树。
+ * 正式链一律不传 ⇒ 取面恒为 contract.clientSlots.repo 的 src/client/**。
+ */
+const SLOTS_SOURCE = flagValue('--slots-source')
 const issues = []
 const REQUIRE = argv.includes('--require')
 let skipped = 0
@@ -46,6 +52,120 @@ const skip = (msg) => {
 /* --self-test：新加的每一条判据都要「故意造反例必判红」的自证（AGENTS 反证要求）。
  * 反例走临时副本（--contract / --profile），不改仓库文件——半途被杀也不会留下一棵脏树。 */
 if (argv.includes('--self-test')) runContractSelfTest()
+
+/**
+ * 槽位注入的**词法抽取**（G-P4b 双向判据的取面器）。
+ *
+ * ── 为什么必须词法化，而不是正则扫原文 ──────────────────────────────────────────
+ * §4 原判据是 `slotText.includes("'" + slot + "'")`——它在**原文**上找子串，于是：
+ *  · 注释里写一句 `ctx.slots.inject('x')` 会被当成真消费（假绿方向：写句注释就能让判据满足）；
+ *  · 字符串/模板串里提一句同样的文本同样算数；
+ *  · 反过来它也只能回答「这个槽名有没有在文件里出现过」，答不了「有没有被 inject」。
+ * 双向判据要求「消费事实」本身可靠，所以这里把源码切成**代码位**与**字面量位**：注释整体丢弃，
+ * 字符串/模板串替换成 \u0000<idx>\u0000 占位符。`slots.inject(` 只在代码位匹配，槽名只取自
+ * 紧随其后的那个字面量 ⇒ 注释与字符串两个方向都骗不过它。
+ * 模板串的 `${...}` 插值区**按代码位扫描**（否则插值里写 inject 会被漏判，属假绿方向）。
+ *
+ * @param text 源文件全文。
+ * @returns `{ slots, dynamic }`：去重后的字面量槽名数组；dynamic 为非字面量参数的调用片段。
+ */
+function scanSlotInjections(text) {
+  const literals = []
+  let code = ''
+  let i = 0
+  const n = text.length
+  let state = 'code'
+  let buf = ''
+  const tpl = []
+  const flush = (isTemplate) => {
+    const idx = literals.length
+    literals.push({ value: buf, template: isTemplate })
+    code += '\u0000' + idx + '\u0000'
+    buf = ''
+  }
+  while (i < n) {
+    const c = text[i]
+    const d = text[i + 1]
+    if (state === 'code') {
+      if (tpl.length > 0) {
+        if (c === '{') tpl[tpl.length - 1] += 1
+        else if (c === '}') {
+          if (tpl[tpl.length - 1] === 0) { tpl.pop(); state = 'tpl'; i += 1; continue }
+          tpl[tpl.length - 1] -= 1
+        }
+      }
+      if (c === '/' && d === '/') { state = 'line'; i += 2; continue }
+      if (c === '/' && d === '*') { state = 'block'; i += 2; continue }
+      if (c === "'" || c === '"') { state = c === "'" ? 'sq' : 'dq'; buf = ''; i += 1; continue }
+      if (c === '`') { state = 'tpl'; buf = ''; i += 1; continue }
+      code += c; i += 1; continue
+    }
+    if (state === 'line') { if (c === '\n') { state = 'code'; code += c } i += 1; continue }
+    if (state === 'block') { if (c === '*' && d === '/') { state = 'code'; i += 2 } else { i += 1 } continue }
+    if (state === 'tpl') {
+      if (c === '\\') { buf += c + (d === undefined ? '' : d); i += 2; continue }
+      if (c === '$' && d === '{') { flush(true); state = 'code'; tpl.push(0); i += 2; continue }
+      if (c === '`') { flush(true); state = 'code'; i += 1; continue }
+      buf += c; i += 1; continue
+    }
+    if (c === '\\') { buf += c + (d === undefined ? '' : d); i += 2; continue }
+    if ((state === 'sq' && c === "'") || (state === 'dq' && c === '"')) { flush(false); state = 'code'; i += 1; continue }
+    buf += c; i += 1; continue
+  }
+  const slots = []
+  const dynamic = []
+  const re = /slots\.inject\(\s*\u0000(\d+)\u0000/g
+  let m
+  while ((m = re.exec(code)) !== null) {
+    const lit = literals[Number(m[1])]
+    if (lit === undefined || lit.template) { dynamic.push(lit === undefined ? '(unresolved)' : lit.value); continue }
+    if (!slots.includes(lit.value)) slots.push(lit.value)
+  }
+  const reDyn = /slots\.inject\(\s*(?!\u0000)/g
+  while ((m = reDyn.exec(code)) !== null) dynamic.push(code.slice(reDyn.lastIndex, reDyn.lastIndex + 40).replace(/\s+/g, ' '))
+  return { slots, dynamic }
+}
+
+/**
+ * 收集我方注入层的**槽消费事实**（§4 双向判据的唯一取面口径）。
+ *
+ * 扫描面 = `contract.clientSlots.repo` 的 `src/client/**`（排除 node_modules 与测试文件）——因为
+ * 该目录整体编译进 `lib/client.js`（package.json 的 exports 面），所以「在这个目录里 inject」与
+ * 「发布出去会生效」等价。**不扫 `src/` 其它部分**：注入是 client 概念，扫宽了会把非注入面的
+ * 同名文本算成消费。
+ *
+ * 为什么用同一取面喂两个方向：若「登记未消费」看 index.ts 而「消费未登记」看全树，把一次 inject
+ * 挪到别的文件就会让第一个方向**假红**（它其实仍被消费）。两侧同源才自洽。
+ *
+ * @returns `{ slots, dynamic, sources }`；扫描面不存在时返回 null（由调用方 SKIP）。
+ */
+function collectConsumedSlots() {
+  if (SLOTS_SOURCE !== null) {
+    const p = resolve(SLOTS_SOURCE)
+    if (!existsSync(p)) return null
+    const r = scanSlotInjections(readFileSync(p, 'utf8'))
+    return { slots: r.slots, dynamic: r.dynamic.map((s) => ({ file: rel(p), snippet: s })), sources: [rel(p)] }
+  }
+  const base = join(root, contract.clientSlots.repo, 'src', 'client')
+  if (!existsSync(base)) return null
+  const files = []
+  const walk = (dir) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, e.name)
+      if (e.isDirectory()) { if (e.name !== 'node_modules') walk(p) }
+      else if (/\.(ts|tsx)$/.test(e.name) && !/\.(test|spec)\./.test(e.name) && !e.name.includes('__tests__')) files.push(p)
+    }
+  }
+  walk(base)
+  const slots = []
+  const dynamic = []
+  for (const p of files) {
+    const r = scanSlotInjections(readFileSync(p, 'utf8'))
+    for (const s of r.slots) if (!slots.includes(s)) slots.push(s)
+    for (const s of r.dynamic) dynamic.push({ file: rel(p), snippet: s })
+  }
+  return { slots, dynamic, sources: files.map(rel) }
+}
 
 function dtsFiles(dir) {
   const out = []
@@ -143,10 +263,45 @@ if (!existsSync(baseline)) {
 
 // 0.2.0 起注入层不再替换上游框架：它组合进上游的座位，绝不注册 'root'。
 console.log('== 4. 客户端槽位声明（组合面，非框架替换） ==')
-const slotText = readFileSync(join(root, contract.clientSlots.repo, 'src/client/index.ts'), 'utf8')
-for (const slot of contract.clientSlots.slots) {
-  if (slotText.includes("'" + slot + "'")) ok('槽位 ' + slot + ' 已组合')
-  else fail('槽位 ' + slot + ' 未组合')
+/* 正式链读我方 index.ts（注入入口）；`--slots-source` 只把**槽位消费面**改道到临时文件，供自证用。
+ * 注意只有消费面（collectConsumedSlots 与 §4 的双向差集）走这条缝；ownRoot 判据仍读**真实**入口文件，
+ * 否则反证会顺带把那条不相关的判据也替换掉（同一个变量喂两条判据 = 反证结论不可信）。 */
+const slotEntryPath = join(root, contract.clientSlots.repo, 'src/client/index.ts')
+const slotText = readFileSync(slotEntryPath, 'utf8')
+/* G-P4b：§4 此前只做**单方向**检查（遍历登记表，看我方源码里有没有那个字符串），于是
+ *   · 能抓「登记了但源码没消费」（本轮构建链真实拒过：conversation.session.header.utilities）；
+ *   · **抓不到「源码消费了但登记表没有」**——task-62 把抽屉开关注册进 conversation.header.leading
+ *     而 contract.json 未登记时，本门禁**全绿**，会一路绿到发布。
+ * 那个方向的后果不是「多点了一个座位」，而是：上游改该座位的 kind/scope 时，§4b 的声明面判据
+ * 根本不知道要盯它（登记表里没有这条）⇒ 注入层**静默落空**，界面少一块而门禁无话可说。
+ * 因此这里补成双向：以「我方源码的 inject 事实」为集合，与登记表求**对称差集**，两个方向都判红。
+ * 判定严格：不做任何白名单豁免——确有动态注册（非字面量参数）时**单独判红并要求显式登记**，
+ * 因为「忽略某些槽」正是本仓反复出现的假绿形态。 */
+const consumed = collectConsumedSlots()
+if (consumed === null) {
+  skip('我方注入层源码不在场（' + contract.clientSlots.repo + '/src/client）——槽位消费面未执行（双向判据都跳过）')
+} else {
+  const declaredSlots = contract.clientSlots.slots
+  /* 既有方向（登记了但源码未消费）。**文案不变**（既有 15 例自证按它匹配），但判据从
+   * `slotText.includes("'" + slot + "'")` 换成词法抽取出的**消费事实**：
+   * 原文子串匹配会被一句注释满足——`// ctx.slots.inject('x')` 能让「已组合」判绿，
+   * 而那个槽其实没有任何注入。词法化后两个方向共用同一个集合，也因此天然是**对称差**。 */
+  for (const slot of declaredSlots) {
+    if (consumed.slots.includes(slot)) ok('槽位 ' + slot + ' 已组合')
+    else fail('槽位 ' + slot + ' 未组合')
+  }
+  for (const slot of consumed.slots) {
+    if (declaredSlots.includes(slot)) {
+      ok('槽位 ' + slot + ' 已登记（消费面与登记表一致）')
+    } else {
+      fail('槽位 ' + slot + ' 已在我方源码消费（slots.inject）但未登记进 clientSlots.slots：上游改其 kind/scope 时注入层会静默落空、且 §4b 声明面不知道要盯它，请登记')
+    }
+  }
+  // 动态注册（参数不是字面量）不得静默通过：它既无法与登记表对齐，也无法被 §4b 盯住。
+  for (const d of consumed.dynamic) {
+    fail('动态注册的槽位无法与登记表对齐（' + d.file + '）：slots.inject(' + d.snippet + ' —— 请改为字面量槽名，或显式登记并写明 why（不得静默忽略）')
+  }
+  if (consumed.dynamic.length === 0) ok('注入面无非字面量槽名（全部可被登记表与 §4b 盯住）')
 }
 if (contract.clientSlots.ownRoot === false) {
   if (/name:\s*'root'/.test(slotText)) fail("注入层注册了 'root' 槽（框架替换回归）")
@@ -721,6 +876,42 @@ function runContractSelfTest() {
     { label: '§7 静默禁用判红：运行时装成不可满足的 0.0.1-rc.1（每行 peer 都必须被拒）', extra: ['--runtime', '0.0.1-rc.1'], expect: /会被\*\*静默禁用\*\*/ },
     { label: '§9 文档同源判红：文档里的基线字样被抹掉', doc: t => t.split(contract.baseline).join('0.0.0-stale'), expect: /不含当前基线/ },
     { label: '§9 文档同源判红：文档删掉「非权威源」声明（漂移比缺席更危险的那种）', doc: t => t.replace(/非权威源/g, '参考'), expect: /必须显式声明/ },
+    /* ── G-P4b：§4 双向判据的自证（本轮门禁盲区，两个方向各一例）──────────────────
+     * 反例走 `--slots-source` 指向临时「消费面」文件 —— 不动仓库源码，也不依赖 index.ts 的真实内容。
+     * slotsSource 给出「我方源码消费了哪些槽」，与临时登记表求对称差集。 */
+    {
+      label: '§4 双向正例：消费面与登记表一致 == 绿',
+      kind: null,
+      slotsSource: (c) => c.clientSlots.slots.map((s) => "ctx.slots.inject('" + s + "', () => ctx.slots.register({}))").join('\n') + '\n',
+      expect: null,
+    },
+    {
+      label: '§4 双向反例：源码消费了但登记表漏登记 == 红（本轮真盲区）',
+      kind: null,
+      slotsSource: (c) => c.clientSlots.slots.map((s) => "ctx.slots.inject('" + s + "', () => ctx.slots.register({}))").join('\n')
+        + '\nctx.slots.inject(\'conversation.header.trailing\', () => ctx.slots.register({}))\n',
+      expect: /已在我方源码消费（slots\.inject）但未登记/,
+    },
+    {
+      label: '§4 反例：登记了但源码未消费（既有方向不得退化）',
+      kind: null,
+      slotsSource: (c) => c.clientSlots.slots.slice(1).map((s) => "ctx.slots.inject('" + s + "', () => ctx.slots.register({}))").join('\n') + '\n',
+      expect: /槽位 .* 未组合/,
+    },
+    {
+      label: '§4 反例：动态注册（非字面量槽名）不得静默通过',
+      kind: null,
+      slotsSource: (c) => c.clientSlots.slots.map((s) => "ctx.slots.inject('" + s + "', () => ctx.slots.register({}))").join('\n')
+        + '\nctx.slots.inject(slotName, () => ctx.slots.register({}))\n',
+      expect: /动态注册的槽位无法与登记表对齐/,
+    },
+    {
+      label: '§4 反例：注释里的 inject 不算消费（不得被注释骗绿）',
+      kind: null,
+      slotsSource: (c) => c.clientSlots.slots.slice(1).map((s) => "ctx.slots.inject('" + s + "', () => ctx.slots.register({}))").join('\n')
+        + '\n// ctx.slots.inject(\'' + c.clientSlots.slots[0] + '\', () => ctx.slots.register({}))\n',
+      expect: /槽位 .* 未组合/,
+    },
   ]
   let bad = 0
   let inertCount = 0
@@ -733,8 +924,11 @@ function runContractSelfTest() {
     tree: /上游树 |上游声明文件不在场|上游 bundle patch 不在场|槽位全集反向断言未执行|行面不变量未执行|上游树身份未执行/,
     doc: /文档同源性未执行/,
   }
-  const needKind = (label) => label.startsWith('§7') ? 'compat'
-    : label.startsWith('§9') ? 'doc' : /^§[048]/.test(label) ? 'tree' : null
+  /* 用例可显式声明 kind：§4 的双向判据只依赖**我方源码**，不依赖上游 checkout，
+   * 故必须显式 kind:null —— 否则会被按 label 归到 tree 类，在缺 checkout 的布局里
+   * 被当成「本布局未执行」而静默不计自证（新判据反而失去自证，属假绿方向）。 */
+  const needKind = (kase) => kase.kind !== undefined ? kase.kind : (kase.label.startsWith('§7') ? 'compat'
+    : kase.label.startsWith('§9') ? 'doc' : /^§[048]/.test(kase.label) ? 'tree' : null)
   for (const [i, kase] of cases.entries()) {
     const c = structuredClone(pristineContract)
     if (kase.mutate !== undefined) kase.mutate(c)
@@ -744,14 +938,18 @@ function runContractSelfTest() {
     writeFileSync(pPath, kase.profile === undefined ? pristineProfile : kase.profile(pristineProfile))
     const dPath = kase.doc === undefined || pristineDoc === null ? null : join(scratch, 'doc-' + i + '.md')
     if (dPath !== null) writeFileSync(dPath, kase.doc(pristineDoc))
+    // G-P4b：§4 双向判据的取面改道缝——把「我方消费面」写成临时文件（内容由 kase.slotsSource(c) 生成），
+    // 于是「消费了未登记」这类反例不需要动仓库源码。
+    const sPath = kase.slotsSource === undefined ? null : join(scratch, 'slots-' + i + '.ts')
+    if (sPath !== null) writeFileSync(sPath, kase.slotsSource(c))
     const r = spawnSync(process.execPath,
-      [gateFile, '--contract', cPath, '--profile', pPath, ...(dPath === null ? [] : ['--doc', dPath]), ...(kase.extra ?? [])],
+      [gateFile, '--contract', cPath, '--profile', pPath, ...(dPath === null ? [] : ['--doc', dPath]), ...(sPath === null ? [] : ['--slots-source', sPath]), ...(kase.extra ?? [])],
       { encoding: 'utf8' })
     const out = (r.stdout ?? '') + (r.stderr ?? '')
     const firstFail = (out.split(/\r?\n/).find(l => /^\s+FAIL/.test(l)) ?? '').trim()
     /* expect === null 的对照组要求「红不许出现」；其余用例要求「必须红，且红在本判据上」——
      * 只判 exitCode 会被别处的红蒙对，所以这里匹配的是判据文案。 */
-    const kind = needKind(kase.label)
+    const kind = needKind(kase)
     const inert = kase.expect !== null && r.status === 0 && kind !== null && NA_REASONS[kind].test(out)
     const hit = inert ? true
       : kase.expect === null ? (r.status === 0 && !/^\s+FAIL/m.test(out)) : (r.status !== 0 && kase.expect.test(out))

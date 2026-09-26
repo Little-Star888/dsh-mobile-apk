@@ -505,25 +505,28 @@ internal class EngineStartFlow(private val activity: MainActivity) {
             activity.guideRenderer.progressText.visibility = View.VISIBLE
             activity.guideRenderer.progressText.text = "准备写入内嵌环境…"
           }
+          // 0.14.2 P2：阶段文案的轮换序号。只驱动车轱辘话的轮换，不参与任何比例/数字计算。
+          var progressTick = 0
           val ok = activity.engineManager.refreshSnapshot(
-            onProgress = { done, _ ->
+            onProgress = { _, _ ->
               activity.runOnUiThread {
                 if (!isCurrentEngineFlow(generation)) return@runOnUiThread
-                // S1-4：进度**确定化 + 量纲统一**。旧实现只显示「已写入 N MB」且进度条恒为不确定态，
-                // 而状态副文案写的是「约 700MB」——两个数字对不上，用户无法判断还要多久。
-                // 现在 done 与 RUNTIME_UNCOMPRESSED_APPROX_BYTES 同量纲，进度条与文案一起走。
-                activity.guideRenderer.setDeterminateProgress(done, RUNTIME_UNCOMPRESSED_APPROX_BYTES)
-                activity.guideRenderer.progressText.visibility = View.VISIBLE
-                activity.guideRenderer.progressText.text = runtimeProgressLabel(done)
+                // 0.14.2 P2：**不再印任何数字**。旧实现用编造的 700MB 当分母拼
+                // 「已写入 1157 MB / 约 700 MB（99%）」（分子大于分母还报 99%）——真因是分母凭空
+                // 造的，而真实解压是增量的（含磁盘上已有数据）。现在只推进阶段车轱辘话，
+                // 进度条恒为不确定态。回调里的 done/total 仍然收下（接口未变），但不再渲染。
                 if (activity.guideRenderer.lastGuidePhase != GuidePhase.Extracting) {
                   activity.applyGuidePhase(GuidePhase.Extracting, "正在解压运行时")
                 }
+                activity.guideRenderer.showRuntimeStage(progressTick++)
               }
             },
             onStage = { stage ->
               activity.runOnUiThread {
                 if (!isCurrentEngineFlow(generation)) return@runOnUiThread
                 activity.applyGuidePhase(GuidePhase.Extracting, "正在更新运行时")
+                // stage 是 EngineManager 的阶段句（「正在解压运行时…」「正在恢复用户数据…」等），
+                // 本身就是无数字的车轱辘话，直接沿用——不为它另造一套文案，避免两份口径漂移。
                 activity.guideRenderer.progressText.visibility = View.VISIBLE
                 activity.guideRenderer.progressText.text = stage
               }

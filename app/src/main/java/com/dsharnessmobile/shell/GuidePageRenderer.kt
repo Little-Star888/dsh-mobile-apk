@@ -45,42 +45,62 @@ internal enum class HintSource(val priority: Int) {
 internal fun hintAccepted(current: HintSource?, currentSticky: Boolean, incoming: HintSource): Boolean =
   !currentSticky || incoming.priority >= (current?.priority ?: 0)
 
-/**
- * 运行时解压后的**近似**总字节数（S1-4）：**文案与进度条唯一的同一口径来源**。
- *
- * 缺陷现场：副文案写死「约 700MB」，而进度行只显示「已写入 166 MB」——两个数字口径不同
- * （前者=解压后总量，后者=已解压量），用户无法把两者对上，也就无法判断「还要多久」。
- * 现在量纲统一为「已解压字节 / 该常量」，百分比与文案一起变。
- *
- * 为什么是近似值而不是归档里的精确 total：`refreshSnapshot(onProgress)` 给的 total 是
- * **压缩包字节数**，与 done（解压后字节数）不同量纲，直接相除会算出一个偏大且与文案矛盾的百分比
- * （旧注释已经写明这一点）。用常量则是「一个诚实的近似」：文案本来就写着「约」。
- */
-internal const val RUNTIME_UNCOMPRESSED_APPROX_BYTES = 700L * 1024 * 1024
+// ── S1-4 → 0.14.2 P2：进度**不再印任何数字**（用户口径，逐条落地）────────────────
+//
+// 缺陷现场（真机读数）：「已写入 1157 MB / 约 700 MB（99%）」——分子大于分母还报 99%。
+// 真因不是「四舍五入错了」，而是**分母本身是编造的**：旧实现拿
+// `RUNTIME_UNCOMPRESSED_APPROX_BYTES = 700MB` 当总量，而真实解压是**增量的**（既包含本次解压的
+// 新字节，也包含磁盘上已有的旧数据），所以任何固定分母都是在凭空造事实。分子一旦超过这个假
+// 分母，百分比就必然自相矛盾。
+//
+// 用户口径：「不如改成不显示数字，只画一个进度条，然后底下小字就只显示：正在解压，正在处理
+// 残留数据，正在准备运行时这种车轱辘话」。即：
+//   - 数字（「已写入 N MB」/「约 700 MB」/「x%」）**全部下线**；
+//   - 进度条保留，但走**不确定态**（循环动画），不宣称任何比例；
+//   - 底下小字只显示**阶段车轱辘话**——句子里没有数字，因此不可能再出现自相矛盾。
+//
+// 因此 RUNTIME_UNCOMPRESSED_APPROX_BYTES / runtimeProgressPercent / runtimeProgressLabel
+// 三条**一并下线**（编造的分母 + 它的两个派生输出）。这里保留的是它们的位置与理由，
+// 免得下次有人看到「少了个进度百分比」又把它加回来。
 
 /**
- * 解压进度百分比（S1-4，纯函数 JVM 可测）。
+ * 启动页「底下小字」的阶段车轱辘话（0.14.2 P2，纯数据 JVM 可测）。
  *
- * @return 0..99 的百分比；**上限刻意压在 99**（不知道精确总量时不得宣称 100%，那是「已完成」的意思）；
- *   [totalBytes] <= 0 时返回 -1 = 无法判定，调用方据此保持进度条的不确定态。
+ * 三条覆盖解压期的三类阶段：解压本体 / 上次更新留下的残留清理 / 运行时收尾。
+ * **刻意不含任何数字与百分比**——这正是本轮缺陷的修法：只要句子里没有数字，
+ * 就不可能再出现「分子大于分母还报 99%」这种自相矛盾的火星读数。
  */
-internal fun runtimeProgressPercent(doneBytes: Long, totalBytes: Long = RUNTIME_UNCOMPRESSED_APPROX_BYTES): Int =
-  if (totalBytes <= 0) -1 else ((doneBytes.coerceAtLeast(0) * 100) / totalBytes).toInt().coerceIn(0, 99)
+internal val RUNTIME_STAGE_PHRASES: List<String> = listOf(
+  "正在解压运行时…",
+  "正在处理残留数据…",
+  "正在准备运行时…",
+)
 
 /**
- * 解压进度文案（0.14.2 设备实测收尾）。
+ * 按 [tick] 确定地取一条阶段文案（纯函数 JVM 可测）。
  *
- * 缺陷现场：0.14.2 的运行时解压到 1157 MB 时，界面写的是
- * 「已写入 1157 MB / 约 700 MB（99%）」——分子比分母大还报 99%，用户读到的是两个互相打脸的数字。
- * 估算常量本身仍然有用（百分比、进度条），但**文字里不许出现「比总量还大的已写入」**：
- * 一旦超出估算值，就退回只报绝对量。
+ * 为什么需要轮换：解压是长时间单一相位，一句不动的文案会让用户以为界面冻住了；轮换车轱辘话
+ * 只表达「还在动」，不表达「动了多少」——后者正是我们**没有**可信数据的东西。
+ *
+ * @param tick 轮换序号（调用方按进度回调递增；负数也接受，按模归一）。
+ * @returns [RUNTIME_STAGE_PHRASES] 中确定的一条。
  */
-internal fun runtimeProgressLabel(doneBytes: Long, totalBytes: Long = RUNTIME_UNCOMPRESSED_APPROX_BYTES): String {
-  val mb = doneBytes / 1024 / 1024
-  val pct = runtimeProgressPercent(doneBytes, totalBytes)
-  if (pct < 0 || doneBytes > totalBytes) return "已写入 " + mb + " MB"
-  return "已写入 " + mb + " MB / 约 " + (totalBytes / 1024 / 1024) + " MB（" + pct + "%）"
+internal fun runtimeStagePhrase(tick: Int): String {
+  val n = RUNTIME_STAGE_PHRASES.size
+  return RUNTIME_STAGE_PHRASES[((tick % n) + n) % n]
 }
+
+/**
+ * 文案是否**不含**任何数字与百分比（0.14.2 P2 的用户口径判据，纯函数 JVM 可测）。
+ *
+ * 抽成函数而不是在测试里写正则：这样生产侧的「文案纪律」与测试侧是同一个判据，
+ * 将来新增阶段句时也能被同一条断言守住。
+ *
+ * @param text 待检文案。
+ * @returns true = 句中不含任何 ASCII 数字，也不含百分号。
+ */
+internal fun stagePhraseHasNoNumbers(text: String): Boolean =
+  text.none { it in '0'..'9' } && !text.contains('%')
 
 /**
  * 自动回撤不可用时给用户看的一句话（S1-6，纯函数 JVM 可测）。
@@ -119,9 +139,6 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
   // —— S1-2：状态副文案的仲裁状态（唯一写入口 pushHint 维护） ——
   private var hintSource: HintSource? = null
   private var hintSticky = false
-
-  /** S1-4：进度条是否处于确定档（相位切换时据此决定要不要打回不确定态）。 */
-  private var progressDeterminate = false
 
   // —— APK 自更新（0.13.8 批 H）状态：仅手动触发、同一按钮二次确认 ——
   /** 已发现的新版（非空 = 按钮停在「下载并安装 vX」二次确认态，再点才开始下载）。 */
@@ -209,8 +226,10 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
 
     val showProgress = busy
     progressBar.visibility = if (showProgress) View.VISIBLE else View.GONE
-    // S1-4：默认不确定态；流程拿到**同口径**的进度时（setDeterminateProgress）切确定态。
-    if (!progressDeterminate) progressBar.isIndeterminate = true
+    // 0.14.2 P2：进度条**恒为不确定态**。旧实现会在流程给出「同口径的 done/total」时切确定档，
+    // 但那个 total 是编造常数（见上方 P2 说明），于是进度条宣称的比例也是编造的。
+    // 现在只保留循环动画：它如实表达「还在动」，不表达「动了多少百分比」。
+    progressBar.isIndeterminate = true
     if (phase != GuidePhase.Extracting) progressText.visibility = View.GONE
 
     val dotColor = when (phase) {
@@ -258,17 +277,23 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
     phase == GuidePhase.Extracting ||
     phase == GuidePhase.Undoing
 
-  /** S1-4：进度条切确定档（流程知道同口径的 done/total 时调用；total<=0 回不确定态）。 */
-  fun setDeterminateProgress(doneBytes: Long, totalBytes: Long) {
-    val pct = runtimeProgressPercent(doneBytes, totalBytes)
-    progressDeterminate = pct >= 0
-    progressBar.isIndeterminate = pct < 0
-    if (pct >= 0) progressBar.progress = pct
+  /**
+   * 0.14.2 P2：进度回调的**唯一**写入口——只写阶段车轱辘话，不写数字、不切确定档。
+   *
+   * 旧实现这里有两个方法（一个切确定档、一个拼「已写入 N MB / 约 700 MB（x%）」文案），
+   * 两者共用一个编造的分母。现在收敛成一个只表达「在动」的入口：
+   * 进度条恒为不确定态，文案只按 [tick] 轮换 [RUNTIME_STAGE_PHRASES]。
+   *
+   * @param tick 轮换序号（调用方按进度回调递增即可，无需任何字节数）。
+   */
+  fun showRuntimeStage(tick: Int) {
+    progressBar.isIndeterminate = true
+    progressText.visibility = View.VISIBLE
+    progressText.text = runtimeStagePhrase(tick)
   }
 
   private fun defaultHint(phase: GuidePhase): String = when (phase) {
     GuidePhase.Starting -> "首次启动会解压内嵌运行时，请保持应用在前台。"
-    // S1-4：句中的体量由**常量**渲染，不再是与进度条各自为政的字面量「约 700MB」。
     GuidePhase.Extracting -> extractHintBody()
     GuidePhase.Updating -> "下载并校验快照后会自动切换运行时。"
     GuidePhase.Recovering -> "看门狗正在拉起引擎，通常几秒内恢复。"
@@ -279,10 +304,15 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
     GuidePhase.Info -> "运行时随安装包一起更新：安装新版 APK 即完成升级。"
   }
 
-  /** 解压相位文案（体量与进度条同源；见 RUNTIME_UNCOMPRESSED_APPROX_BYTES）。 */
+  /**
+   * 解压相位文案（0.14.2 P2）：不再印任何体量数字。
+   *
+   * 旧实现写的是「正在写入内嵌 Termux 环境，约 700MB，需数分钟，请勿关闭应用。」——那个 700MB
+   * 就是被下线的编造常数。真实解压量是增量的（含磁盘上已有数据），界面无从知道总量，
+   * 所以这里只给「别关应用」这个用户真正需要知道的事。
+   */
   private fun extractHintBody(): String =
-    "正在写入内嵌 Termux 环境，约 " + (RUNTIME_UNCOMPRESSED_APPROX_BYTES / 1024 / 1024) +
-      "MB，需数分钟，请勿关闭应用。"
+    "正在写入内嵌 Termux 环境（首次启动需数分钟，请勿关闭应用）。"
 
   private fun setStatusPulse(on: Boolean) {
     if (on) {
